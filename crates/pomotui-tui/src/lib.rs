@@ -1314,21 +1314,21 @@ fn truncate(value: &str, maximum: usize) -> String {
 
 fn big_clock(value: &str) -> Vec<String> {
     const DIGITS: [[&str; 5]; 10] = [
-        ["███", "█ █", "█ █", "█ █", "███"],
-        [" ██", "  █", "  █", "  █", "███"],
-        ["███", "  █", "███", "█  ", "███"],
-        ["███", "  █", " ██", "  █", "███"],
-        ["█ █", "█ █", "███", "  █", "  █"],
-        ["███", "█  ", "███", "  █", "███"],
-        ["███", "█  ", "███", "█ █", "███"],
-        ["███", "  █", "  █", "  █", "  █"],
-        ["███", "█ █", "███", "█ █", "███"],
-        ["███", "█ █", "███", "  █", "███"],
+        ["█████", "██ ██", "██ ██", "██ ██", "█████"],
+        ["  ██ ", " ███ ", "  ██ ", "  ██ ", "█████"],
+        ["█████", "   ██", "█████", "██   ", "█████"],
+        ["█████", "   ██", " ████", "   ██", "█████"],
+        ["██ ██", "██ ██", "█████", "   ██", "   ██"],
+        ["█████", "██   ", "█████", "   ██", "█████"],
+        ["█████", "██   ", "█████", "██ ██", "█████"],
+        ["█████", "   ██", "  ██ ", " ██  ", "██   "],
+        ["█████", "██ ██", "█████", "██ ██", "█████"],
+        ["█████", "██ ██", "█████", "   ██", "█████"],
     ];
     let mut rows = vec![String::new(); 5];
     for character in value.chars() {
         let glyph = if character == ':' {
-            ["   ", " █ ", "   ", " █ ", "   "]
+            ["     ", "  █  ", "     ", "  █  ", "     "]
         } else {
             DIGITS[character.to_digit(10).unwrap_or(0) as usize]
         };
@@ -1415,6 +1415,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn large_countdown_digits_use_a_balanced_five_column_canvas() {
+        let one = big_clock("1");
+        assert_eq!(
+            one,
+            ["  ██ ", " ███ ", "  ██ ", "  ██ ", "█████"],
+            "the large 1 must have a base and shoulder instead of a thin stroke"
+        );
+        assert!(
+            big_clock("25:00")
+                .iter()
+                .all(|row| row.chars().count() == 29),
+            "five glyphs and their separators must have stable geometry"
+        );
     }
 
     #[test]
