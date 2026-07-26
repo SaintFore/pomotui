@@ -9,9 +9,11 @@ History, commands, settings, and mouse targets without clutter.
 
 Use the **Timer First** direction for the Dashboard:
 
-- Wide terminals place Tasks on the left, a large Current Session countdown in
-  the center, and today's statistics on the right.
-- Narrow terminals stack the countdown over Tasks. Today's statistics and
+- Wide terminals place Tasks and Today side by side across the top, with a
+  large full-width Current Session countdown below. This prevents Task titles
+  and accumulated time from being truncated and gives the countdown room to
+  breathe.
+- Narrow terminals stack Tasks over the countdown. Today's statistics and
   recent Session History become separate views instead of compressed panels.
 - Keep Current Task, attributed focus time, Focus Cycle position, and the next
   Pending Session close to the countdown.
@@ -21,13 +23,11 @@ Use the **Timer First** direction for the Dashboard:
 - Paused and Pending Sessions share warm gold but require explicit labels.
   Break Sessions use a derived green token. Focus and primary actions use the
   signature Vermilion token.
+- Today includes a compact seven-day trend and its numeric average.
 
-Three visual questions remain open for the product spec:
+One visual question remains open for the product spec:
 
-1. Whether narrow Dashboard shows a short Task list or only the countdown.
-2. Whether completed-session presentation dismisses itself or waits for input.
-3. Whether today's statistics need a seven-day sparkline; the numeric average
-   was sufficient in this prototype.
+1. Whether completed-session presentation dismisses itself or waits for input.
 
 ## Primary source
 
@@ -35,5 +35,5 @@ The complete disposable prototype, deterministic fixtures, findings, and
 wide/narrow SVG snapshots are preserved outside `main`:
 
 - Branch: `prototype/pomotui-dashboard`
-- Commit: `9444604` (`prototype: explore Pomotui dashboard layouts`)
-
+- Initial commit: `9444604` (`prototype: explore Pomotui dashboard layouts`)
+- Feedback revision: `fd01ff7`
