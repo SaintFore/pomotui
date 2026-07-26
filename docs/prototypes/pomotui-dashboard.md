@@ -32,6 +32,30 @@ Use the **Timer First** direction for the Dashboard:
   animation is a Timer Frontend effect; the Pending Session never starts
   automatically.
 
+## Completion animation seam
+
+Completion animation is a data-driven module, not hard-coded Dashboard
+rendering. Its interface accepts elapsed time and returns the character-art
+frame to render plus whether the transition has finished. It hides animation
+loading, validation, timing, and fallback from the Dashboard.
+
+Production has two Adapters at this seam:
+
+- The built-in building-collapse animation shipped with Pomotui.
+- A user-provided animation file selected through TOML settings.
+
+The prototype validated a small editable animation-file interface containing:
+
+- `frame_ms`: duration of each frame.
+- `hold_frames`: how long to retain the final frame.
+- Fixed-canvas character-art frames separated by `---`.
+
+Production must validate nonzero timing, at least one frame, terminal-safe text,
+and reasonable frame/canvas limits. An invalid user file falls back visibly to
+the built-in animation; it must never affect Session completion or the next
+Pending Session. Loading and animation playback remain Timer Frontend concerns,
+not Timer Service protocol concepts.
+
 ## Primary source
 
 The complete disposable prototype, deterministic fixtures, findings, and
@@ -42,3 +66,4 @@ wide/narrow SVG snapshots are preserved outside `main`:
 - Feedback revision: `fd01ff7`
 - Navigation and completion transition: `f05828c`
 - Direct, clock-driven animation preview (`C`): `2148cf2`
+- Data-driven animation file interface: `99c4d2a`
