@@ -41,3 +41,4 @@ wide/narrow SVG snapshots are preserved outside `main`:
 - Initial commit: `9444604` (`prototype: explore Pomotui dashboard layouts`)
 - Feedback revision: `fd01ff7`
 - Navigation and completion transition: `f05828c`
+- Direct, clock-driven animation preview (`C`): `2148cf2`
