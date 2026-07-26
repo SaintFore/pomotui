@@ -113,8 +113,12 @@ esac
 install_home="$tmp_root/home"
 install_prefix="$tmp_root/prefix"
 install_config="$tmp_root/install-config"
-mkdir -p "$install_home" "$install_config"
+install_data="$tmp_root/install-data"
+install_runtime="$tmp_root/install-runtime"
+mkdir -p "$install_home" "$install_config" "$install_data/pomotui" \
+  "$install_runtime/pomotui"
 HOME="$install_home" PREFIX="$install_prefix" XDG_CONFIG_HOME="$install_config" \
+  XDG_DATA_HOME="$install_data" XDG_RUNTIME_DIR="$install_runtime" \
   packaging/install.sh >/dev/null
 test -x "$install_prefix/bin/pomotui"
 test -x "$install_prefix/bin/pomotui-tui"
@@ -122,8 +126,29 @@ test -x "$install_prefix/bin/pomotui-service"
 test -f "$install_config/systemd/user/pomotui.socket"
 test -f "$install_prefix/share/pomotui/building-collapse.animation"
 printf '%s\n' "user_setting = true" >"$install_config/pomotui/config.toml"
+printf '%s\n' "history" >"$install_data/pomotui/pomotui.sqlite3"
+printf '%s\n' "socket" >"$install_runtime/pomotui/pomotui.sock"
 HOME="$install_home" PREFIX="$install_prefix" XDG_CONFIG_HOME="$install_config" \
+  XDG_DATA_HOME="$install_data" XDG_RUNTIME_DIR="$install_runtime" \
   packaging/install.sh >/dev/null
 test "$(cat "$install_config/pomotui/config.toml")" = "user_setting = true"
+
+HOME="$install_home" PREFIX="$install_prefix" XDG_CONFIG_HOME="$install_config" \
+  XDG_DATA_HOME="$install_data" XDG_RUNTIME_DIR="$install_runtime" \
+  POMOTUI_SKIP_SYSTEMD=1 packaging/uninstall.sh >/dev/null
+test ! -e "$install_prefix/bin/pomotui"
+test ! -e "$install_prefix/bin/pomotui-tui"
+test ! -e "$install_prefix/bin/pomotui-service"
+test ! -e "$install_config/systemd/user/pomotui.socket"
+test ! -e "$install_prefix/share/pomotui"
+test -f "$install_config/pomotui/config.toml"
+test -f "$install_data/pomotui/pomotui.sqlite3"
+test ! -e "$install_runtime/pomotui"
+
+HOME="$install_home" PREFIX="$install_prefix" XDG_CONFIG_HOME="$install_config" \
+  XDG_DATA_HOME="$install_data" XDG_RUNTIME_DIR="$install_runtime" \
+  POMOTUI_SKIP_SYSTEMD=1 packaging/uninstall.sh --purge >/dev/null
+test ! -e "$install_config/pomotui"
+test ! -e "$install_data/pomotui"
 
 printf '%s\n' "Pomotui end-to-end smoke test passed"

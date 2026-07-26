@@ -15,6 +15,25 @@ Pomotui uses `$XDG_RUNTIME_DIR/pomotui/pomotui.sock`,
 `$XDG_DATA_HOME/pomotui/pomotui.sqlite3`, and
 `$XDG_CONFIG_HOME/pomotui/config.toml` (with standard home-directory fallbacks).
 
+## Uninstall
+
+Run `packaging/uninstall.sh` from the source checkout. It stops and disables the
+user service, removes installed programs and assets, and preserves configuration
+and Session History by default:
+
+```sh
+packaging/uninstall.sh
+```
+
+To remove configuration and Session History as well:
+
+```sh
+packaging/uninstall.sh --purge
+```
+
+Use the same `PREFIX`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` values that were
+used during installation when they differ from their defaults.
+
 ## CLI and Waybar
 
 Use `pomotui start focus`, `pause`, `resume`, `stop`, or `skip`. Task commands
