@@ -39,6 +39,10 @@ systemctl --user status pomotui.socket
 
 The installer preserves an existing user configuration.
 
+After installation, desktop application launchers can find **Pomotui** (or
+**Pomotui 番茄钟** in a Simplified Chinese locale). Opening it starts the TUI in
+the desktop's configured terminal.
+
 ## Use the TUI
 
 ```sh

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Pomotui
+Name[zh_CN]=Pomotui 番茄钟
+Comment=Focus timer and task tracker
+Comment[zh_CN]=专注计时与任务追踪
+Keywords=Pomodoro;Timer;Focus;Tasks;
+Keywords[zh_CN]=番茄钟;计时器;专注;任务;
+Exec=@EXEC@
+TryExec=@TRY_EXEC@
+Terminal=true
+Categories=Utility;Clock;
+StartupNotify=false

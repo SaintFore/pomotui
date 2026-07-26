@@ -46,6 +46,7 @@ rm -f \
   "$config_home/systemd/user/pomotui.socket" \
   "$config_home/systemd/user/pomotui.service"
 rm -rf "$prefix/share/pomotui" "$prefix/share/licenses/pomotui"
+rm -f "$data_home/applications/pomotui.desktop"
 rm -rf "$runtime_home/pomotui"
 
 if [ "$purge" = true ]; then

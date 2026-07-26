@@ -125,6 +125,10 @@ test -x "$install_prefix/bin/pomotui-tui"
 test -x "$install_prefix/bin/pomotui-service"
 test -f "$install_config/systemd/user/pomotui.socket"
 test -f "$install_prefix/share/pomotui/building-collapse.animation"
+test -f "$install_data/applications/pomotui.desktop"
+grep -F "Exec=$install_prefix/bin/pomotui-tui" \
+  "$install_data/applications/pomotui.desktop" >/dev/null
+grep -F "Terminal=true" "$install_data/applications/pomotui.desktop" >/dev/null
 printf '%s\n' "user_setting = true" >"$install_config/pomotui/config.toml"
 printf '%s\n' "history" >"$install_data/pomotui/pomotui.sqlite3"
 printf '%s\n' "socket" >"$install_runtime/pomotui/pomotui.sock"
@@ -141,6 +145,7 @@ test ! -e "$install_prefix/bin/pomotui-tui"
 test ! -e "$install_prefix/bin/pomotui-service"
 test ! -e "$install_config/systemd/user/pomotui.socket"
 test ! -e "$install_prefix/share/pomotui"
+test ! -e "$install_data/applications/pomotui.desktop"
 test -f "$install_config/pomotui/config.toml"
 test -f "$install_data/pomotui/pomotui.sqlite3"
 test ! -e "$install_runtime/pomotui"
