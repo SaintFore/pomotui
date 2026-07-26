@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use pomotui_protocol::{Client, Command};
-use pomotui_tui::{Action, App, Theme, render};
+use pomotui_tui::{Action, App, InputKey, Theme, render};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::time::Duration;
 
@@ -76,24 +76,29 @@ fn run(
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let character = match key.code {
-                    KeyCode::Char(value) if config.keybindings.quit.starts_with(value) => {
-                        break;
+                let input = match key.code {
+                    KeyCode::Char(value) => {
+                        Some(InputKey::Char(canonical_key(value, &config.keybindings)))
                     }
-                    KeyCode::Char(value) => Some(canonical_key(value, &config.keybindings)),
-                    KeyCode::Up => Some('↑'),
-                    KeyCode::Down => Some('↓'),
-                    KeyCode::Left => Some('h'),
-                    KeyCode::Right => Some('l'),
+                    KeyCode::Esc => Some(InputKey::Escape),
+                    KeyCode::Enter => Some(InputKey::Enter),
+                    KeyCode::Backspace => Some(InputKey::Backspace),
+                    KeyCode::Up => Some(InputKey::Up),
+                    KeyCode::Down => Some(InputKey::Down),
+                    KeyCode::Left => Some(InputKey::Left),
+                    KeyCode::Right => Some(InputKey::Right),
                     _ => None,
                 };
-                if let Some(action) = character.and_then(|value| app.key(value)) {
-                    send_action(&mut client, &app, action);
+                if let Some(action) = input.and_then(|value| app.handle_key(value)) {
+                    if action == Action::Quit {
+                        break;
+                    }
+                    send_action(&mut client, &mut app, action);
                 }
             }
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(event::MouseButton::Left) => {
                 if let Some(action) = app.mouse_click(mouse.column, mouse.row) {
-                    send_action(&mut client, &app, action);
+                    send_action(&mut client, &mut app, action);
                 }
             }
             _ => {}
@@ -114,6 +119,7 @@ fn canonical_key(value: char, keys: &pomotui_tui::config::Keybindings) -> char {
         (&keys.palette, ':'),
         (&keys.settings, 's'),
         (&keys.help, '?'),
+        (&keys.quit, 'q'),
     ] {
         if configured.starts_with(value) {
             return canonical;
@@ -152,42 +158,35 @@ fn read_snapshot(client: Option<&mut Client>) -> Option<pomotui_protocol::Snapsh
     }
 }
 
-fn send(client: &mut Option<Client>, command: Command) {
-    if let Some(client) = client {
-        let _response = client.request(&pomotui_cli_request(command));
-    }
-}
-
-fn send_action(client: &mut Option<Client>, app: &App, action: Action) {
-    let command = match action {
-        Action::Skip => Command::Skip,
-        Action::Stop => Command::Stop,
-        Action::ToggleSession => match app
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.state.as_str())
-        {
-            Some("running") => Command::Pause,
-            Some("paused") => Command::Resume,
-            Some("pending") => Command::Start {
-                kind: app
-                    .snapshot
-                    .as_ref()
-                    .map_or(pomotui_protocol::SessionKind::Focus, |snapshot| {
-                        snapshot.kind.clone()
-                    }),
-                task_id: app.snapshot.as_ref().and_then(|snapshot| {
-                    if snapshot.kind == pomotui_protocol::SessionKind::Focus {
-                        snapshot.tasks.get(app.selected_task).map(|task| task.id)
-                    } else {
-                        None
-                    }
-                }),
-            },
-            _ => return,
-        },
+fn send_action(client: &mut Option<Client>, app: &mut App, action: Action) {
+    let Action::Command(command) = action else {
+        return;
     };
-    send(client, command);
+    let Some(connection) = client else {
+        app.message = Some("Timer Service unavailable; reconnecting".into());
+        return;
+    };
+    match connection.request(&pomotui_cli_request(command)) {
+        Ok(pomotui_protocol::Response::Accepted) => {
+            app.message = Some("Command accepted".into());
+            app.snapshot = read_snapshot(Some(connection));
+        }
+        Ok(pomotui_protocol::Response::Snapshot { snapshot }) => {
+            app.snapshot = Some(snapshot);
+            app.message = Some("State refreshed".into());
+        }
+        Ok(pomotui_protocol::Response::Error { error }) => {
+            app.message = Some(format!("Command rejected: {error:?}"));
+        }
+        Ok(pomotui_protocol::Response::Data { .. }) => {
+            app.message = Some("Command completed".into());
+            app.snapshot = read_snapshot(Some(connection));
+        }
+        Err(error) => {
+            app.message = Some(format!("Timer Service unavailable: {error}"));
+            *client = None;
+        }
+    }
 }
 
 fn pomotui_cli_request(command: Command) -> pomotui_protocol::Request {

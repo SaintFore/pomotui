@@ -55,8 +55,15 @@ Waybar custom-module example:
 
 ## TUI
 
-Use arrows or `j/k` for Tasks, arrows or `h/l` for views, `K` to skip, `:` for
-the command palette, `s` for settings, `?` for help, and `q` to quit.
+Use arrows or `j/k` for Tasks and arrows or `h/l` for Dashboard, Today, and
+History. Press `Enter` to start Focus with the selected Task, `Space` to
+start/pause/resume, `X` to stop, and `K` to skip.
+
+Task management is available without leaving the TUI: `n` creates, `r` renames,
+`c` completes or reopens, and uppercase `D` deletes after confirmation. `:`
+opens the executable command palette, `?` opens the complete key reference, `s`
+opens settings, `Esc` closes any overlay, and `q` quits the TUI without stopping
+the Timer Service.
 
 Set `sound = "builtin:complete"` for the standard freedesktop completion sound,
 or set `sound` to a local audio-file path. Sound and desktop-notification
