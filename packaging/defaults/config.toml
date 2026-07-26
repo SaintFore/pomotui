@@ -3,6 +3,7 @@ short_break_minutes = 5
 long_break_minutes = 15
 rounds_per_cycle = 4
 theme = "Vermilion Paper Dark"
+language = "en"
 reminder_enabled = true
 volume = 100
 # sound = "builtin:complete"

@@ -11,6 +11,7 @@ pub struct Config {
     pub long_break_minutes: u16,
     pub rounds_per_cycle: u8,
     pub theme: String,
+    pub language: String,
     pub reminder_enabled: bool,
     pub sound: Option<PathBuf>,
     pub volume: u8,
@@ -60,6 +61,7 @@ impl Default for Config {
             long_break_minutes: 15,
             rounds_per_cycle: 4,
             theme: "Vermilion Paper Dark".into(),
+            language: "en".into(),
             reminder_enabled: true,
             sound: None,
             volume: 100,
@@ -91,6 +93,9 @@ pub fn parse(source: &str) -> Result<Config, String> {
         "Vermilion Paper Light" | "Vermilion Paper Dark"
     ) {
         return Err("theme must be Vermilion Paper Light or Vermilion Paper Dark".into());
+    }
+    if !matches!(config.language.as_str(), "en" | "zh-CN") {
+        return Err("language must be en or zh-CN".into());
     }
     for (name, key) in [
         ("keybindings.down", &config.keybindings.down),
@@ -148,6 +153,11 @@ mod tests {
             parse("theme = \"blue\"")
                 .expect_err("theme")
                 .contains("theme")
+        );
+        assert!(
+            parse("language = \"fr\"")
+                .expect_err("language")
+                .contains("language")
         );
     }
 }

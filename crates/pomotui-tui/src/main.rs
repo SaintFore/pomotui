@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use pomotui_protocol::{Client, Command};
-use pomotui_tui::{Action, App, InputKey, Theme, render};
+use pomotui_tui::{Action, App, InputKey, Language, Theme, render};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::time::Duration;
 
@@ -54,6 +54,11 @@ fn run(
         },
     );
     let mut app = App::new(read_snapshot(client.as_mut()), theme);
+    app.language = if config.language == "zh-CN" {
+        Language::SimplifiedChinese
+    } else {
+        Language::English
+    };
     app.warning = warning;
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
@@ -129,22 +134,55 @@ fn canonical_key(value: char, keys: &pomotui_tui::config::Keybindings) -> char {
 }
 
 fn load_config() -> Result<pomotui_tui::config::Config, Box<dyn std::error::Error>> {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
-        || {
-            std::env::var_os("HOME").map_or_else(
-                || std::path::PathBuf::from(".config"),
-                |home| std::path::PathBuf::from(home).join(".config"),
-            )
-        },
-        std::path::PathBuf::from,
-    );
-    match std::fs::read_to_string(config_home.join("pomotui/config.toml")) {
+    match std::fs::read_to_string(config_path()) {
         Ok(source) => pomotui_tui::config::parse(&source).map_err(Into::into),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(pomotui_tui::config::Config::default())
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn config_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map_or_else(
+            || {
+                std::env::var_os("HOME").map_or_else(
+                    || std::path::PathBuf::from(".config"),
+                    |home| std::path::PathBuf::from(home).join(".config"),
+                )
+            },
+            std::path::PathBuf::from,
+        )
+        .join("pomotui/config.toml")
+}
+
+fn persist_language(language: Language) -> std::io::Result<()> {
+    let path = config_path();
+    let value = match language {
+        Language::English => "en",
+        Language::SimplifiedChinese => "zh-CN",
+    };
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut found = false;
+    let mut lines = source
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("language =") {
+                found = true;
+                format!("language = \"{value}\"")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        lines.insert(0, format!("language = \"{value}\""));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("{}\n", lines.join("\n")))
 }
 
 fn read_snapshot(client: Option<&mut Client>) -> Option<pomotui_protocol::Snapshot> {
@@ -159,6 +197,17 @@ fn read_snapshot(client: Option<&mut Client>) -> Option<pomotui_protocol::Snapsh
 }
 
 fn send_action(client: &mut Option<Client>, app: &mut App, action: Action) {
+    if let Action::SetLanguage(language) = action {
+        app.message = Some(if persist_language(language).is_ok() {
+            match language {
+                Language::English => "Language saved".into(),
+                Language::SimplifiedChinese => "语言设置已保存".into(),
+            }
+        } else {
+            "Could not save language setting".into()
+        });
+        return;
+    }
     let Action::Command(command) = action else {
         return;
     };

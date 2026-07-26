@@ -67,6 +67,8 @@ terminals. Its primary controls are:
 | `q` | Close the TUI without stopping the Timer Service |
 
 Task deletion requires confirmation and never deletes existing Session History.
+In Settings, press `g` to switch between English and Simplified Chinese; the
+selection is saved to the user configuration.
 
 ## Use the CLI
 
@@ -136,7 +138,8 @@ Pomotui follows the XDG base-directory conventions:
 | Runtime socket | `$XDG_RUNTIME_DIR/pomotui/pomotui.sock` |
 
 Configuration covers Session durations, rounds per Focus Cycle, theme,
-notifications, sound, volume, and completion animation.
+interface language (`en` or `zh-CN`), notifications, sound, volume, and
+completion animation.
 
 For backup and restore guidance, see the
 [user guide](docs/user-guide.md#backup-and-restore).

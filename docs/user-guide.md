@@ -55,6 +55,10 @@ Waybar custom-module example:
 
 ## TUI
 
+Press `g` in Settings to switch between English and Simplified Chinese and save
+the choice. The equivalent configuration values are `language = "en"` and
+`language = "zh-CN"`.
+
 Use arrows or `j/k` for Tasks and arrows or `h/l` for Dashboard, Today, and
 History. Press `Enter` to start Focus with the selected Task, `Space` to
 start/pause/resume, `X` to stop, and `K` to skip.

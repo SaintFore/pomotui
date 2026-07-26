@@ -17,6 +17,12 @@ pub enum Theme {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Language {
+    English,
+    SimplifiedChinese,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum View {
     Dashboard,
     Today,
@@ -49,12 +55,14 @@ pub enum InputKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
     Command(pomotui_protocol::Command),
+    SetLanguage(Language),
     Quit,
 }
 
 pub struct App {
     pub snapshot: Option<Snapshot>,
     pub theme: Theme,
+    pub language: Language,
     pub view: View,
     pub overlay: Overlay,
     pub selected_task: usize,
@@ -77,6 +85,7 @@ impl App {
         Self {
             snapshot,
             theme,
+            language: Language::English,
             view: View::Dashboard,
             overlay: Overlay::None,
             selected_task: 0,
@@ -165,6 +174,13 @@ impl App {
                         Theme::VermilionPaperDark => Theme::VermilionPaperLight,
                     };
                 }
+                if key == InputKey::Char('g') {
+                    self.language = match self.language {
+                        Language::English => Language::SimplifiedChinese,
+                        Language::SimplifiedChinese => Language::English,
+                    };
+                    return Some(Action::SetLanguage(self.language));
+                }
                 None
             }
             Overlay::Help | Overlay::None => None,
@@ -228,7 +244,14 @@ impl App {
     fn submit_text_entry(&mut self) -> Option<Action> {
         let title = self.input.trim().to_owned();
         if title.is_empty() {
-            self.message = Some("Task title cannot be empty".into());
+            self.message = Some(
+                text(
+                    self.language,
+                    "Task title cannot be empty",
+                    "任务标题不能为空",
+                )
+                .into(),
+            );
             return None;
         }
         let command = match self.overlay {
@@ -493,6 +516,29 @@ const PALETTE_ITEMS: [PaletteItem; 15] = [
     },
 ];
 
+fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
+    if language == Language::English {
+        return item.label;
+    }
+    match item.command {
+        PaletteCommand::Toggle => "开始 / 暂停 / 继续当前时段",
+        PaletteCommand::Stop => "停止当前时段",
+        PaletteCommand::Skip => "跳过当前时段",
+        PaletteCommand::StartFocus => "用所选任务开始专注",
+        PaletteCommand::StartFocusWithoutTask => "无任务开始专注",
+        PaletteCommand::StartShortBreak => "开始短休息",
+        PaletteCommand::StartLongBreak => "开始长休息",
+        PaletteCommand::CreateTask => "新建任务…",
+        PaletteCommand::RenameTask => "重命名任务…",
+        PaletteCommand::CompleteTask => "完成 / 重新打开任务",
+        PaletteCommand::DeleteTask => "删除任务…",
+        PaletteCommand::Today => "打开今日汇总",
+        PaletteCommand::History => "打开时段历史",
+        PaletteCommand::Settings => "打开设置",
+        PaletteCommand::Help => "打开帮助",
+    }
+}
+
 const fn next_view(view: View) -> View {
     match view {
         View::Dashboard => View::Today,
@@ -526,8 +572,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     header(frame, rows[0], app, colors);
     match app.view {
         View::Dashboard => dashboard(frame, rows[1], app, colors),
-        View::Today => today_view(frame, rows[1], app.snapshot.as_ref(), colors),
-        View::History => history_view(frame, rows[1], app.snapshot.as_ref(), colors),
+        View::Today => today_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
+        View::History => history_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
     }
     footer(frame, rows[2], app, colors);
     render_overlay(frame, area, app, colors);
@@ -544,15 +590,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                Line::from("Completed Round recorded"),
+                Line::from(text(
+                    app.language,
+                    "Completed Round recorded",
+                    "已记录完成轮次",
+                )),
                 Line::from(Span::styled(
-                    "The next Pending Session waits for Start",
+                    text(
+                        app.language,
+                        "The next Pending Session waits for Start",
+                        "下一时段等待手动开始",
+                    ),
                     Style::default().fg(colors.muted),
                 )),
             ])
             .alignment(Alignment::Center)
             .block(
-                panel("SESSION COMPLETE", colors).border_style(Style::default().fg(colors.accent)),
+                panel(text(app.language, "SESSION COMPLETE", "时段完成"), colors)
+                    .border_style(Style::default().fg(colors.accent)),
             ),
             modal,
         );
@@ -566,10 +621,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
-    let session = app
-        .snapshot
-        .as_ref()
-        .map_or("RECONNECTING", |snapshot| session_heading(snapshot));
+    let session = app.snapshot.as_ref().map_or(
+        text(app.language, "RECONNECTING", "正在重连"),
+        |snapshot| session_heading(snapshot, app.language),
+    );
     let title = if area.width >= 72 {
         format!(
             " POMOTUI  •  {session}  │  {}",
@@ -606,8 +661,16 @@ fn dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             app.selected_task,
             colors,
             true,
+            app.language,
         );
-        timer_panel(frame, rows[1], app.snapshot.as_ref(), colors, true);
+        timer_panel(
+            frame,
+            rows[1],
+            app.snapshot.as_ref(),
+            colors,
+            true,
+            app.language,
+        );
     } else {
         let rows = Layout::vertical([Constraint::Length(10), Constraint::Min(12)]).split(inner);
         let top = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -619,9 +682,17 @@ fn dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             app.selected_task,
             colors,
             false,
+            app.language,
         );
-        today_panel(frame, top[1], app.snapshot.as_ref(), colors);
-        timer_panel(frame, rows[1], app.snapshot.as_ref(), colors, false);
+        today_panel(frame, top[1], app.snapshot.as_ref(), colors, app.language);
+        timer_panel(
+            frame,
+            rows[1],
+            app.snapshot.as_ref(),
+            colors,
+            false,
+            app.language,
+        );
     }
 }
 
@@ -657,12 +728,17 @@ fn tasks_panel(
     selected: usize,
     colors: Colors,
     narrow: bool,
+    language: Language,
 ) {
     let Some(snapshot) = snapshot else {
         frame.render_widget(
-            Paragraph::new("Waiting for Timer Service")
-                .block(panel("TASKS", colors))
-                .style(Style::default().fg(colors.muted)),
+            Paragraph::new(text(
+                language,
+                "Waiting for Timer Service",
+                "正在等待计时服务",
+            ))
+            .block(panel(text(language, "TASKS", "任务"), colors))
+            .style(Style::default().fg(colors.muted)),
             area,
         );
         return;
@@ -697,24 +773,40 @@ fn tasks_panel(
         .collect::<Vec<_>>();
     let items = if items.is_empty() {
         vec![
-            ListItem::new("No Tasks · press n to create one")
-                .style(Style::default().fg(colors.muted)),
+            ListItem::new(text(
+                language,
+                "No Tasks · press n to create one",
+                "暂无任务 · 按 n 新建",
+            ))
+            .style(Style::default().fg(colors.muted)),
         ]
     } else {
         items
     };
     frame.render_widget(
         List::new(items).block(panel(
-            "TASKS  ↑↓ select · Enter start · n new · : all actions",
+            text(
+                language,
+                "TASKS  ↑↓ select · Enter start · n new · : all actions",
+                "任务  ↑↓ 选择 · Enter 开始 · n 新建 · : 全部操作",
+            ),
             colors,
         )),
         area,
     );
 }
 
-fn today_lines(snapshot: Option<&Snapshot>, colors: Colors) -> Vec<Line<'static>> {
+fn today_lines(
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) -> Vec<Line<'static>> {
     let Some(snapshot) = snapshot else {
-        return vec![Line::from("Waiting for Timer Service")];
+        return vec![Line::from(text(
+            language,
+            "Waiting for Timer Service",
+            "正在等待计时服务",
+        ))];
     };
     let touched = snapshot
         .tasks
@@ -728,23 +820,29 @@ fn today_lines(snapshot: Option<&Snapshot>, colors: Colors) -> Vec<Line<'static>
                 .fg(colors.gold)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("focus today"),
+        Line::from(text(language, "focus today", "今日专注")),
         Line::from(""),
         Line::from(format!(
-            "{} Completed Rounds",
-            snapshot.today.completed_rounds
+            "{} {}",
+            snapshot.today.completed_rounds,
+            text(language, "Completed Rounds", "已完成轮次")
         )),
-        Line::from(format!("{touched} Tasks touched")),
+        Line::from(format!(
+            "{touched} {}",
+            text(language, "Tasks touched", "个任务")
+        )),
         Line::from(vec![
             Span::styled(
                 trend(snapshot.today.seven_day_focus_seconds),
                 Style::default().fg(colors.gold),
             ),
-            Span::raw("  7-day trend"),
+            Span::raw(text(language, "  7-day trend", "  7 天趋势")),
         ]),
         Line::from(Span::styled(
             format!(
-                "M T W T F S S  ·  avg {}",
+                "{}  ·  {} {}",
+                text(language, "M T W T F S S", "一 二 三 四 五 六 日"),
+                text(language, "avg", "平均"),
                 human_duration(snapshot.today.average_focus_seconds)
             ),
             Style::default().fg(colors.muted),
@@ -752,23 +850,42 @@ fn today_lines(snapshot: Option<&Snapshot>, colors: Colors) -> Vec<Line<'static>
     ]
 }
 
-fn today_panel(frame: &mut Frame<'_>, area: Rect, snapshot: Option<&Snapshot>, colors: Colors) {
+fn today_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) {
     frame.render_widget(
-        Paragraph::new(today_lines(snapshot, colors))
-            .block(panel("TODAY", colors))
+        Paragraph::new(today_lines(snapshot, colors, language))
+            .block(panel(text(language, "TODAY", "今日"), colors))
             .wrap(Wrap { trim: true }),
         area,
     );
 }
 
-fn today_view(frame: &mut Frame<'_>, area: Rect, snapshot: Option<&Snapshot>, colors: Colors) {
+fn today_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) {
     let inner = area.inner(Margin {
         horizontal: 1,
         vertical: 1,
     });
     frame.render_widget(
-        Paragraph::new(today_lines(snapshot, colors))
-            .block(panel("TODAY · DAILY & 7-DAY SUMMARY", colors))
+        Paragraph::new(today_lines(snapshot, colors, language))
+            .block(panel(
+                text(
+                    language,
+                    "TODAY · DAILY & 7-DAY SUMMARY",
+                    "今日 · 当日与 7 天汇总",
+                ),
+                colors,
+            ))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -786,12 +903,22 @@ fn trend(values: [u64; 7]) -> String {
         .collect()
 }
 
-fn history_view(frame: &mut Frame<'_>, area: Rect, snapshot: Option<&Snapshot>, colors: Colors) {
+fn history_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) {
     let Some(snapshot) = snapshot else {
         frame.render_widget(
-            Paragraph::new("CURRENT  ·  reconnecting")
-                .block(panel("SESSION FLOW", colors))
-                .style(Style::default().fg(colors.muted)),
+            Paragraph::new(text(
+                language,
+                "CURRENT  ·  reconnecting",
+                "当前 · 正在重连",
+            ))
+            .block(panel(text(language, "SESSION FLOW", "时段流程"), colors))
+            .style(Style::default().fg(colors.muted)),
             area.inner(Margin {
                 horizontal: 1,
                 vertical: 1,
@@ -800,11 +927,15 @@ fn history_view(frame: &mut Frame<'_>, area: Rect, snapshot: Option<&Snapshot>, 
         return;
     };
     let mut lines = vec![Line::from(Span::styled(
-        "PAST",
+        text(language, "PAST", "过去"),
         Style::default().fg(colors.muted),
     ))];
     if snapshot.recent_history.is_empty() {
-        lines.push(Line::from("  No completed Sessions yet"));
+        lines.push(Line::from(text(
+            language,
+            "  No completed Sessions yet",
+            "  尚无已完成时段",
+        )));
     } else {
         lines.extend(
             snapshot
@@ -817,30 +948,53 @@ fn history_view(frame: &mut Frame<'_>, area: Rect, snapshot: Option<&Snapshot>, 
         Line::from("│"),
         Line::from(vec![
             Span::styled(
-                "● CURRENT  ",
+                text(language, "● CURRENT  ", "● 当前  "),
                 Style::default()
                     .fg(session_colors(Some(snapshot), colors).accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
                 "{} · {} · {}",
-                session_heading(snapshot),
+                session_heading(snapshot, language),
                 snapshot.state.to_uppercase(),
                 clock(snapshot.remaining_seconds)
             )),
         ]),
         Line::from("│"),
         Line::from(vec![
-            Span::styled("○ NEXT     ", Style::default().fg(colors.gold)),
+            Span::styled(
+                text(language, "○ NEXT     ", "○ 下一时段  "),
+                Style::default().fg(colors.gold),
+            ),
             Span::raw(snapshot.next_kind.as_ref().map_or_else(
-                || "Cycle decision follows this Session".into(),
-                |kind| format!("{} · waits for Start", kind_label(kind)),
+                || {
+                    text(
+                        language,
+                        "Cycle decision follows this Session",
+                        "按专注循环决定",
+                    )
+                    .into()
+                },
+                |kind| {
+                    format!(
+                        "{} · {}",
+                        kind_label(kind, language),
+                        text(language, "waits for Start", "等待开始")
+                    )
+                },
             )),
         ]),
     ]);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel("SESSION FLOW · PAST / CURRENT / NEXT", colors))
+            .block(panel(
+                text(
+                    language,
+                    "SESSION FLOW · PAST / CURRENT / NEXT",
+                    "时段流程 · 过去 / 当前 / 下一时段",
+                ),
+                colors,
+            ))
             .wrap(Wrap { trim: false }),
         area.inner(Margin {
             horizontal: 1,
@@ -855,38 +1009,27 @@ fn timer_panel(
     snapshot: Option<&Snapshot>,
     colors: Colors,
     narrow: bool,
+    language: Language,
 ) {
     let Some(snapshot) = snapshot else {
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "RECONNECTING",
-                    Style::default()
-                        .fg(colors.gold)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from("Timer Service unavailable"),
-            ])
-            .alignment(Alignment::Center)
-            .block(panel("CURRENT SESSION", colors)),
-            area,
-        );
+        disconnected_timer_panel(frame, area, colors, language);
         return;
     };
     let state_colors = session_colors(Some(snapshot), colors);
-    let heading = session_heading(snapshot);
-    let task = snapshot
-        .current_task
-        .as_deref()
-        .unwrap_or("No Task selected");
+    let heading = session_heading(snapshot, language);
+    let task = snapshot.current_task.as_deref().unwrap_or(text(
+        language,
+        "No Task selected",
+        "未选择任务",
+    ));
     let task_time = snapshot
         .current_task_id
         .and_then(|id| snapshot.tasks.iter().find(|task| task.id == id))
         .map_or(0, |task| task.focus_seconds);
     let title = if narrow {
         format!(
-            "{heading}  ·  Round {}/{}",
+            "{heading}  ·  {} {}/{}",
+            text(language, "Round", "轮次"),
             snapshot.completed_rounds.saturating_add(1),
             snapshot.rounds_per_cycle
         )
@@ -908,10 +1051,14 @@ fn timer_panel(
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                format!("Task time  {}", clock(task_time)),
+                format!(
+                    "{}  {}",
+                    text(language, "Task time", "任务时间"),
+                    clock(task_time)
+                ),
                 Style::default().fg(colors.muted),
             )),
-            Line::from(next_session_line(snapshot)),
+            Line::from(next_session_line(snapshot, language)),
         ]
     } else {
         let mut lines = vec![Line::from("")];
@@ -929,13 +1076,18 @@ fn timer_panel(
                 task.to_owned(),
                 Style::default().add_modifier(Modifier::BOLD),
             )),
-            Line::from(format!("Task time  {}", clock(task_time))),
+            Line::from(format!(
+                "{}  {}",
+                text(language, "Task time", "任务时间"),
+                clock(task_time)
+            )),
             Line::from(Span::styled(
                 format!(
-                    "Round {} of {}  •  {}",
+                    "{} {} / {}  •  {}",
+                    text(language, "Round", "轮次"),
                     snapshot.completed_rounds.saturating_add(1),
                     snapshot.rounds_per_cycle,
-                    next_session_line(snapshot)
+                    next_session_line(snapshot, language)
                 ),
                 Style::default().fg(colors.muted),
             )),
@@ -949,6 +1101,28 @@ fn timer_panel(
         area,
     );
     timer_progress(frame, area, snapshot, state_colors, colors);
+}
+
+fn disconnected_timer_panel(frame: &mut Frame<'_>, area: Rect, colors: Colors, language: Language) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                text(language, "RECONNECTING", "正在重连"),
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(text(
+                language,
+                "Timer Service unavailable",
+                "计时服务不可用",
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(panel(text(language, "CURRENT SESSION", "当前时段"), colors)),
+        area,
+    );
 }
 
 fn timer_progress(
@@ -988,14 +1162,22 @@ fn timer_progress(
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let view = match app.view {
-        View::Dashboard => "DASHBOARD",
-        View::Today => "TODAY",
-        View::History => "HISTORY",
+        View::Dashboard => text(app.language, "DASHBOARD", "仪表盘"),
+        View::Today => text(app.language, "TODAY", "今日"),
+        View::History => text(app.language, "HISTORY", "历史"),
     };
     let keys = if app.narrow {
-        "h/l views · j/k Tasks · Space toggle · : commands · ? help"
+        text(
+            app.language,
+            "h/l views · j/k Tasks · Space toggle · : commands · ? help",
+            "h/l 视图 · j/k 任务 · Space 切换 · : 命令 · ? 帮助",
+        )
     } else {
-        "h/l or ←/→ views  j/k Tasks  Enter start  Space toggle  n new Task  : commands  ? help  q quit"
+        text(
+            app.language,
+            "h/l or ←/→ views  j/k Tasks  Enter start  Space toggle  n new Task  : commands  ? help  q quit",
+            "h/l 或 ←/→ 切换视图  j/k 任务  Enter 开始  Space 切换  n 新建  : 命令  ? 帮助  q 退出",
+        )
     };
     let mut lines = vec![Line::from(Span::styled(
         format!("  ◀  {view}  ▶  "),
@@ -1012,7 +1194,11 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     }
     if area.height > 2 {
         lines.push(Line::from(Span::styled(
-            app.message.as_deref().unwrap_or("Timer Service connected"),
+            app.message.as_deref().unwrap_or(text(
+                app.language,
+                "Timer Service connected",
+                "计时服务已连接",
+            )),
             Style::default().fg(colors.muted),
         )));
     }
@@ -1041,7 +1227,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
     frame.render_widget(Clear, modal);
     match app.overlay {
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
-        Overlay::Help => help_overlay(frame, modal, colors),
+        Overlay::Help => help_overlay(frame, modal, app, colors),
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
         Overlay::CreateTask | Overlay::RenameTask => text_entry_overlay(frame, modal, app, colors),
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
@@ -1067,7 +1253,7 @@ fn palette_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors)
             let label_width = usize::from(area.width.saturating_sub(16));
             let line = format!(
                 "{marker}{:<label_width$}{:>hint_width$}",
-                truncate(item.label, label_width),
+                truncate(palette_label(item, app.language), label_width),
                 item.hint
             );
             let style = if index == app.palette_index {
@@ -1081,56 +1267,101 @@ fn palette_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors)
             ListItem::new(line).style(style)
         })
         .collect::<Vec<_>>();
-    let block = panel("COMMAND PALETTE", colors)
+    let block = panel(text(app.language, "COMMAND PALETTE", "命令面板"), colors)
         .border_style(Style::default().fg(colors.accent))
-        .title_bottom(" ↑↓ choose · Enter run · Esc close ");
+        .title_bottom(text(
+            app.language,
+            " ↑↓ choose · Enter run · Esc close ",
+            " ↑↓ 选择 · Enter 执行 · Esc 关闭 ",
+        ));
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn help_overlay(frame: &mut Frame<'_>, area: Rect, colors: Colors) {
-    let lines = vec![
-        Line::from(Span::styled(
-            "NAVIGATION",
-            Style::default()
-                .fg(colors.gold)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  h/l or ←/→  switch Dashboard, Today, History"),
-        Line::from("  j/k or ↑/↓  select a Task                 q  quit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "SESSIONS",
-            Style::default()
-                .fg(colors.gold)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  Enter  start Focus with selected Task    Space  start/pause/resume"),
-        Line::from("  X      stop Current Session              K      skip Current Session"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "TASKS",
-            Style::default()
-                .fg(colors.gold)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  n  Create task     r  Rename task       c  Complete/reopen task"),
-        Line::from("  D  Delete task (confirmation required)"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "TOOLS",
-            Style::default()
-                .fg(colors.gold)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  :  executable command palette            s  settings"),
-        Line::from("  Esc closes any overlay · Mouse mirrors visible primary targets"),
-    ];
+fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let lines = if app.language == Language::SimplifiedChinese {
+        vec![
+            Line::from(Span::styled(
+                "导航",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  h/l 或 ←/→  切换仪表盘、今日、历史"),
+            Line::from("  j/k 或 ↑/↓  选择任务                    q  退出"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "时段",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  Enter  用所选任务开始专注    Space  开始/暂停/继续"),
+            Line::from("  X      停止当前时段          K      跳过当前时段"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "任务",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  n 新建   r 重命名   c 完成/重新打开   D 删除"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "工具",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  : 命令面板   s 设置   Esc 关闭浮层"),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "NAVIGATION",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  h/l or ←/→  switch Dashboard, Today, History"),
+            Line::from("  j/k or ↑/↓  select a Task                 q  quit"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "SESSIONS",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  Enter  start Focus with selected Task    Space  start/pause/resume"),
+            Line::from("  X      stop Current Session              K      skip Current Session"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "TASKS",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  n  Create task     r  Rename task       c  Complete/reopen task"),
+            Line::from("  D  Delete task (confirmation required)"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "TOOLS",
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("  :  executable command palette            s  settings"),
+            Line::from("  Esc closes any overlay · Mouse mirrors visible primary targets"),
+        ]
+    };
     frame.render_widget(
         Paragraph::new(lines)
             .block(
-                panel("HELP · KEYBOARD & MOUSE", colors)
-                    .border_style(Style::default().fg(colors.accent))
-                    .title_bottom(" Esc close "),
+                panel(
+                    text(app.language, "HELP · KEYBOARD & MOUSE", "帮助 · 键盘与鼠标"),
+                    colors,
+                )
+                .border_style(Style::default().fg(colors.accent))
+                .title_bottom(text(app.language, " Esc close ", " Esc 关闭 ")),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -1142,36 +1373,68 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
         Theme::VermilionPaperLight => "Vermilion Paper Light",
         Theme::VermilionPaperDark => "Vermilion Paper Dark",
     };
+    let language = match app.language {
+        Language::English => "English",
+        Language::SimplifiedChinese => "简体中文",
+    };
     let lines = vec![
         Line::from(Span::styled(
-            "APPEARANCE",
+            text(app.language, "APPEARANCE", "外观"),
             Style::default()
                 .fg(colors.gold)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(format!("  Theme                    {theme}")),
-        Line::from("  t or ←/→                 preview theme"),
+        Line::from(format!(
+            "  {}                    {theme}",
+            text(app.language, "Theme", "主题")
+        )),
+        Line::from(text(
+            app.language,
+            "  t or ←/→                 preview theme",
+            "  t 或 ←/→                  预览主题",
+        )),
+        Line::from(format!(
+            "  {}                 {language}",
+            text(app.language, "Language", "语言")
+        )),
+        Line::from(text(
+            app.language,
+            "  g                         switch and save language",
+            "  g                         切换并保存语言",
+        )),
         Line::from(""),
         Line::from(Span::styled(
-            "CONFIGURATION",
+            text(app.language, "CONFIGURATION", "配置"),
             Style::default()
                 .fg(colors.gold)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Session durations, cycle, reminder, sound and animation"),
-        Line::from("  are loaded from ~/.config/pomotui/config.toml."),
+        Line::from(text(
+            app.language,
+            "  Session durations, cycle, reminder, sound and animation",
+            "  时段长度、循环、提醒、声音和动画",
+        )),
+        Line::from(text(
+            app.language,
+            "  are loaded from ~/.config/pomotui/config.toml.",
+            "  从 ~/.config/pomotui/config.toml 加载。",
+        )),
         Line::from(""),
         Line::from(Span::styled(
-            "Changes here preview this TUI only.",
+            text(
+                app.language,
+                "Theme changes preview this TUI only; language is saved.",
+                "主题仅在本次界面预览；语言会保存。",
+            ),
             Style::default().fg(colors.muted),
         )),
     ];
     frame.render_widget(
         Paragraph::new(lines)
             .block(
-                panel("SETTINGS", colors)
+                panel(text(app.language, "SETTINGS", "设置"), colors)
                     .border_style(Style::default().fg(colors.accent))
-                    .title_bottom(" Esc close "),
+                    .title_bottom(text(app.language, " Esc close ", " Esc 关闭 ")),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -1180,14 +1443,14 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
 
 fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let title = if app.overlay == Overlay::CreateTask {
-        "CREATE TASK"
+        text(app.language, "CREATE TASK", "新建任务")
     } else {
-        "RENAME TASK"
+        text(app.language, "RENAME TASK", "重命名任务")
     };
     let cursor = format!("{}█", app.input);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from("Task title"),
+            Line::from(text(app.language, "Task title", "任务标题")),
             Line::from(Span::styled(
                 cursor,
                 Style::default()
@@ -1196,7 +1459,11 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "Enter save · Esc cancel",
+                text(
+                    app.language,
+                    "Enter save · Esc cancel",
+                    "Enter 保存 · Esc 取消",
+                ),
                 Style::default().fg(colors.muted),
             )),
         ])
@@ -1208,17 +1475,33 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
 fn confirm_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let task = app
         .selected_task()
-        .map_or("selected Task", |task| task.title.as_str());
+        .map_or(text(app.language, "selected Task", "所选任务"), |task| {
+            task.title.as_str()
+        });
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(format!("Delete “{task}”?")),
-            Line::from("Session History will be preserved."),
+            Line::from(format!(
+                "{} “{task}”？",
+                text(app.language, "Delete", "删除")
+            )),
+            Line::from(text(
+                app.language,
+                "Session History will be preserved.",
+                "时段历史将会保留。",
+            )),
             Line::from(Span::styled(
-                "y / Enter delete · n / Esc cancel",
+                text(
+                    app.language,
+                    "y / Enter delete · n / Esc cancel",
+                    "y / Enter 删除 · n / Esc 取消",
+                ),
                 Style::default().fg(colors.muted),
             )),
         ])
-        .block(panel("CONFIRM DELETE", colors).border_style(Style::default().fg(colors.accent))),
+        .block(
+            panel(text(app.language, "CONFIRM DELETE", "确认删除"), colors)
+                .border_style(Style::default().fg(colors.accent)),
+        ),
         area,
     );
 }
@@ -1265,24 +1548,38 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-fn session_heading(snapshot: &Snapshot) -> &'static str {
+fn session_heading(snapshot: &Snapshot, language: Language) -> &'static str {
     if snapshot.state == "paused" {
-        "PAUSED FOCUS"
+        text(language, "PAUSED FOCUS", "专注已暂停")
     } else if snapshot.state == "pending" {
-        "PENDING SESSION"
+        text(language, "PENDING SESSION", "时段待开始")
     } else {
         match snapshot.kind {
-            SessionKind::Focus => "FOCUS SESSION",
-            SessionKind::ShortBreak => "SHORT BREAK",
-            SessionKind::LongBreak => "LONG BREAK",
+            SessionKind::Focus => text(language, "FOCUS SESSION", "专注时段"),
+            SessionKind::ShortBreak => text(language, "SHORT BREAK", "短休息"),
+            SessionKind::LongBreak => text(language, "LONG BREAK", "长休息"),
         }
     }
 }
 
-fn next_session_line(snapshot: &Snapshot) -> String {
+fn next_session_line(snapshot: &Snapshot, language: Language) -> String {
     snapshot.next_kind.as_ref().map_or_else(
-        || "Next Session follows the Focus Cycle".into(),
-        |kind| format!("Next: {} · waits for Start", kind_label(kind)),
+        || {
+            text(
+                language,
+                "Next Session follows the Focus Cycle",
+                "下一时段按专注循环决定",
+            )
+            .into()
+        },
+        |kind| {
+            format!(
+                "{}: {} · {}",
+                text(language, "Next", "下一时段"),
+                kind_label(kind, language),
+                text(language, "waits for Start", "等待开始")
+            )
+        },
     )
 }
 
@@ -1343,11 +1640,18 @@ fn big_clock(value: &str) -> Vec<String> {
 }
 
 #[must_use]
-pub const fn kind_label(kind: &SessionKind) -> &'static str {
+pub const fn kind_label(kind: &SessionKind, language: Language) -> &'static str {
     match kind {
-        SessionKind::Focus => "Focus",
-        SessionKind::ShortBreak => "Short Break",
-        SessionKind::LongBreak => "Long Break",
+        SessionKind::Focus => text(language, "Focus", "专注"),
+        SessionKind::ShortBreak => text(language, "Short Break", "短休息"),
+        SessionKind::LongBreak => text(language, "Long Break", "长休息"),
+    }
+}
+
+const fn text(language: Language, english: &'static str, chinese: &'static str) -> &'static str {
+    match language {
+        Language::English => english,
+        Language::SimplifiedChinese => chinese,
     }
 }
 
@@ -1408,9 +1712,10 @@ mod tests {
                         .iter()
                         .map(ratatui::buffer::Cell::symbol)
                         .collect::<String>();
-                    assert!(
-                        text.contains(session_heading(app.snapshot.as_ref().expect("snapshot")))
-                    );
+                    assert!(text.contains(session_heading(
+                        app.snapshot.as_ref().expect("snapshot"),
+                        app.language,
+                    )));
                     assert!(text.contains("POMOTUI"));
                 }
             }
@@ -1586,6 +1891,63 @@ mod tests {
         assert!(text.contains("NAVIGATION"));
         assert!(text.contains("SESSIONS"));
         assert!(text.contains("TASKS"));
+    }
+
+    #[test]
+    fn simplified_chinese_dashboard_settings_and_help_are_discoverable() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).expect("terminal");
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::VermilionPaperDark,
+        );
+        app.language = Language::SimplifiedChinese;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("dashboard");
+        let dashboard = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(dashboard.contains("待"));
+        assert!(dashboard.contains("专"));
+        assert!(dashboard.contains("下"));
+
+        app.overlay = Overlay::Settings;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("settings");
+        let settings = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(settings.contains("简"));
+        assert!(settings.contains("保"));
+        assert_eq!(
+            app.handle_key(InputKey::Char('g')),
+            Some(Action::SetLanguage(Language::English))
+        );
+
+        app.language = Language::SimplifiedChinese;
+        app.overlay = Overlay::Help;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("help");
+        let help = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(help.contains("导"));
+        assert!(help.contains("时"));
+        assert!(help.contains("任"));
     }
 
     #[test]
