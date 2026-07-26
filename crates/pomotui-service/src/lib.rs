@@ -1,0 +1,963 @@
+use pomotui_domain::{
+    CurrentSession, History, SessionDurations, SessionKind as DomainKind, SessionOutcome,
+    SessionRecord, SessionState, TaskId, TaskStatus, TaskStore, Timer, TimerState, Transition,
+};
+use pomotui_platform::{
+    Clock, DesktopReminder, LinuxClock, RecoveryObservation, ReminderPort, SqliteRepository,
+    elapsed_during_recovery,
+};
+use pomotui_protocol::{
+    Command, Handler, ProtocolError, Request, Response, SessionKind, Snapshot, TaskSummary,
+    TodaySummary,
+};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+pub struct Service {
+    timer: Timer,
+    tasks: TaskStore,
+    history: History,
+    applied_keys: std::collections::HashSet<String>,
+    repository: Option<SqliteRepository>,
+    reminder: DesktopReminder,
+    reminders_enabled: bool,
+    next_event_id: u64,
+    now: u64,
+    wall: i64,
+}
+
+impl Service {
+    /// Creates the default v1 Timer Service state.
+    ///
+    /// # Panics
+    ///
+    /// Only panics if compile-time default durations become invalid.
+    #[must_use]
+    pub fn new() -> Self {
+        let clock = LinuxClock;
+        Self {
+            timer: Timer::new(
+                SessionDurations::new(25 * 60, 5 * 60, 15 * 60)
+                    .expect("nonzero built-in durations"),
+                4,
+            )
+            .expect("nonzero built-in cycle"),
+            tasks: TaskStore::new(),
+            history: History::default(),
+            applied_keys: std::collections::HashSet::new(),
+            repository: None,
+            reminder: DesktopReminder {
+                sound: None,
+                volume_percent: 100,
+            },
+            reminders_enabled: true,
+            next_event_id: 1,
+            now: clock.monotonic_seconds().unwrap_or(0),
+            wall: clock.wall_seconds().unwrap_or(0),
+        }
+    }
+
+    /// Opens or creates a durable Timer Service.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic database or state-validation error.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let repository = SqliteRepository::open(path).map_err(|error| error.to_string())?;
+        let payload = repository
+            .current_session_payload()
+            .map_err(|error| error.to_string())?;
+        let keys = repository
+            .mutation_keys()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
+        let had_payload = payload.is_some();
+        let mut service = if let Some(payload) = payload.as_deref() {
+            PersistedService::decode(payload)?
+        } else {
+            Self::new()
+        };
+        service.applied_keys = keys;
+        service.repository = Some(repository);
+        if !had_payload {
+            service.persist(None)?;
+        }
+        service.observe_time();
+        Ok(service)
+    }
+
+    /// Applies defaults for Sessions that have not started yet.
+    ///
+    /// A Running or Paused Session retains its own planned duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated durable state cannot be committed.
+    pub fn configure_durations(&mut self, durations: SessionDurations) -> Result<(), String> {
+        self.timer.set_durations(durations);
+        self.persist(None)
+    }
+
+    /// Applies a new Focus Cycle length and persists it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a domain validation or persistence error.
+    pub fn configure_cycle(&mut self, rounds: u8) -> Result<(), String> {
+        self.timer
+            .set_rounds_per_cycle(rounds)
+            .map_err(|error| error.to_string())?;
+        self.persist(None)
+    }
+
+    pub fn configure_reminder(
+        &mut self,
+        enabled: bool,
+        sound: Option<std::path::PathBuf>,
+        volume_percent: u8,
+    ) {
+        self.reminders_enabled = enabled;
+        self.reminder.sound = sound;
+        self.reminder.volume_percent = volume_percent.min(100);
+    }
+
+    pub fn tick(&mut self) {
+        self.observe_time();
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        let (state, kind, next_kind) = match self.timer.current_session() {
+            CurrentSession::Pending(session) => {
+                ("pending", session.kind(), Some(map_kind(session.kind())))
+            }
+            CurrentSession::Running(session) => (
+                "running",
+                session.kind(),
+                Some(self.following_kind(session.kind())),
+            ),
+            CurrentSession::Paused(session) => (
+                "paused",
+                session.kind(),
+                Some(self.following_kind(session.kind())),
+            ),
+        };
+        let starts = local_day_boundaries(self.wall);
+        let summary = self.history.summarize(starts);
+        Snapshot {
+            state: state.into(),
+            kind: map_kind(kind),
+            remaining_seconds: self.timer.remaining_seconds(self.now),
+            planned_seconds: self.timer.planned_seconds(),
+            current_task: self
+                .timer
+                .current_task()
+                .and_then(|id| self.tasks.get(id).ok())
+                .map(|task| task.title().to_owned()),
+            current_task_id: self.timer.current_task().map(TaskId::get),
+            completed_rounds: self.timer.focus_cycle().completed_rounds(),
+            rounds_per_cycle: self.timer.focus_cycle().rounds_per_cycle(),
+            next_kind,
+            tasks: self
+                .tasks
+                .all()
+                .iter()
+                .map(|task| TaskSummary {
+                    id: task.id().get(),
+                    title: task.title().to_owned(),
+                    completed: task.status() == TaskStatus::Completed,
+                    focus_seconds: self.history.focus_seconds_for_task(task.id()),
+                })
+                .collect(),
+            today: TodaySummary {
+                focus_seconds: summary.focus_seconds[6],
+                completed_rounds: summary.completed_rounds[6],
+                seven_day_focus_seconds: summary.focus_seconds,
+                average_focus_seconds: summary.average_focus_seconds(),
+            },
+            recent_history: self
+                .history
+                .records()
+                .iter()
+                .rev()
+                .take(5)
+                .map(|record| {
+                    format!(
+                        "{:?} {:?} {}s",
+                        record.kind, record.outcome, record.actual_seconds
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn rejected(error: impl std::fmt::Display) -> Response {
+        eprintln!("Timer Service rejected command: {error}");
+        Response::Error {
+            error: ProtocolError::Rejected {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn following_kind(&self, kind: DomainKind) -> SessionKind {
+        match kind {
+            DomainKind::Focus => {
+                if self
+                    .timer
+                    .focus_cycle()
+                    .completed_rounds()
+                    .saturating_add(1)
+                    >= self.timer.focus_cycle().rounds_per_cycle()
+                {
+                    SessionKind::LongBreak
+                } else {
+                    SessionKind::ShortBreak
+                }
+            }
+            DomainKind::ShortBreak | DomainKind::LongBreak => SessionKind::Focus,
+        }
+    }
+
+    fn observe_time(&mut self) {
+        let clock = LinuxClock;
+        let now = clock.monotonic_seconds().unwrap_or(self.now);
+        let wall = clock.wall_seconds().unwrap_or(self.wall);
+        self.apply_observation(now, wall);
+    }
+
+    fn apply_observation(&mut self, now: u64, wall: i64) {
+        self.now = now;
+        self.wall = wall;
+        let planned = self.timer.planned_seconds();
+        if let Ok(transition) = self.timer.advance(self.now) {
+            let changed = !transition.events().is_empty();
+            let completed = transition.events().iter().any(|event| {
+                matches!(
+                    event,
+                    pomotui_domain::DomainEvent::SessionEnded {
+                        outcome: SessionOutcome::Completed,
+                        ..
+                    }
+                )
+            });
+            let reminder_key = format!("session-event-{}", self.next_event_id);
+            self.record(&transition, planned);
+            if completed {
+                if self.persist_completion(&reminder_key).unwrap_or(false) && self.reminders_enabled
+                {
+                    if let Err(error) = self.reminder.notify() {
+                        eprintln!("Session Reminder notification failed: {error}");
+                    }
+                    if let Err(error) = self.reminder.play_sound() {
+                        eprintln!("Session Reminder sound failed: {error}");
+                    }
+                }
+            } else if changed {
+                let _persist_result = self.persist(None);
+            }
+        }
+    }
+
+    fn record(&mut self, transition: &Transition, planned_seconds: u64) {
+        for event in transition.events() {
+            self.history.push(SessionRecord::from_event(
+                *event,
+                self.wall,
+                planned_seconds,
+                &self.tasks,
+            ));
+            self.next_event_id = self.next_event_id.saturating_add(1);
+        }
+    }
+
+    fn apply_transition(
+        &mut self,
+        result: Result<Transition, pomotui_domain::DomainError>,
+        planned_seconds: u64,
+    ) -> Result<(), String> {
+        let transition = result.map_err(|error| error.to_string())?;
+        self.record(&transition, planned_seconds);
+        Ok(())
+    }
+
+    fn persist(&mut self, key: Option<&str>) -> Result<(), String> {
+        let payload = PersistedService::encode(self)?;
+        let Some(repository) = &mut self.repository else {
+            return Ok(());
+        };
+        if let Some(key) = key {
+            repository
+                .save_state_once(key, &payload)
+                .map_err(|error| error.to_string())?;
+            self.applied_keys.insert(key.to_owned());
+        } else {
+            repository
+                .save_state(&payload)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn persist_completion(&mut self, reminder_key: &str) -> Result<bool, String> {
+        let payload = PersistedService::encode(self)?;
+        let Some(repository) = &mut self.repository else {
+            return Ok(true);
+        };
+        repository
+            .save_completion(&payload, reminder_key)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Default for Service {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Handler for Service {
+    #[allow(clippy::too_many_lines)]
+    fn handle(&mut self, request: Request) -> Response {
+        self.observe_time();
+        let mutation_key = request.idempotency_key.clone();
+        if let Some(key) = &mutation_key
+            && self.applied_keys.contains(key)
+        {
+            return Response::Snapshot {
+                snapshot: self.snapshot(),
+            };
+        }
+        let result = match request.command {
+            Command::Status => {
+                return Response::Snapshot {
+                    snapshot: self.snapshot(),
+                };
+            }
+            Command::Start { kind, task_id } => {
+                let current_kind = match self.timer.current_session() {
+                    CurrentSession::Pending(session) => map_kind(session.kind()),
+                    _ => kind.clone(),
+                };
+                if current_kind != kind {
+                    Err(format!(
+                        "recommended Session is {current_kind:?}, not {kind:?}"
+                    ))
+                } else if let Some(id) = task_id
+                    && self.tasks.get(pomotui_domain::TaskId::new(id)).is_err()
+                {
+                    Err(format!("Task {id} does not exist"))
+                } else {
+                    let planned = self.timer.planned_seconds();
+                    let transition = self
+                        .timer
+                        .start(self.now, task_id.map(pomotui_domain::TaskId::new));
+                    self.apply_transition(transition, planned)
+                }
+            }
+            Command::StartTitle { title } => {
+                let task_id = match self.tasks.resolve_title(&title) {
+                    Ok(id) => Ok(id),
+                    Err(pomotui_domain::TaskError::TitleNotFound(_)) => self.tasks.create(title),
+                    Err(error) => Err(error),
+                };
+                match task_id {
+                    Ok(task_id) => {
+                        let planned = self.timer.planned_seconds();
+                        let transition = self.timer.start(self.now, Some(task_id));
+                        self.apply_transition(transition, planned)
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            Command::Pause => {
+                let planned = self.timer.planned_seconds();
+                let transition = self.timer.pause(self.now);
+                self.apply_transition(transition, planned)
+            }
+            Command::Resume => {
+                let planned = self.timer.planned_seconds();
+                let transition = self.timer.resume(self.now);
+                self.apply_transition(transition, planned)
+            }
+            Command::Stop => {
+                let planned = self.timer.planned_seconds();
+                let transition = self.timer.stop(self.now);
+                self.apply_transition(transition, planned)
+            }
+            Command::Skip => {
+                let planned = self.timer.planned_seconds();
+                let transition = self.timer.skip();
+                self.apply_transition(transition, planned)
+            }
+            Command::TaskCreate { title } => {
+                return match self.tasks.create(title) {
+                    Ok(id) => match self.persist(mutation_key.as_deref()) {
+                        Ok(()) => Response::Data {
+                            value: serde_json::json!({ "id": id.get() }),
+                        },
+                        Err(error) => Self::rejected(error),
+                    },
+                    Err(error) => Self::rejected(error),
+                };
+            }
+            Command::TaskList => {
+                return Response::Data {
+                    value: serde_json::Value::Array(
+                        self.tasks
+                            .all()
+                            .iter()
+                            .map(|task| {
+                                serde_json::json!({
+                                    "id": task.id().get(),
+                                    "title": task.title(),
+                                    "status": format!("{:?}", task.status()).to_lowercase()
+                                })
+                            })
+                            .collect(),
+                    ),
+                };
+            }
+            Command::TaskRename { id, title } => self
+                .tasks
+                .rename(pomotui_domain::TaskId::new(id), title)
+                .map_err(|error| error.to_string()),
+            Command::TaskComplete { id } => self
+                .tasks
+                .complete(pomotui_domain::TaskId::new(id))
+                .map_err(|error| error.to_string()),
+            Command::TaskReopen { id } => self
+                .tasks
+                .reopen(pomotui_domain::TaskId::new(id))
+                .map_err(|error| error.to_string()),
+            Command::TaskDelete { id } => self
+                .tasks
+                .delete(pomotui_domain::TaskId::new(id), self.timer.current_task())
+                .map(drop)
+                .map_err(|error| error.to_string()),
+            Command::History => {
+                return Response::Data {
+                    value: serde_json::Value::Array(
+                        self.history
+                            .records()
+                            .iter()
+                            .map(|record| {
+                                serde_json::json!({
+                                    "ended_at": record.ended_at,
+                                    "kind": format!("{:?}", record.kind),
+                                    "outcome": format!("{:?}", record.outcome),
+                                    "planned_seconds": record.planned_seconds,
+                                    "actual_seconds": record.actual_seconds,
+                                    "task_id": record.task_id.map(pomotui_domain::TaskId::get),
+                                    "task_title": record.task_title,
+                                })
+                            })
+                            .collect(),
+                    ),
+                };
+            }
+            Command::Summary => {
+                let starts = local_day_boundaries(self.wall);
+                let summary = self.history.summarize(starts);
+                return Response::Data {
+                    value: serde_json::json!({
+                        "focus_seconds": summary.focus_seconds,
+                        "completed_rounds": summary.completed_rounds,
+                        "average_focus_seconds": summary.average_focus_seconds(),
+                    }),
+                };
+            }
+        };
+        match result {
+            Ok(()) => match self.persist(mutation_key.as_deref()) {
+                Ok(()) => Response::Snapshot {
+                    snapshot: self.snapshot(),
+                },
+                Err(error) => Self::rejected(error),
+            },
+            Err(error) => Self::rejected(error),
+        }
+    }
+}
+
+fn map_kind(kind: pomotui_domain::SessionKind) -> SessionKind {
+    match kind {
+        pomotui_domain::SessionKind::Focus => SessionKind::Focus,
+        pomotui_domain::SessionKind::ShortBreak => SessionKind::ShortBreak,
+        pomotui_domain::SessionKind::LongBreak => SessionKind::LongBreak,
+    }
+}
+
+fn local_day_boundaries(wall: i64) -> [i64; 8] {
+    use chrono::{Local, TimeZone};
+    let now = Local
+        .timestamp_opt(wall, 0)
+        .single()
+        .unwrap_or_else(Local::now);
+    let today = now.date_naive();
+    std::array::from_fn(|index| {
+        let offset = i64::try_from(index).expect("eight boundaries fit i64") - 6;
+        let date = today
+            .checked_add_signed(chrono::Duration::days(offset))
+            .expect("nearby local day is representable");
+        Local
+            .from_local_datetime(
+                &date
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight is a valid naive time"),
+            )
+            .earliest()
+            .map_or(wall, |boundary| boundary.timestamp())
+    })
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedService {
+    timer: PersistedTimer,
+    tasks: Vec<PersistedTask>,
+    next_task_id: u64,
+    history: Vec<PersistedRecord>,
+    next_event_id: u64,
+    boot_id: String,
+    observed_monotonic: u64,
+    observed_wall: i64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedTimer {
+    session: PersistedSession,
+    current_task: Option<u64>,
+    completed_rounds: u8,
+    rounds_per_cycle: u8,
+    focus_seconds: u64,
+    short_break_seconds: u64,
+    long_break_seconds: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum PersistedSession {
+    Pending {
+        kind: String,
+    },
+    Running {
+        kind: String,
+        planned_seconds: u64,
+        accumulated_seconds: u64,
+        started_at: u64,
+        task_id: Option<u64>,
+    },
+    Paused {
+        kind: String,
+        planned_seconds: u64,
+        elapsed_seconds: u64,
+        task_id: Option<u64>,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedTask {
+    id: u64,
+    title: String,
+    status: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedRecord {
+    ended_at: i64,
+    kind: String,
+    outcome: String,
+    planned_seconds: u64,
+    actual_seconds: u64,
+    task_id: Option<u64>,
+    task_title: Option<String>,
+}
+
+impl PersistedService {
+    fn encode(service: &Service) -> Result<String, String> {
+        let state = service.timer.state();
+        let session = match state.session {
+            SessionState::Pending { kind } => PersistedSession::Pending {
+                kind: domain_kind_name(kind).into(),
+            },
+            SessionState::Running {
+                kind,
+                planned_seconds,
+                accumulated_seconds,
+                started_at,
+                task_id,
+            } => PersistedSession::Running {
+                kind: domain_kind_name(kind).into(),
+                planned_seconds,
+                accumulated_seconds: accumulated_seconds
+                    .saturating_add(service.now.saturating_sub(started_at)),
+                started_at: service.now,
+                task_id: task_id.map(TaskId::get),
+            },
+            SessionState::Paused {
+                kind,
+                planned_seconds,
+                elapsed_seconds,
+                task_id,
+            } => PersistedSession::Paused {
+                kind: domain_kind_name(kind).into(),
+                planned_seconds,
+                elapsed_seconds,
+                task_id: task_id.map(TaskId::get),
+            },
+        };
+        let clock = LinuxClock;
+        let persisted = Self {
+            timer: PersistedTimer {
+                session,
+                current_task: state.current_task.map(TaskId::get),
+                completed_rounds: state.completed_rounds,
+                rounds_per_cycle: state.rounds_per_cycle,
+                focus_seconds: state.durations.focus(),
+                short_break_seconds: state.durations.short_break(),
+                long_break_seconds: state.durations.long_break(),
+            },
+            tasks: service
+                .tasks
+                .all()
+                .iter()
+                .map(|task| PersistedTask {
+                    id: task.id().get(),
+                    title: task.title().to_owned(),
+                    status: match task.status() {
+                        TaskStatus::Open => "open",
+                        TaskStatus::Completed => "completed",
+                    }
+                    .into(),
+                })
+                .collect(),
+            next_task_id: service.tasks.next_id(),
+            history: service
+                .history
+                .records()
+                .iter()
+                .map(|record| PersistedRecord {
+                    ended_at: record.ended_at,
+                    kind: domain_kind_name(record.kind).into(),
+                    outcome: outcome_name(record.outcome).into(),
+                    planned_seconds: record.planned_seconds,
+                    actual_seconds: record.actual_seconds,
+                    task_id: record.task_id.map(TaskId::get),
+                    task_title: record.task_title.clone(),
+                })
+                .collect(),
+            next_event_id: service.next_event_id,
+            boot_id: clock.boot_id().unwrap_or_else(|_| "unknown".into()),
+            observed_monotonic: service.now,
+            observed_wall: service.wall,
+        };
+        serde_json::to_string(&persisted).map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn decode(payload: &str) -> Result<Service, String> {
+        let persisted: Self = serde_json::from_str(payload)
+            .map_err(|error| format!("invalid durable state: {error}"))?;
+        let durations = SessionDurations::new(
+            persisted.timer.focus_seconds,
+            persisted.timer.short_break_seconds,
+            persisted.timer.long_break_seconds,
+        )
+        .map_err(|error| error.to_string())?;
+        let clock = LinuxClock;
+        let current_observation = RecoveryObservation {
+            boot_id: clock
+                .boot_id()
+                .unwrap_or_else(|_| persisted.boot_id.clone()),
+            monotonic_seconds: clock
+                .monotonic_seconds()
+                .unwrap_or(persisted.observed_monotonic),
+            wall_seconds: clock.wall_seconds().unwrap_or(persisted.observed_wall),
+        };
+        let recovery = elapsed_during_recovery(
+            &RecoveryObservation {
+                boot_id: persisted.boot_id.clone(),
+                monotonic_seconds: persisted.observed_monotonic,
+                wall_seconds: persisted.observed_wall,
+            },
+            &current_observation,
+        );
+        eprintln!(
+            "Timer Service recovery: {:?}, elapsed={}s",
+            recovery.source, recovery.seconds
+        );
+        let recovery_elapsed = recovery.seconds;
+        let session = match persisted.timer.session {
+            PersistedSession::Pending { kind } => SessionState::Pending {
+                kind: parse_kind(&kind)?,
+            },
+            PersistedSession::Running {
+                kind,
+                planned_seconds,
+                accumulated_seconds,
+                started_at: _,
+                task_id,
+            } => SessionState::Running {
+                kind: parse_kind(&kind)?,
+                planned_seconds,
+                accumulated_seconds: accumulated_seconds.saturating_add(recovery_elapsed),
+                started_at: current_observation.monotonic_seconds,
+                task_id: task_id.map(TaskId::new),
+            },
+            PersistedSession::Paused {
+                kind,
+                planned_seconds,
+                elapsed_seconds,
+                task_id,
+            } => SessionState::Paused {
+                kind: parse_kind(&kind)?,
+                planned_seconds,
+                elapsed_seconds,
+                task_id: task_id.map(TaskId::new),
+            },
+        };
+        let timer = Timer::restore(TimerState {
+            session,
+            current_task: persisted.timer.current_task.map(TaskId::new),
+            completed_rounds: persisted.timer.completed_rounds,
+            rounds_per_cycle: persisted.timer.rounds_per_cycle,
+            durations,
+        })
+        .map_err(|error| error.to_string())?;
+        let tasks = TaskStore::restore(
+            persisted
+                .tasks
+                .into_iter()
+                .map(|task| {
+                    let status = match task.status.as_str() {
+                        "open" => Ok(TaskStatus::Open),
+                        "completed" => Ok(TaskStatus::Completed),
+                        other => Err(format!("invalid Task status: {other}")),
+                    }?;
+                    Ok((TaskId::new(task.id), task.title, status))
+                })
+                .collect::<Result<_, String>>()?,
+            persisted.next_task_id,
+        )
+        .map_err(|error| error.to_string())?;
+        let history = History::restore(
+            persisted
+                .history
+                .into_iter()
+                .map(|record| {
+                    Ok(SessionRecord {
+                        ended_at: record.ended_at,
+                        kind: parse_kind(&record.kind)?,
+                        outcome: parse_outcome(&record.outcome)?,
+                        planned_seconds: record.planned_seconds,
+                        actual_seconds: record.actual_seconds,
+                        task_id: record.task_id.map(TaskId::new),
+                        task_title: record.task_title,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        );
+        Ok(Service {
+            timer,
+            tasks,
+            history,
+            applied_keys: std::collections::HashSet::new(),
+            repository: None,
+            reminder: DesktopReminder {
+                sound: None,
+                volume_percent: 100,
+            },
+            reminders_enabled: true,
+            next_event_id: persisted.next_event_id.max(1),
+            now: current_observation.monotonic_seconds,
+            wall: current_observation.wall_seconds,
+        })
+    }
+}
+
+const fn domain_kind_name(kind: DomainKind) -> &'static str {
+    match kind {
+        DomainKind::Focus => "focus",
+        DomainKind::ShortBreak => "short_break",
+        DomainKind::LongBreak => "long_break",
+    }
+}
+
+fn parse_kind(value: &str) -> Result<DomainKind, String> {
+    match value {
+        "focus" => Ok(DomainKind::Focus),
+        "short_break" => Ok(DomainKind::ShortBreak),
+        "long_break" => Ok(DomainKind::LongBreak),
+        _ => Err(format!("invalid Session kind: {value}")),
+    }
+}
+
+const fn outcome_name(outcome: SessionOutcome) -> &'static str {
+    match outcome {
+        SessionOutcome::Completed => "completed",
+        SessionOutcome::Stopped => "stopped",
+        SessionOutcome::Skipped => "skipped",
+    }
+}
+
+fn parse_outcome(value: &str) -> Result<SessionOutcome, String> {
+    match value {
+        "completed" => Ok(SessionOutcome::Completed),
+        "stopped" => Ok(SessionOutcome::Stopped),
+        "skipped" => Ok(SessionOutcome::Skipped),
+        _ => Err(format!("invalid Session outcome: {value}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pomotui_protocol::PROTOCOL_VERSION;
+
+    fn request(key: Option<&str>, command: Command) -> Request {
+        Request {
+            version: PROTOCOL_VERSION,
+            idempotency_key: key.map(str::to_owned),
+            command,
+        }
+    }
+
+    fn database_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pomotui-service-{}-{:?}.sqlite3",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    #[test]
+    fn restart_recovers_tasks_current_session_history_and_idempotency() {
+        let path = database_path();
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut service = Service::open(&path).expect("first service");
+            let created = service.handle(request(
+                Some("create-1"),
+                Command::TaskCreate {
+                    title: "Durable Task".into(),
+                },
+            ));
+            assert!(matches!(created, Response::Data { .. }));
+            service.handle(request(
+                Some("start-1"),
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: Some(1),
+                },
+            ));
+            service.handle(request(Some("stop-1"), Command::Stop));
+        }
+        {
+            let mut service = Service::open(&path).expect("restarted service");
+            let replay = service.handle(request(
+                Some("create-1"),
+                Command::TaskCreate {
+                    title: "Duplicate".into(),
+                },
+            ));
+            assert!(matches!(replay, Response::Snapshot { .. }));
+            let Response::Data { value: tasks } = service.handle(request(None, Command::TaskList))
+            else {
+                panic!("task list response");
+            };
+            assert_eq!(tasks.as_array().expect("array").len(), 1);
+            assert_eq!(tasks[0]["title"], "Durable Task");
+            let Response::Data { value: history } = service.handle(request(None, Command::History))
+            else {
+                panic!("history response");
+            };
+            assert_eq!(history.as_array().expect("array").len(), 1);
+            assert_eq!(history[0]["outcome"], "Stopped");
+        }
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn deadline_tick_commits_completion_once_without_a_frontend() {
+        let path = database_path().with_extension("deadline.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        let mut service = Service::open(&path).expect("service");
+        service.reminders_enabled = false;
+        service
+            .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+            .expect("configure");
+        let start = service.now;
+        let transition = service.timer.start(start, None);
+        service
+            .apply_transition(transition, 1)
+            .expect("start transition");
+        service
+            .persist(Some("start-deadline"))
+            .expect("persist start");
+
+        service.apply_observation(start + 1, service.wall + 1);
+        service.apply_observation(start + 100, service.wall + 100);
+
+        assert_eq!(service.history.records().len(), 1);
+        assert_eq!(
+            service.history.records()[0].outcome,
+            SessionOutcome::Completed
+        );
+        assert_eq!(service.timer.focus_cycle().completed_rounds(), 1);
+        drop(service);
+
+        let restarted = Service::open(&path).expect("restart");
+        assert_eq!(restarted.history.records().len(), 1);
+        assert_eq!(restarted.timer.focus_cycle().completed_rounds(), 1);
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn start_by_title_creates_new_task_and_rejects_ambiguous_existing_titles() {
+        let mut service = Service::new();
+        let response = service.handle(request(
+            Some("new-title"),
+            Command::StartTitle {
+                title: "New work".into(),
+            },
+        ));
+        assert!(matches!(response, Response::Snapshot { .. }));
+        assert_eq!(service.tasks.all().len(), 1);
+        service.handle(request(
+            Some("complete-current-task"),
+            Command::TaskComplete { id: 1 },
+        ));
+        assert_eq!(service.timer.current_task(), Some(TaskId::new(1)));
+        assert!(matches!(
+            service.timer.current_session(),
+            CurrentSession::Running(_)
+        ));
+        service.handle(request(Some("stop-new"), Command::Stop));
+
+        service.tasks.create("Duplicate").expect("first duplicate");
+        service.tasks.create("Duplicate").expect("second duplicate");
+        let response = service.handle(request(
+            Some("ambiguous"),
+            Command::StartTitle {
+                title: "Duplicate".into(),
+            },
+        ));
+        let Response::Error {
+            error: ProtocolError::Rejected { message },
+        } = response
+        else {
+            panic!("ambiguous rejection");
+        };
+        assert!(message.contains("AmbiguousTitle"));
+        assert!(message.contains("TaskId"));
+    }
+
+    #[test]
+    fn local_day_boundaries_are_ordered_and_contain_the_observation() {
+        let wall = LinuxClock.wall_seconds().expect("wall clock");
+        let boundaries = local_day_boundaries(wall);
+        assert!(boundaries.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(wall >= boundaries[6]);
+        assert!(wall < boundaries[7]);
+    }
+}

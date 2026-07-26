@@ -1,0 +1,13 @@
+[package]
+name = "pomotui-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pomotui-domain = { path = "../pomotui-domain" }
+rusqlite = { version = "0.38", features = ["bundled"] }
+
+[lints]
+workspace = true

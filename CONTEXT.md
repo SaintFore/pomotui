@@ -60,6 +60,10 @@ _Avoid_: Fixed Pomodoro duration
 The durable record of actual Focus Sessions and Break Sessions, including their planned and actual durations, outcome, and optional Task identity and title snapshot. It survives Task renaming and deletion and is the source for daily focus time, Completed Round counts, seven-day trends, and per-task totals.
 _Avoid_: Activity log, current timer state
 
+**Session Outcome**:
+The reason a Session entered Session History: it reached its planned deadline, was stopped after starting, or was skipped before starting. Only a Focus Session that reached its deadline is a Completed Round.
+_Avoid_: Task status, timer state
+
 **Stopped Session**:
 A Session ended early without advancing the Focus Cycle or changing the next recommended session type. Its actual elapsed time remains in Session History.
 _Avoid_: Skipped Session, completed session

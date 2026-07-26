@@ -1,0 +1,50 @@
+# Pomotui user guide
+
+## Install and first run
+
+Build with `cargo build --release`, run `packaging/install.sh`, then activate:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now pomotui.socket
+pomotui status
+pomotui-tui
+```
+
+Pomotui uses `$XDG_RUNTIME_DIR/pomotui/pomotui.sock`,
+`$XDG_DATA_HOME/pomotui/pomotui.sqlite3`, and
+`$XDG_CONFIG_HOME/pomotui/config.toml` (with standard home-directory fallbacks).
+
+## CLI and Waybar
+
+Use `pomotui start focus`, `pause`, `resume`, `stop`, or `skip`. Task commands
+are `task list/create/rename/complete/reopen/delete`; mutations by ID remain
+unambiguous. `history`, `summary`, and `status --json` are scriptable.
+
+Waybar custom-module example:
+
+```json
+{
+  "custom/pomotui": {
+    "exec": "pomotui waybar",
+    "interval": 1,
+    "return-type": "json",
+    "on-click": "pomotui pause"
+  }
+}
+```
+
+## TUI
+
+Use arrows or `j/k` for Tasks, arrows or `h/l` for views, `K` to skip, `:` for
+the command palette, `s` for settings, `?` for help, and `q` to quit.
+
+Set `sound = "builtin:complete"` for the standard freedesktop completion sound,
+or set `sound` to a local audio-file path. Sound and desktop-notification
+failures are logged by their adapters and never undo Session completion.
+
+## Backup and restore
+
+Stop `pomotui.service`, copy the SQLite database and TOML configuration, then
+restart the socket. Restore only into an empty data directory while the service
+is stopped. Keep both files from the same backup point.

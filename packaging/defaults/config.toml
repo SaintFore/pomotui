@@ -1,0 +1,22 @@
+focus_minutes = 25
+short_break_minutes = 5
+long_break_minutes = 15
+rounds_per_cycle = 4
+theme = "Vermilion Paper Dark"
+reminder_enabled = true
+volume = 100
+# sound = "builtin:complete"
+# animation = "/absolute/path/to/completion.animation"
+
+[keybindings]
+down = "j"
+up = "k"
+next_view = "l"
+previous_view = "h"
+skip = "K"
+toggle_session = " "
+stop = "X"
+palette = ":"
+settings = "s"
+help = "?"
+quit = "q"

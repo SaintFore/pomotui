@@ -1,0 +1,11 @@
+[Unit]
+Description=Pomotui Timer Service
+Requires=pomotui.socket
+After=pomotui.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pomotui-service
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
