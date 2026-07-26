@@ -24,10 +24,13 @@ Use the **Timer First** direction for the Dashboard:
   Break Sessions use a derived green token. Focus and primary actions use the
   signature Vermilion token.
 - Today includes a compact seven-day trend and its numeric average.
-
-One visual question remains open for the product spec:
-
-1. Whether completed-session presentation dismisses itself or waits for input.
+- Support `j/k` for moving between Tasks and `h/l` for switching views, with
+  arrow keys as equivalent inputs. Skip uses uppercase `K` or the command
+  palette so it does not conflict with navigation.
+- After a Session completes, briefly show a building-collapse character
+  animation and then automatically reveal the next Pending Session. The
+  animation is a Timer Frontend effect; the Pending Session never starts
+  automatically.
 
 ## Primary source
 
@@ -37,3 +40,4 @@ wide/narrow SVG snapshots are preserved outside `main`:
 - Branch: `prototype/pomotui-dashboard`
 - Initial commit: `9444604` (`prototype: explore Pomotui dashboard layouts`)
 - Feedback revision: `fd01ff7`
+- Navigation and completion transition: `f05828c`
