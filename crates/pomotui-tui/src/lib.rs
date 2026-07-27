@@ -941,7 +941,7 @@ fn history_view(
             snapshot
                 .recent_history
                 .iter()
-                .map(|item| Line::from(format!("  ✓ {item}"))),
+                .map(|item| history_line(item, colors, language)),
         );
     }
     lines.extend([
@@ -1001,6 +1001,57 @@ fn history_view(
             vertical: 1,
         }),
     );
+}
+
+fn history_line(
+    item: &pomotui_protocol::RecentSessionSummary,
+    colors: Colors,
+    language: Language,
+) -> Line<'static> {
+    let task = match (&item.kind, item.task_title.as_deref()) {
+        (SessionKind::Focus, Some(title)) => title.to_owned(),
+        (SessionKind::Focus, None) => text(language, "No Task", "无任务").into(),
+        _ => text(language, "Break · no Task", "休息 · 无任务").into(),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("  {}  ", kind_label(&item.kind, language)),
+            Style::default()
+                .fg(session_color_for_kind(&item.kind, colors))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "{}  ·  {}  ·  {}",
+            outcome_label(&item.outcome, language),
+            task,
+            human_duration_precise(item.actual_seconds)
+        )),
+    ])
+}
+
+fn session_color_for_kind(kind: &SessionKind, colors: Colors) -> Color {
+    if *kind == SessionKind::Focus {
+        colors.accent
+    } else {
+        colors.good
+    }
+}
+
+fn outcome_label(outcome: &str, language: Language) -> &'static str {
+    match outcome {
+        "Completed" => text(language, "Completed", "已完成"),
+        "Stopped" => text(language, "Stopped", "已停止"),
+        "Skipped" => text(language, "Skipped", "已跳过"),
+        _ => text(language, "Recorded", "已记录"),
+    }
+}
+
+fn human_duration_precise(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        clock(seconds)
+    }
 }
 
 fn timer_panel(
@@ -1683,7 +1734,20 @@ mod tests {
                 seven_day_focus_seconds: [0, 600, 1_200, 900, 1_500, 2_400, 3_000],
                 average_focus_seconds: 1_371,
             },
-            recent_history: vec!["Focus Completed 1500s".into()],
+            recent_history: vec![
+                pomotui_protocol::RecentSessionSummary {
+                    kind: SessionKind::Focus,
+                    outcome: "Completed".into(),
+                    actual_seconds: 1_500,
+                    task_title: Some("Ship Pomotui".into()),
+                },
+                pomotui_protocol::RecentSessionSummary {
+                    kind: SessionKind::ShortBreak,
+                    outcome: "Completed".into(),
+                    actual_seconds: 300,
+                    task_title: None,
+                },
+            ],
         }
     }
 
@@ -1948,6 +2012,45 @@ mod tests {
         assert!(help.contains("导"));
         assert!(help.contains("时"));
         assert!(help.contains("任"));
+    }
+
+    #[test]
+    fn history_shows_task_attribution_no_task_and_break_records() {
+        for (language, expected) in [
+            (
+                Language::English,
+                ["Ship Pomotui", "No Task", "Break · no Task"],
+            ),
+            (Language::SimplifiedChinese, ["Ship Pomotui", "无", "休"]),
+        ] {
+            let mut value = snapshot("pending", SessionKind::Focus);
+            value.recent_history.insert(
+                1,
+                pomotui_protocol::RecentSessionSummary {
+                    kind: SessionKind::Focus,
+                    outcome: "Stopped".into(),
+                    actual_seconds: 42,
+                    task_title: None,
+                },
+            );
+            let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+            app.language = language;
+            app.view = View::History;
+            let mut terminal = Terminal::new(TestBackend::new(100, 32)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("history");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            for label in expected {
+                assert!(rendered.contains(label), "missing {label}: {rendered}");
+            }
+        }
     }
 
     #[test]

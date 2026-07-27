@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-pub const PROTOCOL_VERSION: u16 = pomotui_domain::MODEL_VERSION;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,7 +101,15 @@ pub struct Snapshot {
     pub next_kind: Option<SessionKind>,
     pub tasks: Vec<TaskSummary>,
     pub today: TodaySummary,
-    pub recent_history: Vec<String>,
+    pub recent_history: Vec<RecentSessionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecentSessionSummary {
+    pub kind: SessionKind,
+    pub outcome: String,
+    pub actual_seconds: u64,
+    pub task_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

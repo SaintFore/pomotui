@@ -7,8 +7,8 @@ use pomotui_platform::{
     elapsed_during_recovery,
 };
 use pomotui_protocol::{
-    Command, Handler, ProtocolError, Request, Response, SessionKind, Snapshot, TaskSummary,
-    TodaySummary,
+    Command, Handler, ProtocolError, RecentSessionSummary, Request, Response, SessionKind,
+    Snapshot, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -181,11 +181,11 @@ impl Service {
                 .iter()
                 .rev()
                 .take(5)
-                .map(|record| {
-                    format!(
-                        "{:?} {:?} {}s",
-                        record.kind, record.outcome, record.actual_seconds
-                    )
+                .map(|record| RecentSessionSummary {
+                    kind: map_kind(record.kind),
+                    outcome: format!("{:?}", record.outcome),
+                    actual_seconds: record.actual_seconds,
+                    task_title: record.task_title.clone(),
                 })
                 .collect(),
         }
@@ -873,6 +873,10 @@ mod tests {
             };
             assert_eq!(history.as_array().expect("array").len(), 1);
             assert_eq!(history[0]["outcome"], "Stopped");
+            assert_eq!(
+                service.snapshot().recent_history[0].task_title.as_deref(),
+                Some("Durable Task")
+            );
         }
         std::fs::remove_file(path).expect("cleanup");
     }
