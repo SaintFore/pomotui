@@ -8,7 +8,7 @@ use pomotui_platform::{
 };
 use pomotui_protocol::{
     Command, Handler, ProtocolError, RecentSessionSummary, Request, Response, SessionKind,
-    Snapshot, TaskSummary, TodaySummary,
+    Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -169,12 +169,14 @@ impl Service {
                     focus_seconds: self.history.focus_seconds_for_task(task.id()),
                 })
                 .collect(),
-            today: TodaySummary {
+            today: Box::new(TodaySummary {
                 focus_seconds: summary.focus_seconds[6],
                 completed_rounds: summary.completed_rounds[6],
                 seven_day_focus_seconds: summary.focus_seconds,
+                seven_day_dates: seven_day_dates(starts),
                 average_focus_seconds: summary.average_focus_seconds(),
-            },
+                task_focus: today_task_focus(&self.history, starts[6], starts[7]),
+            }),
             recent_history: self
                 .history
                 .records()
@@ -509,6 +511,46 @@ fn local_day_boundaries(wall: i64) -> [i64; 8] {
             .earliest()
             .map_or(wall, |boundary| boundary.timestamp())
     })
+}
+
+fn seven_day_dates(starts: [i64; 8]) -> [String; 7] {
+    use chrono::{Local, TimeZone};
+    std::array::from_fn(|index| {
+        Local
+            .timestamp_opt(starts[index], 0)
+            .earliest()
+            .map_or_else(
+                || "---- -- --".into(),
+                |date| date.format("%Y-%m-%d").to_string(),
+            )
+    })
+}
+
+fn today_task_focus(history: &History, start: i64, end: i64) -> Vec<TaskFocusSummary> {
+    let mut totals = std::collections::BTreeMap::<Option<String>, u64>::new();
+    for record in history.records() {
+        if record.kind == DomainKind::Focus
+            && record.ended_at >= start
+            && record.ended_at < end
+            && record.actual_seconds > 0
+        {
+            *totals.entry(record.task_title.clone()).or_default() += record.actual_seconds;
+        }
+    }
+    let mut summaries = totals
+        .into_iter()
+        .map(|(task_title, focus_seconds)| TaskFocusSummary {
+            task_title,
+            focus_seconds,
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .focus_seconds
+            .cmp(&left.focus_seconds)
+            .then_with(|| left.task_title.cmp(&right.task_title))
+    });
+    summaries
 }
 
 #[derive(Deserialize, Serialize)]
@@ -963,5 +1005,39 @@ mod tests {
         assert!(boundaries.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(wall >= boundaries[6]);
         assert!(wall < boundaries[7]);
+    }
+
+    #[test]
+    fn today_task_focus_excludes_older_history_and_sorts_descending() {
+        let mut service = Service::new();
+        let starts = local_day_boundaries(service.wall);
+        for (ended_at, title, seconds) in [
+            (starts[6] + 10, Some("Second"), 300),
+            (starts[6] + 20, Some("First"), 900),
+            (starts[5] + 20, Some("Older"), 3_600),
+            (starts[6] + 30, None, 120),
+        ] {
+            service.history.push(SessionRecord {
+                ended_at,
+                kind: DomainKind::Focus,
+                outcome: SessionOutcome::Completed,
+                planned_seconds: seconds,
+                actual_seconds: seconds,
+                task_id: None,
+                task_title: title.map(str::to_owned),
+            });
+        }
+
+        let today = service.snapshot().today;
+        assert_eq!(today.focus_seconds, 1_320);
+        assert_eq!(
+            today
+                .task_focus
+                .iter()
+                .map(|item| (item.task_title.as_deref(), item.focus_seconds))
+                .collect::<Vec<_>>(),
+            [(Some("First"), 900), (Some("Second"), 300), (None, 120)]
+        );
+        assert!(today.seven_day_dates[6].starts_with("20"));
     }
 }

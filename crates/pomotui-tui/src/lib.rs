@@ -808,11 +808,7 @@ fn today_lines(
             "正在等待计时服务",
         ))];
     };
-    let touched = snapshot
-        .tasks
-        .iter()
-        .filter(|task| task.focus_seconds > 0)
-        .count();
+    let touched = snapshot.today.task_focus.len();
     vec![
         Line::from(Span::styled(
             human_duration(snapshot.today.focus_seconds),
@@ -877,7 +873,7 @@ fn today_view(
         vertical: 1,
     });
     frame.render_widget(
-        Paragraph::new(today_lines(snapshot, colors, language))
+        Paragraph::new(today_report_lines(snapshot, colors, language))
             .block(panel(
                 text(
                     language,
@@ -889,6 +885,137 @@ fn today_view(
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn today_report_lines(
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) -> Vec<Line<'static>> {
+    let Some(snapshot) = snapshot else {
+        return vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                text(language, "RECONNECTING", "正在重连"),
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(text(
+                language,
+                "Today report is waiting for the Timer Service.",
+                "今日报告正在等待计时服务。",
+            )),
+        ];
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            text(language, "TODAY AT A GLANCE", "今日概览"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "  {}  {}    │    {}  {}    │    {}  {}",
+            human_duration(snapshot.today.focus_seconds),
+            text(language, "Focus time", "专注时间"),
+            snapshot.today.completed_rounds,
+            text(language, "Completed Rounds", "完成轮次"),
+            snapshot.today.task_focus.len(),
+            text(language, "Tasks touched", "涉及任务")
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "7-DAY FOCUS", "7 天专注"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let maximum = snapshot
+        .today
+        .seven_day_focus_seconds
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    for index in 0..7 {
+        let seconds = snapshot.today.seven_day_focus_seconds[index];
+        let label = if index == 6 {
+            text(language, "Today", "今天").to_owned()
+        } else {
+            snapshot.today.seven_day_dates[index]
+                .get(5..)
+                .unwrap_or(&snapshot.today.seven_day_dates[index])
+                .to_owned()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {label:<5}  "), Style::default().fg(colors.muted)),
+            Span::styled(
+                report_bar(seconds, maximum, 24),
+                Style::default().fg(colors.accent),
+            ),
+            Span::raw(format!("  {}", human_duration(seconds))),
+        ]));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "TODAY BY TASK", "今日任务贡献"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    lines.extend(today_task_lines(snapshot, colors, language));
+    lines
+}
+
+fn today_task_lines(snapshot: &Snapshot, colors: Colors, language: Language) -> Vec<Line<'static>> {
+    if snapshot.today.task_focus.is_empty() {
+        return vec![Line::from(text(
+            language,
+            "  No Focus time recorded today.",
+            "  今天尚未记录专注时间。",
+        ))];
+    }
+    let maximum = snapshot.today.task_focus[0].focus_seconds;
+    snapshot
+        .today
+        .task_focus
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let title = task
+                .task_title
+                .as_deref()
+                .unwrap_or(text(language, "No Task", "无任务"));
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:02}  ", index + 1),
+                    Style::default().fg(colors.muted),
+                ),
+                Span::styled(
+                    format!("{:<24}", truncate(title, 24)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    report_bar(task.focus_seconds, maximum, 12),
+                    Style::default().fg(colors.good),
+                ),
+                Span::raw(format!("  {}", human_duration(task.focus_seconds))),
+            ])
+        })
+        .collect()
+}
+
+fn report_bar(value: u64, maximum: u64, width: usize) -> String {
+    if maximum == 0 {
+        return "·".repeat(width);
+    }
+    let filled = usize::try_from(value.saturating_mul(width as u64) / maximum)
+        .unwrap_or(width)
+        .min(width);
+    format!("{}{}", "█".repeat(filled), "·".repeat(width - filled))
 }
 
 fn trend(values: [u64; 7]) -> String {
@@ -1728,12 +1855,31 @@ mod tests {
                 completed: false,
                 focus_seconds: 1_500,
             }],
-            today: pomotui_protocol::TodaySummary {
+            today: Box::new(pomotui_protocol::TodaySummary {
                 focus_seconds: 3_000,
                 completed_rounds: 2,
                 seven_day_focus_seconds: [0, 600, 1_200, 900, 1_500, 2_400, 3_000],
+                seven_day_dates: [
+                    "2026-07-21".into(),
+                    "2026-07-22".into(),
+                    "2026-07-23".into(),
+                    "2026-07-24".into(),
+                    "2026-07-25".into(),
+                    "2026-07-26".into(),
+                    "2026-07-27".into(),
+                ],
                 average_focus_seconds: 1_371,
-            },
+                task_focus: vec![
+                    pomotui_protocol::TaskFocusSummary {
+                        task_title: Some("Ship Pomotui".into()),
+                        focus_seconds: 2_400,
+                    },
+                    pomotui_protocol::TaskFocusSummary {
+                        task_title: None,
+                        focus_seconds: 600,
+                    },
+                ],
+            }),
             recent_history: vec![
                 pomotui_protocol::RecentSessionSummary {
                     kind: SessionKind::Focus,
@@ -2050,6 +2196,42 @@ mod tests {
             for label in expected {
                 assert!(rendered.contains(label), "missing {label}: {rendered}");
             }
+        }
+    }
+
+    #[test]
+    fn today_report_has_metrics_daily_values_and_task_contributions() {
+        for (width, language, expected) in [
+            (
+                100,
+                Language::English,
+                ["TODAY AT A GLANCE", "7-DAY FOCUS", "TODAY BY TASK"],
+            ),
+            (60, Language::SimplifiedChinese, ["概", "天", "任"]),
+        ] {
+            let mut app = App::new(
+                Some(snapshot("pending", SessionKind::Focus)),
+                Theme::VermilionPaperDark,
+            );
+            app.language = language;
+            app.view = View::Today;
+            let mut terminal = Terminal::new(TestBackend::new(width, 32)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("today");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            for label in expected {
+                assert!(rendered.contains(label), "missing {label}: {rendered}");
+            }
+            assert!(rendered.contains("07-21"));
+            assert!(rendered.contains("Ship Pomotui"));
+            assert!(rendered.contains("50m"));
         }
     }
 

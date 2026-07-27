@@ -129,7 +129,7 @@ mod tests {
                         rounds_per_cycle: 4,
                         next_kind: None,
                         tasks: vec![],
-                        today: pomotui_protocol::TodaySummary::default(),
+                        today: Box::new(pomotui_protocol::TodaySummary::default()),
                         recent_history: vec![],
                     },
                 },

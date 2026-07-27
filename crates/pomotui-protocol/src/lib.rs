@@ -100,7 +100,7 @@ pub struct Snapshot {
     pub rounds_per_cycle: u8,
     pub next_kind: Option<SessionKind>,
     pub tasks: Vec<TaskSummary>,
-    pub today: TodaySummary,
+    pub today: Box<TodaySummary>,
     pub recent_history: Vec<RecentSessionSummary>,
 }
 
@@ -125,7 +125,15 @@ pub struct TodaySummary {
     pub focus_seconds: u64,
     pub completed_rounds: u32,
     pub seven_day_focus_seconds: [u64; 7],
+    pub seven_day_dates: [String; 7],
     pub average_focus_seconds: u64,
+    pub task_focus: Vec<TaskFocusSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskFocusSummary {
+    pub task_title: Option<String>,
+    pub focus_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
