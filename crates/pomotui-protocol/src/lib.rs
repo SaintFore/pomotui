@@ -79,6 +79,11 @@ pub enum Command {
         chain_entry_title: Option<String>,
     },
     ActionChainArchive,
+    ChainEntryEdit {
+        id: u64,
+        reflection: Option<String>,
+        chain_entry_title: Option<String>,
+    },
 }
 
 impl Command {

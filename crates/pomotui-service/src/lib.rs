@@ -670,6 +670,59 @@ impl Service {
         Ok(())
     }
 
+    fn edit_chain_entry(
+        &mut self,
+        id: u64,
+        reflection: Option<String>,
+        chain_entry_title: Option<String>,
+    ) -> Result<(), String> {
+        let reflection = reflection
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let chain_entry_title = chain_entry_title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if let Some(link) = self.chain_links.iter_mut().find(|link| link.id == id) {
+            if link.task_id == self.void_task_id.unwrap_or(u64::MAX) {
+                if let Some(title) = chain_entry_title {
+                    link.chain_entry_title = Some(title);
+                }
+            } else if chain_entry_title.is_some() {
+                return Err("Only Void entries can have a Chain Entry Title".into());
+            }
+            link.reflection = reflection;
+            return Ok(());
+        }
+        for chain in &mut self.ended_chains {
+            if let Some(link) = chain.links.iter_mut().find(|link| link.id == id) {
+                if link.task_id == self.void_task_id.unwrap_or(u64::MAX) {
+                    if let Some(title) = chain_entry_title {
+                        link.chain_entry_title = Some(title);
+                    }
+                } else if chain_entry_title.is_some() {
+                    return Err("Only Void entries can have a Chain Entry Title".into());
+                }
+                link.reflection = reflection;
+                return Ok(());
+            }
+            if chain.chain_break.id == id {
+                let Some(reflection) = reflection else {
+                    return Err("Chain Break requires a Reflection".into());
+                };
+                if chain.chain_break.task_id == self.void_task_id.unwrap_or(u64::MAX) {
+                    if let Some(title) = chain_entry_title {
+                        chain.chain_break.chain_entry_title = Some(title);
+                    }
+                } else if chain_entry_title.is_some() {
+                    return Err("Only Void entries can have a Chain Entry Title".into());
+                }
+                chain.chain_break.reflection = reflection;
+                return Ok(());
+            }
+        }
+        Err(format!("Chain entry {id} does not exist"))
+    }
+
     fn persist(&mut self, key: Option<&str>) -> Result<(), String> {
         let payload = PersistedService::encode(self)?;
         let Some(repository) = &mut self.repository else {
@@ -1079,6 +1132,12 @@ impl Handler for Service {
             Command::HistoryDelete { ids } => {
                 if ids.is_empty() {
                     Err("Select at least one Session History entry".into())
+                } else if self
+                    .pending_review
+                    .as_ref()
+                    .is_some_and(|review| ids.contains(&review.session_id))
+                {
+                    Err("Session History with Pending Review cannot be deleted".into())
                 } else if self.history.delete(&ids) == 0 {
                     Err("Selected Session History entries no longer exist".into())
                 } else {
@@ -1146,6 +1205,11 @@ impl Handler for Service {
                     }),
                 };
             }
+            Command::ChainEntryEdit {
+                id,
+                reflection,
+                chain_entry_title,
+            } => self.edit_chain_entry(id, reflection, chain_entry_title),
         };
         match result {
             Ok(()) => match self.persist(mutation_key.as_deref()) {
@@ -1937,6 +2001,59 @@ mod tests {
             snapshot.recent_ended_chains[0].break_reflection,
             "The slice was still too large"
         );
+    }
+
+    #[test]
+    fn chain_text_can_be_revised_without_changing_review_identity() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Stable identity".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop"), Command::StopReview));
+        let pending_id = service.pending_review.as_ref().expect("pending").session_id;
+        assert!(matches!(
+            service.handle(request(
+                Some("delete-pending"),
+                Command::HistoryDelete {
+                    ids: vec![pending_id],
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::Rejected { .. }
+            }
+        ));
+        service.handle(request(
+            Some("review"),
+            Command::ReviewSuccess {
+                reflection: Some("First wording".into()),
+            },
+        ));
+        let link_id = service.chain_links[0].id;
+        let session_id = service.chain_links[0].session_id;
+        service.handle(request(
+            Some("edit"),
+            Command::ChainEntryEdit {
+                id: link_id,
+                reflection: Some("Clearer wording".into()),
+                chain_entry_title: None,
+            },
+        ));
+        assert_eq!(
+            service.chain_links[0].reflection.as_deref(),
+            Some("Clearer wording")
+        );
+        assert_eq!(service.chain_links[0].session_id, session_id);
+        assert_eq!(service.chain_links[0].task_title, "Stable identity");
     }
 
     #[test]

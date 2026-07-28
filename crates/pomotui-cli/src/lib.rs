@@ -60,6 +60,23 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         }
         ["chain"] => Command::ActionChainCurrent,
         ["chain", "archive"] => Command::ActionChainArchive,
+        ["chain", "edit", id, "--reflection", reflection] => Command::ChainEntryEdit {
+            id: parse_id(id)?,
+            reflection: Some((*reflection).into()),
+            chain_entry_title: None,
+        },
+        ["chain", "edit", id, "--title", title] => Command::ChainEntryEdit {
+            id: parse_id(id)?,
+            reflection: None,
+            chain_entry_title: Some((*title).into()),
+        },
+        ["chain", "edit", id, "--title", title, "--reflection", reflection] => {
+            Command::ChainEntryEdit {
+                id: parse_id(id)?,
+                reflection: Some((*reflection).into()),
+                chain_entry_title: Some((*title).into()),
+            }
+        }
         ["review", "failure", reflection] => Command::ReviewFailure {
             reflection: (*reflection).into(),
             task_id: None,
