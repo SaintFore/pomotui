@@ -34,6 +34,7 @@ pub enum Command {
     Pause,
     Resume,
     Stop,
+    StopReview,
     Skip,
     TaskList,
     TaskCreate {

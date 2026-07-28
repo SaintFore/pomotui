@@ -89,6 +89,7 @@ pub enum Overlay {
     ConfirmDelete,
     ConfirmTaskSwitch,
     ConfirmHistoryDelete,
+    StopChoice,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,7 +250,7 @@ impl App {
                 return Some(self.emit(pomotui_protocol::Command::Skip));
             }
             InputKey::Char('X') => {
-                return Some(self.emit(pomotui_protocol::Command::Stop));
+                self.overlay = Overlay::StopChoice;
             }
             InputKey::Char(' ') | InputKey::AltSpace if self.view == View::History => {
                 self.toggle_history_mark();
@@ -364,6 +365,11 @@ impl App {
                     self.overlay = Overlay::None;
                     None
                 }
+                _ => None,
+            },
+            Overlay::StopChoice => match key {
+                InputKey::Char('r' | 'R') => Some(self.emit(pomotui_protocol::Command::StopReview)),
+                InputKey::Char('n' | 'N') => Some(self.emit(pomotui_protocol::Command::Stop)),
                 _ => None,
             },
         }
@@ -576,7 +582,10 @@ impl App {
     fn run_palette_item(&mut self) -> Option<Action> {
         match PALETTE_ITEMS[self.palette_index].command {
             PaletteCommand::Toggle => self.toggle_session(),
-            PaletteCommand::Stop => Some(self.emit(pomotui_protocol::Command::Stop)),
+            PaletteCommand::Stop => {
+                self.overlay = Overlay::StopChoice;
+                None
+            }
             PaletteCommand::Skip => Some(self.emit(pomotui_protocol::Command::Skip)),
             PaletteCommand::StartFocus => Some(self.start_selected_focus()),
             PaletteCommand::StartFocusWithoutTask => {
@@ -2143,7 +2152,8 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::RenameTask
         | Overlay::ConfirmDelete
         | Overlay::ConfirmTaskSwitch
-        | Overlay::ConfirmHistoryDelete => 7.min(area.height.saturating_sub(2)),
+        | Overlay::ConfirmHistoryDelete
+        | Overlay::StopChoice => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
     };
     let modal = if app.narrow {
@@ -2160,8 +2170,33 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
         Overlay::ConfirmTaskSwitch => confirm_task_switch_overlay(frame, modal, app, colors),
         Overlay::ConfirmHistoryDelete => confirm_history_delete_overlay(frame, modal, app, colors),
+        Overlay::StopChoice => stop_choice_overlay(frame, modal, app, colors),
         Overlay::None => {}
     }
+}
+
+fn stop_choice_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(text(
+                app.language,
+                "How should this stopped Focus Session be recorded?",
+                "这次提前停止的专注时段应如何记录？",
+            )),
+            Line::from(""),
+            Line::from(text(
+                app.language,
+                "R  Stop and review    N  Stop without review    Esc  Cancel",
+                "R  停止并复盘    N  停止但不复盘    Esc  取消",
+            )),
+        ])
+        .block(panel(
+            text(app.language, "STOP SESSION", "停止时段"),
+            colors,
+        ))
+        .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn palette_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {

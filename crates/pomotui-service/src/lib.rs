@@ -751,6 +751,25 @@ impl Handler for Service {
                 let transition = self.timer.stop(self.now);
                 self.apply_transition(transition, planned)
             }
+            Command::StopReview => {
+                let planned = self.timer.planned_seconds();
+                let transition = self.timer.stop(self.now);
+                self.apply_transition(transition, planned).and_then(|()| {
+                    let Some(record) = self.history.records().last() else {
+                        return Err("Stopped Session was not recorded".into());
+                    };
+                    if record.kind != DomainKind::Focus {
+                        return Err("Only a stopped Focus Session can enter Session Review".into());
+                    }
+                    self.pending_review = Some(PendingReviewState {
+                        session_id: record.id,
+                        actual_seconds: record.actual_seconds,
+                        task_id: record.task_id.map(TaskId::get),
+                        task_title: record.task_title.clone(),
+                    });
+                    Ok(())
+                })
+            }
             Command::Skip => {
                 let planned = self.timer.planned_seconds();
                 let transition = self.timer.skip();
@@ -1562,6 +1581,41 @@ mod tests {
             panic!("idempotent replay");
         };
         assert_eq!(snapshot.action_chain.length, 1);
+    }
+
+    #[test]
+    fn early_stop_enters_review_only_when_explicitly_requested() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("start-reviewed"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: None,
+            },
+        ));
+        service.handle(request(Some("stop-reviewed"), Command::StopReview));
+        let review = service.snapshot().pending_review.expect("pending review");
+        assert_eq!(review.actual_seconds, 0);
+
+        service.pending_review = None;
+        service.handle(request(
+            Some("start-unreviewed"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: None,
+            },
+        ));
+        service.handle(request(Some("stop-unreviewed"), Command::Stop));
+        assert!(service.snapshot().pending_review.is_none());
+        assert_eq!(
+            service
+                .history
+                .records()
+                .last()
+                .expect("history")
+                .actual_seconds,
+            0
+        );
     }
 
     #[test]
