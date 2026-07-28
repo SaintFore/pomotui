@@ -294,6 +294,28 @@ impl History {
         before.saturating_sub(self.records.len())
     }
 
+    /// Attributes a previously unattributed Session History record.
+    pub fn attribute(
+        &mut self,
+        session_id: u64,
+        task_id: TaskId,
+        task_title: &str,
+    ) -> Result<(), &'static str> {
+        let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|record| record.id == session_id)
+        else {
+            return Err("Session History entry does not exist");
+        };
+        if record.task_id.is_some() {
+            return Err("Session History entry is already attributed");
+        }
+        record.task_id = Some(task_id);
+        record.task_title = Some(task_title.to_owned());
+        Ok(())
+    }
+
     #[must_use]
     pub fn records(&self) -> &[SessionRecord] {
         &self.records

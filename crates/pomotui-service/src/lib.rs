@@ -132,6 +132,7 @@ pub struct Service {
     pending_review: Option<PendingReviewState>,
     chain_links: Vec<ChainLinkState>,
     next_chain_entry_id: u64,
+    void_task_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -190,6 +191,7 @@ impl Service {
             pending_review: None,
             chain_links: Vec::new(),
             next_chain_entry_id: 1,
+            void_task_id: None,
         }
     }
 
@@ -482,6 +484,75 @@ impl Service {
     ) -> Result<(), String> {
         let transition = result.map_err(|error| error.to_string())?;
         self.record(&transition, planned_seconds);
+        Ok(())
+    }
+
+    fn review_success(
+        &mut self,
+        task_id: Option<u64>,
+        use_void: bool,
+        chain_entry_title: Option<String>,
+        reflection: Option<String>,
+    ) -> Result<(), String> {
+        let chain_entry_title = chain_entry_title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if use_void && chain_entry_title.is_none() {
+            return Err("Void Session Review requires a Chain Entry Title".into());
+        }
+        if !use_void && chain_entry_title.is_some() {
+            return Err("Only Void entries can have a Chain Entry Title".into());
+        }
+        let Some(mut review) = self.pending_review.take() else {
+            return Err("No Pending Review is available".into());
+        };
+        if review.task_id.is_none() {
+            let assigned_id = if use_void {
+                if let Some(id) = self.void_task_id {
+                    TaskId::new(id)
+                } else {
+                    let id = self
+                        .tasks
+                        .create("Void")
+                        .map_err(|error| error.to_string())?;
+                    self.void_task_id = Some(id.get());
+                    id
+                }
+            } else {
+                TaskId::new(
+                    task_id.ok_or("Pending Review must be assigned to a Task before submission")?,
+                )
+            };
+            let task_title = self
+                .tasks
+                .get(assigned_id)
+                .map_err(|error| error.to_string())?
+                .title()
+                .to_owned();
+            self.history
+                .attribute(review.session_id, assigned_id, &task_title)
+                .map_err(str::to_owned)?;
+            review.task_id = Some(assigned_id.get());
+            review.task_title = Some(task_title);
+        }
+        let is_void = review.task_id == self.void_task_id;
+        if is_void && chain_entry_title.is_none() {
+            self.pending_review = Some(review);
+            return Err("Void Session Review requires a Chain Entry Title".into());
+        }
+        let task_id = review.task_id.expect("review attribution validated");
+        let task_title = review.task_title.expect("review Task snapshot validated");
+        self.chain_links.push(ChainLinkState {
+            id: self.next_chain_entry_id,
+            session_id: review.session_id,
+            task_id,
+            task_title,
+            actual_seconds: review.actual_seconds,
+            reflection: reflection.filter(|value| !value.trim().is_empty()),
+            chain_entry_title,
+        });
+        self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+        self.current_chain_length = self.current_chain_length.saturating_add(1);
         Ok(())
     }
 
@@ -804,6 +875,9 @@ impl Handler for Service {
                 };
             }
             Command::TaskRename { id, title } => {
+                if self.void_task_id == Some(id) {
+                    return Self::rejected("Void Task cannot be renamed");
+                }
                 return match self.tasks.rename(pomotui_domain::TaskId::new(id), title) {
                     Ok(()) => match self.persist(mutation_key.as_deref()) {
                         Ok(()) => Response::Snapshot {
@@ -814,15 +888,23 @@ impl Handler for Service {
                     Err(error) => Self::task_rejected(error),
                 };
             }
-            Command::TaskComplete { id } => self
-                .tasks
-                .complete(pomotui_domain::TaskId::new(id))
-                .map_err(|error| error.to_string()),
+            Command::TaskComplete { id } => {
+                if self.void_task_id == Some(id) {
+                    Err("Void Task cannot be completed".into())
+                } else {
+                    self.tasks
+                        .complete(pomotui_domain::TaskId::new(id))
+                        .map_err(|error| error.to_string())
+                }
+            }
             Command::TaskReopen { id } => self
                 .tasks
                 .reopen(pomotui_domain::TaskId::new(id))
                 .map_err(|error| error.to_string()),
             Command::TaskDelete { id } => {
+                if self.void_task_id == Some(id) {
+                    return Self::rejected("Void Task cannot be deleted");
+                }
                 let id = pomotui_domain::TaskId::new(id);
                 self.tasks
                     .get(id)
@@ -901,32 +983,19 @@ impl Handler for Service {
                 };
             }
             Command::ReviewSuccess { reflection } => {
-                if self
-                    .pending_review
-                    .as_ref()
-                    .is_some_and(|review| review.task_id.is_none() || review.task_title.is_none())
-                {
-                    return Self::rejected(
-                        "Pending Review must be assigned to a Task before submission",
-                    );
+                self.review_success(None, false, None, reflection)
+            }
+            Command::ReviewSuccessAssign {
+                task_id,
+                use_void,
+                chain_entry_title,
+                reflection,
+            } => {
+                if task_id.is_some() == use_void {
+                    Err("Choose exactly one regular Task or the Void Task".into())
+                } else {
+                    self.review_success(task_id, use_void, chain_entry_title, reflection)
                 }
-                let Some(review) = self.pending_review.take() else {
-                    return Self::rejected("No Pending Review is available");
-                };
-                let task_id = review.task_id.expect("validated Task identity");
-                let task_title = review.task_title.expect("validated Task snapshot");
-                self.chain_links.push(ChainLinkState {
-                    id: self.next_chain_entry_id,
-                    session_id: review.session_id,
-                    task_id,
-                    task_title,
-                    actual_seconds: review.actual_seconds,
-                    reflection: reflection.filter(|value| !value.trim().is_empty()),
-                    chain_entry_title: None,
-                });
-                self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
-                self.current_chain_length = self.current_chain_length.saturating_add(1);
-                Ok(())
             }
             Command::ActionChainCurrent => {
                 return Response::Data {
@@ -1049,6 +1118,8 @@ struct PersistedService {
     chain_links: Vec<ChainLinkState>,
     #[serde(default = "default_next_identity")]
     next_chain_entry_id: u64,
+    #[serde(default)]
+    void_task_id: Option<u64>,
 }
 
 const fn default_chain_id() -> u64 {
@@ -1194,6 +1265,7 @@ impl PersistedService {
             pending_review: service.pending_review.clone(),
             chain_links: service.chain_links.clone(),
             next_chain_entry_id: service.next_chain_entry_id,
+            void_task_id: service.void_task_id,
         };
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
@@ -1330,6 +1402,7 @@ impl PersistedService {
             pending_review: persisted.pending_review,
             chain_links: persisted.chain_links,
             next_chain_entry_id: persisted.next_chain_entry_id,
+            void_task_id: persisted.void_task_id,
         })
     }
 }
@@ -1616,6 +1689,63 @@ mod tests {
                 .actual_seconds,
             0
         );
+    }
+
+    #[test]
+    fn unattributed_review_can_use_the_protected_void_task() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: None,
+            },
+        ));
+        service.handle(request(Some("stop"), Command::StopReview));
+
+        let response = service.handle(request(
+            Some("void-review"),
+            Command::ReviewSuccessAssign {
+                task_id: None,
+                use_void: true,
+                chain_entry_title: Some("Explore the review flow".into()),
+                reflection: Some("Found the next step".into()),
+            },
+        ));
+        let Response::Snapshot { snapshot } = response else {
+            panic!("successful Void review");
+        };
+        let void = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.title == "Void")
+            .expect("system Void Task");
+        assert_eq!(snapshot.recent_chain_links[0].task_title, "Void");
+        assert_eq!(
+            snapshot.recent_chain_links[0].chain_entry_title.as_deref(),
+            Some("Explore the review flow")
+        );
+        assert!(matches!(
+            service.handle(request(
+                Some("rename-void"),
+                Command::TaskRename {
+                    id: void.id,
+                    title: "Hidden".into(),
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::Rejected { .. }
+            }
+        ));
+        assert!(matches!(
+            service.handle(request(
+                Some("delete-void"),
+                Command::TaskDelete { id: void.id }
+            )),
+            Response::Error {
+                error: ProtocolError::Rejected { .. }
+            }
+        ));
     }
 
     #[test]

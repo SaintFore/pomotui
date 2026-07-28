@@ -38,6 +38,26 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["review", "success", "--reflection", reflection] => Command::ReviewSuccess {
             reflection: Some((*reflection).into()),
         },
+        ["review", "success", "--task", id] => Command::ReviewSuccessAssign {
+            task_id: Some(parse_id(id)?),
+            use_void: false,
+            chain_entry_title: None,
+            reflection: None,
+        },
+        ["review", "success", "--void", title] => Command::ReviewSuccessAssign {
+            task_id: None,
+            use_void: true,
+            chain_entry_title: Some((*title).into()),
+            reflection: None,
+        },
+        ["review", "success", "--void", title, "--reflection", reflection] => {
+            Command::ReviewSuccessAssign {
+                task_id: None,
+                use_void: true,
+                chain_entry_title: Some((*title).into()),
+                reflection: Some((*reflection).into()),
+            }
+        }
         ["chain"] => Command::ActionChainCurrent,
         _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
     };

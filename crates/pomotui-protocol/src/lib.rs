@@ -65,6 +65,12 @@ pub enum Command {
     ReviewSuccess {
         reflection: Option<String>,
     },
+    ReviewSuccessAssign {
+        task_id: Option<u64>,
+        use_void: bool,
+        chain_entry_title: Option<String>,
+        reflection: Option<String>,
+    },
     ActionChainCurrent,
 }
 

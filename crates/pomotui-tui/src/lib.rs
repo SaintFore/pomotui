@@ -90,6 +90,7 @@ pub enum Overlay {
     ConfirmTaskSwitch,
     ConfirmHistoryDelete,
     StopChoice,
+    ReviewVoidTitle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +185,7 @@ impl App {
         self.handle_key(key)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn handle_key(&mut self, key: InputKey) -> Option<Action> {
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
@@ -214,6 +216,15 @@ impl App {
                 self.visual_anchor = self
                     .visual_anchor
                     .map_or(Some(self.history_cursor), |_| None);
+            }
+            InputKey::Char('V')
+                if self.view == View::Chain
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
+            {
+                self.begin_text_entry(Overlay::ReviewVoidTitle);
             }
             InputKey::Char('j') | InputKey::Down => {
                 if self.view == View::History {
@@ -263,9 +274,22 @@ impl App {
                         .as_ref()
                         .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
             {
-                return Some(
-                    self.emit(pomotui_protocol::Command::ReviewSuccess { reflection: None }),
-                );
+                let unattributed = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.pending_review.as_ref())
+                    .is_some_and(|review| review.task_id.is_none());
+                let command = if unattributed {
+                    pomotui_protocol::Command::ReviewSuccessAssign {
+                        task_id: Some(self.selected_task()?.id),
+                        use_void: false,
+                        chain_entry_title: None,
+                        reflection: None,
+                    }
+                } else {
+                    pomotui_protocol::Command::ReviewSuccess { reflection: None }
+                };
+                return Some(self.emit(command));
             }
             InputKey::Enter => return self.select_current_task(),
             _ => {}
@@ -310,7 +334,7 @@ impl App {
                 None
             }
             Overlay::Help | Overlay::None => None,
-            Overlay::CreateTask | Overlay::RenameTask => match key {
+            Overlay::CreateTask | Overlay::RenameTask | Overlay::ReviewVoidTitle => match key {
                 InputKey::Char(value) if !value.is_control() => {
                     self.input.push(value);
                     None
@@ -521,6 +545,12 @@ impl App {
                 let id = self.selected_task()?.id;
                 pomotui_protocol::Command::TaskRename { id, title }
             }
+            Overlay::ReviewVoidTitle => pomotui_protocol::Command::ReviewSuccessAssign {
+                task_id: None,
+                use_void: true,
+                chain_entry_title: Some(title),
+                reflection: None,
+            },
             _ => return None,
         };
         self.overlay = Overlay::None;
@@ -2153,7 +2183,8 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::ConfirmDelete
         | Overlay::ConfirmTaskSwitch
         | Overlay::ConfirmHistoryDelete
-        | Overlay::StopChoice => 7.min(area.height.saturating_sub(2)),
+        | Overlay::StopChoice
+        | Overlay::ReviewVoidTitle => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
     };
     let modal = if app.narrow {
@@ -2166,7 +2197,9 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
         Overlay::Help => help_overlay(frame, modal, app, colors),
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
-        Overlay::CreateTask | Overlay::RenameTask => text_entry_overlay(frame, modal, app, colors),
+        Overlay::CreateTask | Overlay::RenameTask | Overlay::ReviewVoidTitle => {
+            text_entry_overlay(frame, modal, app, colors);
+        }
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
         Overlay::ConfirmTaskSwitch => confirm_task_switch_overlay(frame, modal, app, colors),
         Overlay::ConfirmHistoryDelete => confirm_history_delete_overlay(frame, modal, app, colors),
@@ -2398,15 +2431,24 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
 }
 
 fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
-    let title = if app.overlay == Overlay::CreateTask {
-        text(app.language, "CREATE TASK", "新建任务")
-    } else {
-        text(app.language, "RENAME TASK", "重命名任务")
+    let (title, label) = match app.overlay {
+        Overlay::CreateTask => (
+            text(app.language, "CREATE TASK", "新建任务"),
+            text(app.language, "Task title", "任务标题"),
+        ),
+        Overlay::ReviewVoidTitle => (
+            text(app.language, "REVIEW VOID SESSION", "复盘 VOID 时段"),
+            text(app.language, "Chain Entry Title", "行动链条目标题"),
+        ),
+        _ => (
+            text(app.language, "RENAME TASK", "重命名任务"),
+            text(app.language, "Task title", "任务标题"),
+        ),
     };
     let cursor = format!("{}█", app.input);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(text(app.language, "Task title", "任务标题")),
+            Line::from(label),
             Line::from(Span::styled(
                 cursor,
                 Style::default()
