@@ -61,6 +61,10 @@ pub enum Command {
     },
     History,
     Summary,
+    ReviewSuccess {
+        reflection: Option<String>,
+    },
+    ActionChainCurrent,
 }
 
 impl Command {
@@ -68,7 +72,11 @@ impl Command {
     pub const fn mutates(&self) -> bool {
         !matches!(
             self,
-            Self::Status | Self::TaskList | Self::History | Self::Summary
+            Self::Status
+                | Self::TaskList
+                | Self::History
+                | Self::Summary
+                | Self::ActionChainCurrent
         )
     }
 }
@@ -118,6 +126,7 @@ pub struct Snapshot {
     pub recent_history: Vec<RecentSessionSummary>,
     pub action_chain: ActionChainSummary,
     pub pending_review: Option<PendingReviewSummary>,
+    pub recent_chain_links: Vec<ChainLinkSummary>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -132,6 +141,15 @@ pub struct PendingReviewSummary {
     pub actual_seconds: u64,
     pub task_id: Option<u64>,
     pub task_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChainLinkSummary {
+    pub id: u64,
+    pub task_title: String,
+    pub actual_seconds: u64,
+    pub reflection: Option<String>,
+    pub chain_entry_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

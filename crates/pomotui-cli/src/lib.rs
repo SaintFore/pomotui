@@ -33,6 +33,11 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["task", "delete", id] => Command::TaskDelete { id: parse_id(id)? },
         ["history"] => Command::History,
         ["summary"] => Command::Summary,
+        ["review", "success"] => Command::ReviewSuccess { reflection: None },
+        ["review", "success", "--reflection", reflection] => Command::ReviewSuccess {
+            reflection: Some((*reflection).into()),
+        },
+        ["chain"] => Command::ActionChainCurrent,
         _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
@@ -158,6 +163,7 @@ mod tests {
                         recent_history: vec![],
                         action_chain: pomotui_protocol::ActionChainSummary::default(),
                         pending_review: None,
+                        recent_chain_links: vec![],
                     },
                 },
                 false,
@@ -203,6 +209,7 @@ mod tests {
                 recent_history: vec![],
                 action_chain: pomotui_protocol::ActionChainSummary::default(),
                 pending_review: None,
+                recent_chain_links: vec![],
             },
         };
 
@@ -239,6 +246,7 @@ mod tests {
             recent_history: vec![],
             action_chain: pomotui_protocol::ActionChainSummary { id: 7, length: 12 },
             pending_review: None,
+            recent_chain_links: vec![],
         };
         snapshot.pending_review = Some(pomotui_protocol::PendingReviewSummary {
             session_id: 4,

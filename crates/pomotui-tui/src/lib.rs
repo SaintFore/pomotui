@@ -72,6 +72,7 @@ pub enum Language {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum View {
     Dashboard,
+    Chain,
     Today,
     Review,
     History,
@@ -254,6 +255,17 @@ impl App {
                 self.toggle_history_mark();
             }
             InputKey::Char(' ') => return self.toggle_session(),
+            InputKey::Enter
+                if self.view == View::Chain
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
+            {
+                return Some(
+                    self.emit(pomotui_protocol::Command::ReviewSuccess { reflection: None }),
+                );
+            }
             InputKey::Enter => return self.select_current_task(),
             _ => {}
         }
@@ -796,7 +808,8 @@ fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
 
 const fn next_view(view: View) -> View {
     match view {
-        View::Dashboard => View::Today,
+        View::Dashboard => View::Chain,
+        View::Chain => View::Today,
         View::Today => View::Review,
         View::Review => View::History,
         View::History => View::Dashboard,
@@ -808,7 +821,8 @@ const fn previous_view(view: View) -> View {
         View::Dashboard => View::History,
         View::History => View::Review,
         View::Review => View::Today,
-        View::Today => View::Dashboard,
+        View::Today => View::Chain,
+        View::Chain => View::Dashboard,
     }
 }
 
@@ -852,6 +866,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     header(frame, rows[0], app, colors);
     match app.view {
         View::Dashboard => dashboard(frame, rows[1], app, colors),
+        View::Chain => chain_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
         View::Today => today_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
         View::Review => review_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
         View::History => history_view(
@@ -1009,6 +1024,69 @@ fn dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             app.language,
         );
     }
+}
+
+fn chain_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) {
+    let Some(snapshot) = snapshot else {
+        frame.render_widget(
+            Paragraph::new(text(
+                language,
+                "Waiting for Timer Service",
+                "正在等待计时服务",
+            ))
+            .block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
+            area,
+        );
+        return;
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "{} {}",
+                text(language, "Current length", "当前长度"),
+                snapshot.action_chain.length
+            ),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(if snapshot.pending_review.is_some() {
+            text(language, "Pending Review", "待复盘")
+        } else {
+            text(
+                language,
+                "Ready for the next Focus Session",
+                "可以开始下一次专注",
+            )
+        }),
+        Line::from(""),
+    ];
+    if snapshot.recent_chain_links.is_empty() {
+        lines.push(Line::from(text(
+            language,
+            "Complete and review a Focus Session to add the first link.",
+            "完成并复盘一次专注时段以添加第一个节点。",
+        )));
+    } else {
+        lines.extend(snapshot.recent_chain_links.iter().map(|link| {
+            Line::from(format!(
+                "{}  {}  {}",
+                link.task_title,
+                human_duration_precise(link.actual_seconds),
+                link.reflection.as_deref().unwrap_or("")
+            ))
+        }));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
+        area,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -2002,6 +2080,7 @@ fn timer_progress(
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let view = match app.view {
         View::Dashboard => text(app.language, "DASHBOARD", "仪表盘"),
+        View::Chain => text(app.language, "CHAIN", "行动链"),
         View::Today => text(app.language, "TODAY", "今日"),
         View::Review => text(app.language, "REVIEW", "复盘"),
         View::History => text(app.language, "HISTORY", "历史"),
@@ -2688,6 +2767,7 @@ mod tests {
             ],
             action_chain: pomotui_protocol::ActionChainSummary::default(),
             pending_review: None,
+            recent_chain_links: vec![],
         }
     }
 
@@ -2773,6 +2853,8 @@ mod tests {
             app.key('K'),
             Some(Action::Command(pomotui_protocol::Command::Skip))
         );
+        app.key('l');
+        assert_eq!(app.view, View::Chain);
         app.key('l');
         assert_eq!(app.view, View::Today);
         app.key('s');

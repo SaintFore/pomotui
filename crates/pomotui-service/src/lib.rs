@@ -9,9 +9,9 @@ use pomotui_platform::{
     elapsed_during_recovery,
 };
 use pomotui_protocol::{
-    ActionChainSummary, Command, DurableHealth, DurableHealthState, Handler, PendingReviewSummary,
-    ProtocolError, RecentSessionSummary, ReminderDelivery, Request, Response, SessionKind,
-    Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
+    ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState, Handler,
+    PendingReviewSummary, ProtocolError, RecentSessionSummary, ReminderDelivery, Request, Response,
+    SessionKind, Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -130,6 +130,8 @@ pub struct Service {
     current_chain_id: u64,
     current_chain_length: u64,
     pending_review: Option<PendingReviewState>,
+    chain_links: Vec<ChainLinkState>,
+    next_chain_entry_id: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -138,6 +140,17 @@ struct PendingReviewState {
     actual_seconds: u64,
     task_id: Option<u64>,
     task_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ChainLinkState {
+    id: u64,
+    session_id: u64,
+    task_id: u64,
+    task_title: String,
+    actual_seconds: u64,
+    reflection: Option<String>,
+    chain_entry_title: Option<String>,
 }
 
 impl Service {
@@ -175,6 +188,8 @@ impl Service {
             current_chain_id: 1,
             current_chain_length: 0,
             pending_review: None,
+            chain_links: Vec::new(),
+            next_chain_entry_id: 1,
         }
     }
 
@@ -248,6 +263,7 @@ impl Service {
         self.dispatch_pending_reminders();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn snapshot(&self) -> Snapshot {
         let (state, kind, next_kind) = match self.timer.current_session() {
             CurrentSession::Pending(session) => {
@@ -340,6 +356,19 @@ impl Service {
                     task_id: review.task_id,
                     task_title: review.task_title.clone(),
                 }),
+            recent_chain_links: self
+                .chain_links
+                .iter()
+                .rev()
+                .take(5)
+                .map(|link| ChainLinkSummary {
+                    id: link.id,
+                    task_title: link.task_title.clone(),
+                    actual_seconds: link.actual_seconds,
+                    reflection: link.reflection.clone(),
+                    chain_entry_title: link.chain_entry_title.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -459,6 +488,9 @@ impl Service {
     fn persist(&mut self, key: Option<&str>) -> Result<(), String> {
         let payload = PersistedService::encode(self)?;
         let Some(repository) = &mut self.repository else {
+            if let Some(key) = key {
+                self.applied_keys.insert(key.to_owned());
+            }
             return Ok(());
         };
         let result = if let Some(key) = key {
@@ -849,6 +881,51 @@ impl Handler for Service {
                     }),
                 };
             }
+            Command::ReviewSuccess { reflection } => {
+                if self
+                    .pending_review
+                    .as_ref()
+                    .is_some_and(|review| review.task_id.is_none() || review.task_title.is_none())
+                {
+                    return Self::rejected(
+                        "Pending Review must be assigned to a Task before submission",
+                    );
+                }
+                let Some(review) = self.pending_review.take() else {
+                    return Self::rejected("No Pending Review is available");
+                };
+                let task_id = review.task_id.expect("validated Task identity");
+                let task_title = review.task_title.expect("validated Task snapshot");
+                self.chain_links.push(ChainLinkState {
+                    id: self.next_chain_entry_id,
+                    session_id: review.session_id,
+                    task_id,
+                    task_title,
+                    actual_seconds: review.actual_seconds,
+                    reflection: reflection.filter(|value| !value.trim().is_empty()),
+                    chain_entry_title: None,
+                });
+                self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+                self.current_chain_length = self.current_chain_length.saturating_add(1);
+                Ok(())
+            }
+            Command::ActionChainCurrent => {
+                return Response::Data {
+                    value: serde_json::json!({
+                        "id": self.current_chain_id,
+                        "length": self.current_chain_length,
+                        "links": self.chain_links.iter().map(|link| serde_json::json!({
+                            "id": link.id,
+                            "session_id": link.session_id,
+                            "task_id": link.task_id,
+                            "task_title": link.task_title,
+                            "actual_seconds": link.actual_seconds,
+                            "reflection": link.reflection,
+                            "chain_entry_title": link.chain_entry_title,
+                        })).collect::<Vec<_>>(),
+                    }),
+                };
+            }
         };
         match result {
             Ok(()) => match self.persist(mutation_key.as_deref()) {
@@ -949,9 +1026,17 @@ struct PersistedService {
     current_chain_length: u64,
     #[serde(default)]
     pending_review: Option<PendingReviewState>,
+    #[serde(default)]
+    chain_links: Vec<ChainLinkState>,
+    #[serde(default = "default_next_identity")]
+    next_chain_entry_id: u64,
 }
 
 const fn default_chain_id() -> u64 {
+    1
+}
+
+const fn default_next_identity() -> u64 {
     1
 }
 
@@ -1088,6 +1173,8 @@ impl PersistedService {
             current_chain_id: service.current_chain_id,
             current_chain_length: service.current_chain_length,
             pending_review: service.pending_review.clone(),
+            chain_links: service.chain_links.clone(),
+            next_chain_entry_id: service.next_chain_entry_id,
         };
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
@@ -1222,6 +1309,8 @@ impl PersistedService {
             current_chain_id: persisted.current_chain_id,
             current_chain_length: persisted.current_chain_length,
             pending_review: persisted.pending_review,
+            chain_links: persisted.chain_links,
+            next_chain_entry_id: persisted.next_chain_entry_id,
         })
     }
 }
@@ -1418,6 +1507,61 @@ mod tests {
                 error: ProtocolError::Rejected { message }
             } if message == "Pending Review must be resolved before starting another Focus Session"
         ));
+    }
+
+    #[test]
+    fn successful_review_appends_one_chain_link_and_clears_pending_review() {
+        let mut service = Service::new();
+        service.reminders_enabled = false;
+        service
+            .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+            .expect("configure");
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Implement review".into(),
+            },
+        ));
+        let start = service.now;
+        service.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.apply_observation(start + 1, service.wall + 1);
+
+        let reviewed = service.handle(request(
+            Some("review-success"),
+            Command::ReviewSuccess {
+                reflection: Some("Kept the slice small".into()),
+            },
+        ));
+        let Response::Snapshot { snapshot } = reviewed else {
+            panic!("review snapshot");
+        };
+        assert_eq!(snapshot.action_chain.length, 1);
+        assert!(snapshot.pending_review.is_none());
+
+        let Response::Data { value } = service.handle(request(None, Command::ActionChainCurrent))
+        else {
+            panic!("chain details");
+        };
+        assert_eq!(value["links"][0]["task_title"], "Implement review");
+        assert_eq!(value["links"][0]["actual_seconds"], 1);
+        assert_eq!(value["links"][0]["reflection"], "Kept the slice small");
+
+        let replay = service.handle(request(
+            Some("review-success"),
+            Command::ReviewSuccess {
+                reflection: Some("Duplicate".into()),
+            },
+        ));
+        let Response::Snapshot { snapshot } = replay else {
+            panic!("idempotent replay");
+        };
+        assert_eq!(snapshot.action_chain.length, 1);
     }
 
     #[test]
