@@ -48,6 +48,63 @@ fn referenced_task_cannot_be_deleted_but_can_be_completed() {
 }
 
 #[test]
+fn task_titles_are_normalized_and_terminal_safe() {
+    let mut tasks = TaskStore::new();
+    let id = tasks.create("  Cafe\u{301}  ").expect("normalized title");
+    assert_eq!(tasks.get(id).expect("task").title(), "Café");
+    assert_eq!(
+        tasks
+            .resolve_title("Cafe\u{301}")
+            .expect("normalized lookup"),
+        id
+    );
+
+    for unsafe_title in [
+        "line\nbreak",
+        "escape\u{1b}[31m",
+        "reversed\u{202e}title",
+        "invisible\u{2063}separator",
+    ] {
+        assert!(matches!(
+            tasks.create(unsafe_title),
+            Err(TaskError::UnsafeTitleCharacter)
+        ));
+    }
+}
+
+#[test]
+fn task_titles_have_independent_storage_and_display_limits() {
+    let mut tasks = TaskStore::new();
+    assert!(matches!(
+        tasks.create("x".repeat(257)),
+        Err(TaskError::TitleTooLong { .. })
+    ));
+    assert!(matches!(
+        tasks.create("界".repeat(61)),
+        Err(TaskError::TitleTooWide { .. })
+    ));
+}
+
+#[test]
+fn restoring_legacy_titles_validates_without_silently_normalizing() {
+    let decomposed = "Cafe\u{301}".to_owned();
+    let tasks = TaskStore::restore(
+        vec![(TaskId::new(1), decomposed.clone(), TaskStatus::Open)],
+        2,
+    )
+    .expect("safe legacy title");
+    assert_eq!(tasks.get(TaskId::new(1)).expect("task").title(), decomposed);
+
+    assert!(matches!(
+        TaskStore::restore(
+            vec![(TaskId::new(1), "bad\u{1b}".into(), TaskStatus::Open)],
+            2
+        ),
+        Err(TaskError::UnsafeTitleCharacter)
+    ));
+}
+
+#[test]
 fn seven_day_summary_counts_actual_focus_and_only_completed_rounds() {
     let mut history = History::default();
     for (id, ended_at, outcome, seconds) in [

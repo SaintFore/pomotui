@@ -166,9 +166,19 @@ pub enum ProtocolError {
     RequestTooLarge { max_bytes: usize },
     RequestTimeout,
     ServerBusy,
+    InvalidTaskTitle { rule: TaskTitleRule },
     Malformed { message: String },
     Rejected { message: String },
     Disconnected { message: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTitleRule {
+    Empty,
+    UnsafeCharacter,
+    TooLong,
+    TooWide,
 }
 
 pub trait Handler {

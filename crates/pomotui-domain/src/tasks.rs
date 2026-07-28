@@ -2,6 +2,11 @@
 
 use crate::{DomainEvent, SessionKind, SessionOutcome, TaskId};
 use core::fmt;
+use unicode_normalization::UnicodeNormalization;
+use unicode_width::UnicodeWidthStr;
+
+const MAX_TASK_TITLE_BYTES: usize = 256;
+const MAX_TASK_TITLE_COLUMNS: usize = 120;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskStatus {
@@ -12,7 +17,7 @@ pub enum TaskStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Task {
     id: TaskId,
-    title: String,
+    title: TaskTitle,
     status: TaskStatus,
 }
 
@@ -24,13 +29,68 @@ impl Task {
 
     #[must_use]
     pub fn title(&self) -> &str {
-        &self.title
+        self.title.as_str()
     }
 
     #[must_use]
     pub const fn status(&self) -> TaskStatus {
         self.status
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskTitle(String);
+
+impl TaskTitle {
+    pub fn parse(title: &str) -> Result<Self, TaskError> {
+        let normalized: String = title.trim().nfc().collect();
+        Self::validate(normalized)
+    }
+
+    fn restore(title: String) -> Result<Self, TaskError> {
+        Self::validate(title)
+    }
+
+    fn validate(title: String) -> Result<Self, TaskError> {
+        if title.trim().is_empty() {
+            return Err(TaskError::EmptyTitle);
+        }
+        if title.chars().any(is_unsafe_title_character) {
+            return Err(TaskError::UnsafeTitleCharacter);
+        }
+        let bytes = title.len();
+        if bytes > MAX_TASK_TITLE_BYTES {
+            return Err(TaskError::TitleTooLong {
+                max: MAX_TASK_TITLE_BYTES,
+                actual: bytes,
+            });
+        }
+        let columns = UnicodeWidthStr::width(title.as_str());
+        if columns > MAX_TASK_TITLE_COLUMNS {
+            return Err(TaskError::TitleTooWide {
+                max: MAX_TASK_TITLE_COLUMNS,
+                actual: columns,
+            });
+        }
+        Ok(Self(title))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn is_unsafe_title_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+        )
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -59,7 +119,7 @@ impl TaskStore {
         for (id, title, status) in tasks {
             restored.push(Task {
                 id,
-                title: normalized_title(&title)?,
+                title: TaskTitle::restore(title)?,
                 status,
             });
         }
@@ -75,7 +135,7 @@ impl TaskStore {
     }
 
     pub fn create(&mut self, title: impl Into<String>) -> Result<TaskId, TaskError> {
-        let title = normalized_title(&title.into())?;
+        let title = TaskTitle::parse(&title.into())?;
         let id = TaskId::new(self.next_id);
         self.next_id = self.next_id.checked_add(1).ok_or(TaskError::IdExhausted)?;
         self.tasks.push(Task {
@@ -99,6 +159,7 @@ impl TaskStore {
     }
 
     pub fn resolve_title(&self, title: &str) -> Result<TaskId, TaskError> {
+        let title = TaskTitle::parse(title)?;
         let matches: Vec<_> = self
             .tasks
             .iter()
@@ -106,14 +167,14 @@ impl TaskStore {
             .map(|task| task.id)
             .collect();
         match matches.as_slice() {
-            [] => Err(TaskError::TitleNotFound(title.to_owned())),
+            [] => Err(TaskError::TitleNotFound(title.as_str().to_owned())),
             [id] => Ok(*id),
             _ => Err(TaskError::AmbiguousTitle(matches)),
         }
     }
 
     pub fn rename(&mut self, id: TaskId, title: impl Into<String>) -> Result<(), TaskError> {
-        let title = normalized_title(&title.into())?;
+        let title = TaskTitle::parse(&title.into())?;
         self.task_mut(id)?.title = title;
         Ok(())
     }
@@ -148,18 +209,12 @@ impl TaskStore {
     }
 }
 
-fn normalized_title(title: &str) -> Result<String, TaskError> {
-    let title = title.trim();
-    if title.is_empty() {
-        Err(TaskError::EmptyTitle)
-    } else {
-        Ok(title.to_owned())
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskError {
     EmptyTitle,
+    UnsafeTitleCharacter,
+    TitleTooLong { max: usize, actual: usize },
+    TitleTooWide { max: usize, actual: usize },
     IdExhausted,
     NotFound(TaskId),
     TitleNotFound(String),
@@ -204,7 +259,7 @@ impl SessionRecord {
         } = event;
         let task_title = task_id
             .and_then(|id| tasks.get(id).ok())
-            .map(|task| task.title.clone());
+            .map(|task| task.title.as_str().to_owned());
         Self {
             id,
             ended_at,

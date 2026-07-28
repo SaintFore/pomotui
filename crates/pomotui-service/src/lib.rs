@@ -1,6 +1,7 @@
 use pomotui_domain::{
     CurrentSession, History, SessionDurations, SessionKind as DomainKind, SessionOutcome,
-    SessionRecord, SessionState, TaskId, TaskStatus, TaskStore, Timer, TimerState, Transition,
+    SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, Timer, TimerState,
+    Transition,
 };
 use pomotui_platform::{
     Clock, DesktopReminder, LinuxClock, RecoveryObservation, ReminderPort, SqliteRepository,
@@ -311,6 +312,25 @@ impl Service {
             .save_completion(&payload, reminder_key)
             .map_err(|error| error.to_string())
     }
+
+    fn task_rejected(error: TaskError) -> Response {
+        let rule = match error {
+            TaskError::EmptyTitle => Some(pomotui_protocol::TaskTitleRule::Empty),
+            TaskError::UnsafeTitleCharacter => {
+                Some(pomotui_protocol::TaskTitleRule::UnsafeCharacter)
+            }
+            TaskError::TitleTooLong { .. } => Some(pomotui_protocol::TaskTitleRule::TooLong),
+            TaskError::TitleTooWide { .. } => Some(pomotui_protocol::TaskTitleRule::TooWide),
+            _ => None,
+        };
+        if let Some(rule) = rule {
+            Response::Error {
+                error: ProtocolError::InvalidTaskTitle { rule },
+            }
+        } else {
+            Self::rejected(error)
+        }
+    }
 }
 
 impl Default for Service {
@@ -370,7 +390,7 @@ impl Handler for Service {
                         let transition = self.timer.start(self.now, Some(task_id));
                         self.apply_transition(transition, planned)
                     }
-                    Err(error) => Err(error.to_string()),
+                    Err(error) => return Self::task_rejected(error),
                 }
             }
             Command::Pause => {
@@ -401,7 +421,7 @@ impl Handler for Service {
                         },
                         Err(error) => Self::rejected(error),
                     },
-                    Err(error) => Self::rejected(error),
+                    Err(error) => Self::task_rejected(error),
                 };
             }
             Command::TaskList => {
@@ -421,10 +441,17 @@ impl Handler for Service {
                     ),
                 };
             }
-            Command::TaskRename { id, title } => self
-                .tasks
-                .rename(pomotui_domain::TaskId::new(id), title)
-                .map_err(|error| error.to_string()),
+            Command::TaskRename { id, title } => {
+                return match self.tasks.rename(pomotui_domain::TaskId::new(id), title) {
+                    Ok(()) => match self.persist(mutation_key.as_deref()) {
+                        Ok(()) => Response::Snapshot {
+                            snapshot: self.snapshot(),
+                        },
+                        Err(error) => Self::rejected(error),
+                    },
+                    Err(error) => Self::task_rejected(error),
+                };
+            }
             Command::TaskComplete { id } => self
                 .tasks
                 .complete(pomotui_domain::TaskId::new(id))
@@ -905,7 +932,7 @@ fn parse_outcome(value: &str) -> Result<SessionOutcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pomotui_protocol::PROTOCOL_VERSION;
+    use pomotui_protocol::{PROTOCOL_VERSION, TaskTitleRule};
 
     fn request(key: Option<&str>, command: Command) -> Request {
         Request {
@@ -1047,6 +1074,60 @@ mod tests {
         };
         assert!(message.contains("AmbiguousTitle"));
         assert!(message.contains("TaskId"));
+    }
+
+    #[test]
+    fn task_title_rejections_are_stable_and_do_not_persist_unsafe_text() {
+        let mut service = Service::new();
+        for (key, command) in [
+            (
+                "unsafe-create",
+                Command::TaskCreate {
+                    title: "bad\u{1b}[31m".into(),
+                },
+            ),
+            (
+                "unsafe-start",
+                Command::StartTitle {
+                    title: "bad\u{202e}title".into(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                service.handle(request(Some(key), command)),
+                Response::Error {
+                    error: ProtocolError::InvalidTaskTitle {
+                        rule: TaskTitleRule::UnsafeCharacter
+                    }
+                }
+            );
+        }
+        assert!(service.tasks.all().is_empty());
+
+        service.handle(request(
+            Some("safe-create"),
+            Command::TaskCreate {
+                title: "Safe".into(),
+            },
+        ));
+        assert_eq!(
+            service.handle(request(
+                Some("unsafe-rename"),
+                Command::TaskRename {
+                    id: 1,
+                    title: "line\nbreak".into(),
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::InvalidTaskTitle {
+                    rule: TaskTitleRule::UnsafeCharacter
+                }
+            }
+        );
+        assert_eq!(
+            service.tasks.get(TaskId::new(1)).expect("task").title(),
+            "Safe"
+        );
     }
 
     #[test]

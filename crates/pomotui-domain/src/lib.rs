@@ -4,7 +4,9 @@ use core::fmt;
 
 mod tasks;
 
-pub use tasks::{DailySummary, History, SessionRecord, Task, TaskError, TaskStatus, TaskStore};
+pub use tasks::{
+    DailySummary, History, SessionRecord, Task, TaskError, TaskStatus, TaskStore, TaskTitle,
+};
 
 /// Identifies the initial protocol-neutral domain model version.
 pub const MODEL_VERSION: u16 = 1;
