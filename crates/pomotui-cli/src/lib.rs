@@ -59,6 +59,25 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
             }
         }
         ["chain"] => Command::ActionChainCurrent,
+        ["chain", "archive"] => Command::ActionChainArchive,
+        ["review", "failure", reflection] => Command::ReviewFailure {
+            reflection: (*reflection).into(),
+            task_id: None,
+            use_void: false,
+            chain_entry_title: None,
+        },
+        ["review", "failure", "--task", id, reflection] => Command::ReviewFailure {
+            reflection: (*reflection).into(),
+            task_id: Some(parse_id(id)?),
+            use_void: false,
+            chain_entry_title: None,
+        },
+        ["review", "failure", "--void", title, reflection] => Command::ReviewFailure {
+            reflection: (*reflection).into(),
+            task_id: None,
+            use_void: true,
+            chain_entry_title: Some((*title).into()),
+        },
         _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
@@ -185,6 +204,7 @@ mod tests {
                         action_chain: pomotui_protocol::ActionChainSummary::default(),
                         pending_review: None,
                         recent_chain_links: vec![],
+                        recent_ended_chains: vec![],
                     },
                 },
                 false,
@@ -231,6 +251,7 @@ mod tests {
                 action_chain: pomotui_protocol::ActionChainSummary::default(),
                 pending_review: None,
                 recent_chain_links: vec![],
+                recent_ended_chains: vec![],
             },
         };
 
@@ -268,6 +289,7 @@ mod tests {
             action_chain: pomotui_protocol::ActionChainSummary { id: 7, length: 12 },
             pending_review: None,
             recent_chain_links: vec![],
+            recent_ended_chains: vec![],
         };
         snapshot.pending_review = Some(pomotui_protocol::PendingReviewSummary {
             session_id: 4,

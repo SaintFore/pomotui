@@ -72,6 +72,13 @@ pub enum Command {
         reflection: Option<String>,
     },
     ActionChainCurrent,
+    ReviewFailure {
+        reflection: String,
+        task_id: Option<u64>,
+        use_void: bool,
+        chain_entry_title: Option<String>,
+    },
+    ActionChainArchive,
 }
 
 impl Command {
@@ -84,6 +91,7 @@ impl Command {
                 | Self::History
                 | Self::Summary
                 | Self::ActionChainCurrent
+                | Self::ActionChainArchive
         )
     }
 }
@@ -134,6 +142,7 @@ pub struct Snapshot {
     pub action_chain: ActionChainSummary,
     pub pending_review: Option<PendingReviewSummary>,
     pub recent_chain_links: Vec<ChainLinkSummary>,
+    pub recent_ended_chains: Vec<EndedChainSummary>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -157,6 +166,15 @@ pub struct ChainLinkSummary {
     pub actual_seconds: u64,
     pub reflection: Option<String>,
     pub chain_entry_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EndedChainSummary {
+    pub id: u64,
+    pub length: u64,
+    pub break_task_title: String,
+    pub break_actual_seconds: u64,
+    pub break_reflection: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

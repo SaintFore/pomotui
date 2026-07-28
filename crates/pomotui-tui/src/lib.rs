@@ -73,6 +73,7 @@ pub enum Language {
 pub enum View {
     Dashboard,
     Chain,
+    ChainArchive,
     Today,
     Review,
     History,
@@ -91,6 +92,8 @@ pub enum Overlay {
     ConfirmHistoryDelete,
     StopChoice,
     ReviewVoidTitle,
+    ReviewFailureReflection,
+    ConfirmReviewFailure,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +134,7 @@ pub struct App {
     pub narrow: bool,
     pub warning: Option<String>,
     pub message: Option<String>,
+    pending_failure_reflection: Option<String>,
     completion: Option<CompletionPlayback>,
 }
 
@@ -169,6 +173,7 @@ impl App {
             narrow: false,
             warning: None,
             message: None,
+            pending_failure_reflection: None,
             completion: None,
         }
     }
@@ -225,6 +230,15 @@ impl App {
                         .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
             {
                 self.begin_text_entry(Overlay::ReviewVoidTitle);
+            }
+            InputKey::Char('F')
+                if self.view == View::Chain
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
+            {
+                self.begin_text_entry(Overlay::ReviewFailureReflection);
             }
             InputKey::Char('j') | InputKey::Down => {
                 if self.view == View::History {
@@ -297,6 +311,7 @@ impl App {
         None
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_overlay_key(&mut self, key: InputKey) -> Option<Action> {
         if key == InputKey::Escape {
             self.overlay = Overlay::None;
@@ -334,7 +349,10 @@ impl App {
                 None
             }
             Overlay::Help | Overlay::None => None,
-            Overlay::CreateTask | Overlay::RenameTask | Overlay::ReviewVoidTitle => match key {
+            Overlay::CreateTask
+            | Overlay::RenameTask
+            | Overlay::ReviewVoidTitle
+            | Overlay::ReviewFailureReflection => match key {
                 InputKey::Char(value) if !value.is_control() => {
                     self.input.push(value);
                     None
@@ -394,6 +412,31 @@ impl App {
             Overlay::StopChoice => match key {
                 InputKey::Char('r' | 'R') => Some(self.emit(pomotui_protocol::Command::StopReview)),
                 InputKey::Char('n' | 'N') => Some(self.emit(pomotui_protocol::Command::Stop)),
+                _ => None,
+            },
+            Overlay::ConfirmReviewFailure => match key {
+                InputKey::Char('y' | 'Y') | InputKey::Enter => {
+                    let reflection = self.pending_failure_reflection.take()?;
+                    let pending = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.pending_review.as_ref());
+                    let task_id = pending
+                        .is_some_and(|review| review.task_id.is_none())
+                        .then(|| self.selected_task().map(|task| task.id))
+                        .flatten();
+                    Some(self.emit(pomotui_protocol::Command::ReviewFailure {
+                        reflection,
+                        task_id,
+                        use_void: false,
+                        chain_entry_title: None,
+                    }))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::None;
+                    self.pending_failure_reflection = None;
+                    None
+                }
                 _ => None,
             },
         }
@@ -551,6 +594,12 @@ impl App {
                 chain_entry_title: Some(title),
                 reflection: None,
             },
+            Overlay::ReviewFailureReflection => {
+                self.pending_failure_reflection = Some(title);
+                self.input.clear();
+                self.overlay = Overlay::ConfirmReviewFailure;
+                return None;
+            }
             _ => return None,
         };
         self.overlay = Overlay::None;
@@ -848,7 +897,8 @@ fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
 const fn next_view(view: View) -> View {
     match view {
         View::Dashboard => View::Chain,
-        View::Chain => View::Today,
+        View::Chain => View::ChainArchive,
+        View::ChainArchive => View::Today,
         View::Today => View::Review,
         View::Review => View::History,
         View::History => View::Dashboard,
@@ -860,7 +910,8 @@ const fn previous_view(view: View) -> View {
         View::Dashboard => View::History,
         View::History => View::Review,
         View::Review => View::Today,
-        View::Today => View::Chain,
+        View::Today => View::ChainArchive,
+        View::ChainArchive => View::Chain,
         View::Chain => View::Dashboard,
     }
 }
@@ -906,6 +957,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     match app.view {
         View::Dashboard => dashboard(frame, rows[1], app, colors),
         View::Chain => chain_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
+        View::ChainArchive => {
+            chain_archive_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language);
+        }
         View::Today => today_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
         View::Review => review_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
         View::History => history_view(
@@ -1124,6 +1178,51 @@ fn chain_view(
     }
     frame.render_widget(
         Paragraph::new(lines).block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
+        area,
+    );
+}
+
+fn chain_archive_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) {
+    let lines = snapshot.map_or_else(
+        || {
+            vec![Line::from(text(
+                language,
+                "Waiting for Timer Service",
+                "正在等待计时服务",
+            ))]
+        },
+        |snapshot| {
+            if snapshot.recent_ended_chains.is_empty() {
+                return vec![Line::from(text(
+                    language,
+                    "No Ended Chains",
+                    "暂无已结束行动链",
+                ))];
+            }
+            snapshot
+                .recent_ended_chains
+                .iter()
+                .map(|chain| {
+                    Line::from(format!(
+                        "{} {}  ·  {}  ·  {}  ·  {}",
+                        text(language, "Length", "长度"),
+                        chain.length,
+                        chain.break_task_title,
+                        human_duration_precise(chain.break_actual_seconds),
+                        chain.break_reflection
+                    ))
+                })
+                .collect()
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(text(language, "CHAIN ARCHIVE", "行动链归档"), colors)),
         area,
     );
 }
@@ -2120,6 +2219,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let view = match app.view {
         View::Dashboard => text(app.language, "DASHBOARD", "仪表盘"),
         View::Chain => text(app.language, "CHAIN", "行动链"),
+        View::ChainArchive => text(app.language, "CHAIN ARCHIVE", "行动链归档"),
         View::Today => text(app.language, "TODAY", "今日"),
         View::Review => text(app.language, "REVIEW", "复盘"),
         View::History => text(app.language, "HISTORY", "历史"),
@@ -2184,7 +2284,9 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::ConfirmTaskSwitch
         | Overlay::ConfirmHistoryDelete
         | Overlay::StopChoice
-        | Overlay::ReviewVoidTitle => 7.min(area.height.saturating_sub(2)),
+        | Overlay::ReviewVoidTitle
+        | Overlay::ReviewFailureReflection
+        | Overlay::ConfirmReviewFailure => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
     };
     let modal = if app.narrow {
@@ -2197,15 +2299,49 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
         Overlay::Help => help_overlay(frame, modal, app, colors),
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
-        Overlay::CreateTask | Overlay::RenameTask | Overlay::ReviewVoidTitle => {
+        Overlay::CreateTask
+        | Overlay::RenameTask
+        | Overlay::ReviewVoidTitle
+        | Overlay::ReviewFailureReflection => {
             text_entry_overlay(frame, modal, app, colors);
         }
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
         Overlay::ConfirmTaskSwitch => confirm_task_switch_overlay(frame, modal, app, colors),
         Overlay::ConfirmHistoryDelete => confirm_history_delete_overlay(frame, modal, app, colors),
         Overlay::StopChoice => stop_choice_overlay(frame, modal, app, colors),
+        Overlay::ConfirmReviewFailure => confirm_review_failure_overlay(frame, modal, app, colors),
         Overlay::None => {}
     }
+}
+
+fn confirm_review_failure_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let length = app
+        .snapshot
+        .as_ref()
+        .map_or(0, |snapshot| snapshot.action_chain.length);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!(
+                "{} {length}",
+                text(
+                    app.language,
+                    "This will end the Action Chain at length",
+                    "这将结束行动链，当前长度"
+                )
+            )),
+            Line::from(""),
+            Line::from(text(
+                app.language,
+                "Enter/Y confirm · N cancel",
+                "Enter/Y 确认 · N 取消",
+            )),
+        ])
+        .block(panel(
+            text(app.language, "CONFIRM FAILED REVIEW", "确认失败复盘"),
+            colors,
+        )),
+        area,
+    );
 }
 
 fn stop_choice_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
@@ -2439,6 +2575,10 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         Overlay::ReviewVoidTitle => (
             text(app.language, "REVIEW VOID SESSION", "复盘 VOID 时段"),
             text(app.language, "Chain Entry Title", "行动链条目标题"),
+        ),
+        Overlay::ReviewFailureReflection => (
+            text(app.language, "FAILED REVIEW", "失败复盘"),
+            text(app.language, "Reflection", "复盘"),
         ),
         _ => (
             text(app.language, "RENAME TASK", "重命名任务"),
@@ -2845,6 +2985,7 @@ mod tests {
             action_chain: pomotui_protocol::ActionChainSummary::default(),
             pending_review: None,
             recent_chain_links: vec![],
+            recent_ended_chains: vec![],
         }
     }
 
@@ -2932,6 +3073,8 @@ mod tests {
         );
         app.key('l');
         assert_eq!(app.view, View::Chain);
+        app.key('l');
+        assert_eq!(app.view, View::ChainArchive);
         app.key('l');
         assert_eq!(app.view, View::Today);
         app.key('s');

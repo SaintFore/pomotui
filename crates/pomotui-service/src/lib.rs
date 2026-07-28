@@ -9,9 +9,10 @@ use pomotui_platform::{
     elapsed_during_recovery,
 };
 use pomotui_protocol::{
-    ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState, Handler,
-    PendingReviewSummary, ProtocolError, RecentSessionSummary, ReminderDelivery, Request, Response,
-    SessionKind, Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
+    ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState,
+    EndedChainSummary, Handler, PendingReviewSummary, ProtocolError, RecentSessionSummary,
+    ReminderDelivery, Request, Response, SessionKind, Snapshot, TaskFocusSummary, TaskSummary,
+    TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -133,6 +134,7 @@ pub struct Service {
     chain_links: Vec<ChainLinkState>,
     next_chain_entry_id: u64,
     void_task_id: Option<u64>,
+    ended_chains: Vec<EndedChainState>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -152,6 +154,24 @@ struct ChainLinkState {
     actual_seconds: u64,
     reflection: Option<String>,
     chain_entry_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ChainBreakState {
+    id: u64,
+    session_id: u64,
+    task_id: u64,
+    task_title: String,
+    actual_seconds: u64,
+    reflection: String,
+    chain_entry_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EndedChainState {
+    id: u64,
+    links: Vec<ChainLinkState>,
+    chain_break: ChainBreakState,
 }
 
 impl Service {
@@ -192,6 +212,7 @@ impl Service {
             chain_links: Vec::new(),
             next_chain_entry_id: 1,
             void_task_id: None,
+            ended_chains: Vec::new(),
         }
     }
 
@@ -369,6 +390,19 @@ impl Service {
                     actual_seconds: link.actual_seconds,
                     reflection: link.reflection.clone(),
                     chain_entry_title: link.chain_entry_title.clone(),
+                })
+                .collect(),
+            recent_ended_chains: self
+                .ended_chains
+                .iter()
+                .rev()
+                .take(5)
+                .map(|chain| EndedChainSummary {
+                    id: chain.id,
+                    length: u64::try_from(chain.links.len()).unwrap_or(u64::MAX),
+                    break_task_title: chain.chain_break.task_title.clone(),
+                    break_actual_seconds: chain.chain_break.actual_seconds,
+                    break_reflection: chain.chain_break.reflection.clone(),
                 })
                 .collect(),
         }
@@ -553,6 +587,86 @@ impl Service {
         });
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.current_chain_length = self.current_chain_length.saturating_add(1);
+        Ok(())
+    }
+
+    fn review_failure(
+        &mut self,
+        reflection: &str,
+        task_id: Option<u64>,
+        use_void: bool,
+        chain_entry_title: Option<String>,
+    ) -> Result<(), String> {
+        let reflection = reflection.trim().to_owned();
+        if reflection.is_empty() {
+            return Err("Failed Session Review requires a Reflection".into());
+        }
+        let Some(review_state) = self.pending_review.as_ref() else {
+            return Err("No Pending Review is available".into());
+        };
+        if review_state.task_id.is_none() && task_id.is_some() == use_void {
+            return Err("Choose exactly one regular Task or the Void Task".into());
+        }
+        let chain_entry_title = chain_entry_title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if use_void && chain_entry_title.is_none() {
+            return Err("Void Session Review requires a Chain Entry Title".into());
+        }
+        let mut review = self.pending_review.take().expect("review checked above");
+        if review.task_id.is_none() {
+            let assigned_id = if use_void {
+                if let Some(id) = self.void_task_id {
+                    TaskId::new(id)
+                } else {
+                    let id = self
+                        .tasks
+                        .create("Void")
+                        .map_err(|error| error.to_string())?;
+                    self.void_task_id = Some(id.get());
+                    id
+                }
+            } else {
+                TaskId::new(task_id.expect("regular Task choice validated"))
+            };
+            let title = self
+                .tasks
+                .get(assigned_id)
+                .map_err(|error| error.to_string())?
+                .title()
+                .to_owned();
+            self.history
+                .attribute(review.session_id, assigned_id, &title)
+                .map_err(str::to_owned)?;
+            review.task_id = Some(assigned_id.get());
+            review.task_title = Some(title);
+        }
+        let is_void = review.task_id == self.void_task_id;
+        if is_void && chain_entry_title.is_none() {
+            self.pending_review = Some(review);
+            return Err("Void Session Review requires a Chain Entry Title".into());
+        }
+        if !is_void && chain_entry_title.is_some() {
+            self.pending_review = Some(review);
+            return Err("Only Void entries can have a Chain Entry Title".into());
+        }
+        let chain_break = ChainBreakState {
+            id: self.next_chain_entry_id,
+            session_id: review.session_id,
+            task_id: review.task_id.expect("review attribution validated"),
+            task_title: review.task_title.expect("review Task snapshot validated"),
+            actual_seconds: review.actual_seconds,
+            reflection,
+            chain_entry_title,
+        };
+        self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+        self.ended_chains.push(EndedChainState {
+            id: self.current_chain_id,
+            links: std::mem::take(&mut self.chain_links),
+            chain_break,
+        });
+        self.current_chain_id = self.current_chain_id.saturating_add(1);
+        self.current_chain_length = 0;
         Ok(())
     }
 
@@ -1014,6 +1128,24 @@ impl Handler for Service {
                     }),
                 };
             }
+            Command::ReviewFailure {
+                reflection,
+                task_id,
+                use_void,
+                chain_entry_title,
+            } => self.review_failure(&reflection, task_id, use_void, chain_entry_title),
+            Command::ActionChainArchive => {
+                return Response::Data {
+                    value: serde_json::json!({
+                        "chains": self.ended_chains.iter().rev().map(|chain| serde_json::json!({
+                            "id": chain.id,
+                            "length": chain.links.len(),
+                            "links": chain.links,
+                            "chain_break": chain.chain_break,
+                        })).collect::<Vec<_>>(),
+                    }),
+                };
+            }
         };
         match result {
             Ok(()) => match self.persist(mutation_key.as_deref()) {
@@ -1120,6 +1252,8 @@ struct PersistedService {
     next_chain_entry_id: u64,
     #[serde(default)]
     void_task_id: Option<u64>,
+    #[serde(default)]
+    ended_chains: Vec<EndedChainState>,
 }
 
 const fn default_chain_id() -> u64 {
@@ -1266,6 +1400,7 @@ impl PersistedService {
             chain_links: service.chain_links.clone(),
             next_chain_entry_id: service.next_chain_entry_id,
             void_task_id: service.void_task_id,
+            ended_chains: service.ended_chains.clone(),
         };
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
@@ -1403,6 +1538,7 @@ impl PersistedService {
             chain_links: persisted.chain_links,
             next_chain_entry_id: persisted.next_chain_entry_id,
             void_task_id: persisted.void_task_id,
+            ended_chains: persisted.ended_chains,
         })
     }
 }
@@ -1746,6 +1882,61 @@ mod tests {
                 error: ProtocolError::Rejected { .. }
             }
         ));
+    }
+
+    #[test]
+    fn failed_review_archives_chain_break_and_starts_a_new_empty_chain() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Hard slice".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop"), Command::StopReview));
+
+        assert!(matches!(
+            service.handle(request(
+                Some("missing-reflection"),
+                Command::ReviewFailure {
+                    reflection: " ".into(),
+                    task_id: None,
+                    use_void: false,
+                    chain_entry_title: None,
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::Rejected { .. }
+            }
+        ));
+        let old_chain_id = service.snapshot().action_chain.id;
+        let response = service.handle(request(
+            Some("failure"),
+            Command::ReviewFailure {
+                reflection: "The slice was still too large".into(),
+                task_id: None,
+                use_void: false,
+                chain_entry_title: None,
+            },
+        ));
+        let Response::Snapshot { snapshot } = response else {
+            panic!("failure snapshot");
+        };
+        assert_eq!(snapshot.action_chain.length, 0);
+        assert_ne!(snapshot.action_chain.id, old_chain_id);
+        assert!(snapshot.pending_review.is_none());
+        assert_eq!(snapshot.recent_ended_chains[0].id, old_chain_id);
+        assert_eq!(
+            snapshot.recent_ended_chains[0].break_reflection,
+            "The slice was still too large"
+        );
     }
 
     #[test]
