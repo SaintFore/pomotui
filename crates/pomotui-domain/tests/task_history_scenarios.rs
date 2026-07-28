@@ -25,7 +25,7 @@ fn history_keeps_title_snapshot_after_task_rename_and_delete() {
         actual_seconds: 1_500,
         task_id: Some(id),
     };
-    let record = SessionRecord::from_event(event, 10_000, 1_500, &tasks);
+    let record = SessionRecord::from_event(event, 1, 10_000, 1_500, &tasks);
 
     tasks.rename(id, "Renamed").expect("rename");
     tasks.delete(id, None).expect("delete");
@@ -50,12 +50,13 @@ fn referenced_task_cannot_be_deleted_but_can_be_completed() {
 #[test]
 fn seven_day_summary_counts_actual_focus_and_only_completed_rounds() {
     let mut history = History::default();
-    for (ended_at, outcome, seconds) in [
-        (50, SessionOutcome::Completed, 25),
-        (60, SessionOutcome::Stopped, 7),
-        (150, SessionOutcome::Skipped, 0),
+    for (id, ended_at, outcome, seconds) in [
+        (1, 50, SessionOutcome::Completed, 25),
+        (2, 60, SessionOutcome::Stopped, 7),
+        (3, 150, SessionOutcome::Skipped, 0),
     ] {
         history.push(SessionRecord {
+            id,
             ended_at,
             kind: SessionKind::Focus,
             outcome,

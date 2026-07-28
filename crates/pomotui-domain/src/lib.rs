@@ -415,6 +415,42 @@ impl Timer {
         self.current_task
     }
 
+    /// Detaches a Task from a Pending Session before the Task is deleted.
+    ///
+    /// A running or paused Session keeps its Task attribution immutable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::InvalidTransition`] when the Task is referenced
+    /// by a running or paused Session.
+    pub fn detach_pending_task(&mut self, task_id: TaskId) -> Result<(), DomainError> {
+        if self.current_task != Some(task_id) {
+            return Ok(());
+        }
+        if !matches!(self.current, CurrentSession::Pending(_)) {
+            return Err(DomainError::InvalidTransition);
+        }
+        self.current_task = None;
+        Ok(())
+    }
+
+    /// Attributes a Pending Focus Session to a Task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::InvalidTransition`] unless the Current Session is
+    /// a Pending Focus Session.
+    pub fn select_pending_task(&mut self, task_id: TaskId) -> Result<(), DomainError> {
+        let CurrentSession::Pending(pending) = self.current else {
+            return Err(DomainError::InvalidTransition);
+        };
+        if pending.kind != SessionKind::Focus {
+            return Err(DomainError::InvalidTransition);
+        }
+        self.current_task = Some(task_id);
+        Ok(())
+    }
+
     #[must_use]
     pub const fn planned_seconds(&self) -> u64 {
         match self.current {

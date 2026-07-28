@@ -47,6 +47,13 @@ pub enum Command {
     TaskDelete {
         id: u64,
     },
+    TaskSelect {
+        id: u64,
+        stop_current: bool,
+    },
+    HistoryDelete {
+        ids: Vec<u64>,
+    },
     History,
     Summary,
 }
@@ -106,6 +113,7 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecentSessionSummary {
+    pub id: u64,
     pub kind: SessionKind,
     pub outcome: String,
     pub actual_seconds: u64,

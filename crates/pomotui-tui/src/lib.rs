@@ -9,11 +9,58 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Theme {
     VermilionPaperLight,
     VermilionPaperDark,
+    RanPaperLight,
+    RanPaperDark,
+}
+
+impl Theme {
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Vermilion Paper Light" => Some(Self::VermilionPaperLight),
+            "Vermilion Paper Dark" => Some(Self::VermilionPaperDark),
+            "Ran Paper Light" => Some(Self::RanPaperLight),
+            "Ran Paper Dark" => Some(Self::RanPaperDark),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::VermilionPaperLight => "Vermilion Paper Light",
+            Self::VermilionPaperDark => "Vermilion Paper Dark",
+            Self::RanPaperLight => "Ran Paper Light",
+            Self::RanPaperDark => "Ran Paper Dark",
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::VermilionPaperLight => Self::VermilionPaperDark,
+            Self::VermilionPaperDark => Self::RanPaperLight,
+            Self::RanPaperLight => Self::RanPaperDark,
+            Self::RanPaperDark => Self::VermilionPaperLight,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ColorOverrides {
+    pub background: Option<Color>,
+    pub surface: Option<Color>,
+    pub text: Option<Color>,
+    pub muted: Option<Color>,
+    pub accent: Option<Color>,
+    pub gold: Option<Color>,
+    pub good: Option<Color>,
+    pub border: Option<Color>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +73,7 @@ pub enum Language {
 pub enum View {
     Dashboard,
     Today,
+    Review,
     History,
 }
 
@@ -38,6 +86,8 @@ pub enum Overlay {
     CreateTask,
     RenameTask,
     ConfirmDelete,
+    ConfirmTaskSwitch,
+    ConfirmHistoryDelete,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +100,7 @@ pub enum InputKey {
     Down,
     Left,
     Right,
+    AltSpace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,6 +117,12 @@ pub struct App {
     pub view: View,
     pub overlay: Overlay,
     pub selected_task: usize,
+    pub history_cursor: usize,
+    pub history_offset: usize,
+    pub visual_anchor: Option<usize>,
+    pub marked_history: std::collections::BTreeSet<u64>,
+    pub color_overrides: ColorOverrides,
+    pub pending_g: bool,
     pub palette_index: usize,
     pub input: String,
     pub narrow: bool,
@@ -89,6 +146,21 @@ impl App {
             view: View::Dashboard,
             overlay: Overlay::None,
             selected_task: 0,
+            history_cursor: 0,
+            history_offset: 0,
+            visual_anchor: None,
+            marked_history: std::collections::BTreeSet::new(),
+            color_overrides: ColorOverrides {
+                background: None,
+                surface: None,
+                text: None,
+                muted: None,
+                accent: None,
+                gold: None,
+                good: None,
+                border: None,
+            },
+            pending_g: false,
             palette_index: 0,
             input: String::new(),
             narrow: false,
@@ -116,8 +188,45 @@ impl App {
         }
         match key {
             InputKey::Char('q') => return Some(Action::Quit),
-            InputKey::Char('j') | InputKey::Down => self.move_task(true),
-            InputKey::Char('k') | InputKey::Up => self.move_task(false),
+            InputKey::Char('g') => {
+                if self.pending_g {
+                    self.jump_first();
+                    self.pending_g = false;
+                } else {
+                    self.pending_g = true;
+                }
+            }
+            InputKey::Char('G') => {
+                self.pending_g = false;
+                self.jump_last();
+            }
+            InputKey::Char('u') => {
+                self.pending_g = false;
+                self.page_move(false);
+            }
+            InputKey::Char('d') => {
+                self.pending_g = false;
+                self.page_move(true);
+            }
+            InputKey::Char('v') if self.view == View::History => {
+                self.visual_anchor = self
+                    .visual_anchor
+                    .map_or(Some(self.history_cursor), |_| None);
+            }
+            InputKey::Char('j') | InputKey::Down => {
+                if self.view == View::History {
+                    self.scroll_history(true);
+                } else {
+                    self.move_task(true);
+                }
+            }
+            InputKey::Char('k') | InputKey::Up => {
+                if self.view == View::History {
+                    self.scroll_history(false);
+                } else {
+                    self.move_task(false);
+                }
+            }
             InputKey::Char('h') | InputKey::Left => self.view = previous_view(self.view),
             InputKey::Char('l') | InputKey::Right => self.view = next_view(self.view),
             InputKey::Char(':') => self.overlay = Overlay::Palette,
@@ -128,8 +237,12 @@ impl App {
                 self.begin_text_entry(Overlay::RenameTask);
             }
             InputKey::Char('c') => return self.complete_or_reopen_selected(),
-            InputKey::Char('D') if self.selected_task().is_some() => {
-                self.overlay = Overlay::ConfirmDelete;
+            InputKey::Char('D') => {
+                if self.view == View::History && !self.history_ids_for_action().is_empty() {
+                    self.overlay = Overlay::ConfirmHistoryDelete;
+                } else if self.selected_task().is_some() {
+                    self.overlay = Overlay::ConfirmDelete;
+                }
             }
             InputKey::Char('K') => {
                 return Some(self.emit(pomotui_protocol::Command::Skip));
@@ -137,8 +250,11 @@ impl App {
             InputKey::Char('X') => {
                 return Some(self.emit(pomotui_protocol::Command::Stop));
             }
+            InputKey::Char(' ') | InputKey::AltSpace if self.view == View::History => {
+                self.toggle_history_mark();
+            }
             InputKey::Char(' ') => return self.toggle_session(),
-            InputKey::Enter => return Some(self.start_selected_focus()),
+            InputKey::Enter => return self.select_current_task(),
             _ => {}
         }
         None
@@ -169,10 +285,7 @@ impl App {
             },
             Overlay::Settings => {
                 if matches!(key, InputKey::Char('t') | InputKey::Left | InputKey::Right) {
-                    self.theme = match self.theme {
-                        Theme::VermilionPaperLight => Theme::VermilionPaperDark,
-                        Theme::VermilionPaperDark => Theme::VermilionPaperLight,
-                    };
+                    self.theme = self.theme.next();
                 }
                 if key == InputKey::Char('g') {
                     self.language = match self.language {
@@ -210,6 +323,37 @@ impl App {
                 }
                 _ => None,
             },
+            Overlay::ConfirmTaskSwitch => match key {
+                InputKey::Char('y' | 'Y') | InputKey::Enter => {
+                    let command =
+                        self.selected_task()
+                            .map(|task| pomotui_protocol::Command::TaskSelect {
+                                id: task.id,
+                                stop_current: true,
+                            });
+                    self.overlay = Overlay::None;
+                    command.map(|command| self.emit(command))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::None;
+                    None
+                }
+                _ => None,
+            },
+            Overlay::ConfirmHistoryDelete => match key {
+                InputKey::Char('y' | 'Y') | InputKey::Enter => {
+                    let ids = self.history_ids_for_action();
+                    self.overlay = Overlay::None;
+                    self.visual_anchor = None;
+                    self.marked_history.clear();
+                    Some(self.emit(pomotui_protocol::Command::HistoryDelete { ids }))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::None;
+                    None
+                }
+                _ => None,
+            },
         }
     }
 
@@ -225,10 +369,109 @@ impl App {
         };
     }
 
+    fn scroll_history(&mut self, forward: bool) {
+        let last = self.snapshot.as_ref().map_or(0, |snapshot| {
+            snapshot.recent_history.len().saturating_sub(1)
+        });
+        self.history_cursor = if forward {
+            self.history_cursor.saturating_add(1).min(last)
+        } else {
+            self.history_cursor.saturating_sub(1)
+        };
+    }
+
+    fn jump_first(&mut self) {
+        if self.view == View::History {
+            self.history_cursor = 0;
+        } else {
+            self.selected_task = 0;
+        }
+    }
+
+    fn jump_last(&mut self) {
+        if self.view == View::History {
+            self.history_cursor = self.snapshot.as_ref().map_or(0, |snapshot| {
+                snapshot.recent_history.len().saturating_sub(1)
+            });
+        } else {
+            self.selected_task = self
+                .snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.tasks.len().saturating_sub(1));
+        }
+    }
+
+    fn page_move(&mut self, forward: bool) {
+        for _ in 0..5 {
+            if self.view == View::History {
+                self.scroll_history(forward);
+            } else {
+                self.move_task(forward);
+            }
+        }
+    }
+
+    fn history_ids_for_action(&self) -> Vec<u64> {
+        if !self.marked_history.is_empty() {
+            return self.marked_history.iter().copied().collect();
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return Vec::new();
+        };
+        let anchor = self.visual_anchor.unwrap_or(self.history_cursor);
+        let start = anchor.min(self.history_cursor);
+        let end = anchor.max(self.history_cursor);
+        snapshot
+            .recent_history
+            .get(start..=end)
+            .unwrap_or_default()
+            .iter()
+            .map(|record| record.id)
+            .collect()
+    }
+
+    fn toggle_history_mark(&mut self) {
+        let Some(id) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.recent_history.get(self.history_cursor))
+            .map(|record| record.id)
+        else {
+            return;
+        };
+        if !self.marked_history.remove(&id) {
+            self.marked_history.insert(id);
+        }
+    }
+
     fn selected_task(&self) -> Option<&pomotui_protocol::TaskSummary> {
         self.snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.tasks.get(self.selected_task))
+    }
+
+    fn select_current_task(&mut self) -> Option<Action> {
+        let id = self.selected_task()?.id;
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.current_task_id == Some(id))
+        {
+            return None;
+        }
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| matches!(snapshot.state.as_str(), "running" | "paused"))
+        {
+            self.overlay = Overlay::ConfirmTaskSwitch;
+            None
+        } else {
+            Some(self.emit(pomotui_protocol::Command::TaskSelect {
+                id,
+                stop_current: false,
+            }))
+        }
     }
 
     fn begin_text_entry(&mut self, overlay: Overlay) {
@@ -356,6 +599,11 @@ impl App {
                 self.overlay = Overlay::None;
                 None
             }
+            PaletteCommand::Review => {
+                self.view = View::Review;
+                self.overlay = Overlay::None;
+                None
+            }
             PaletteCommand::History => {
                 self.view = View::History;
                 self.overlay = Overlay::None;
@@ -427,6 +675,7 @@ enum PaletteCommand {
     CompleteTask,
     DeleteTask,
     Today,
+    Review,
     History,
     Settings,
     Help,
@@ -438,7 +687,7 @@ struct PaletteItem {
     command: PaletteCommand,
 }
 
-const PALETTE_ITEMS: [PaletteItem; 15] = [
+const PALETTE_ITEMS: [PaletteItem; 16] = [
     PaletteItem {
         label: "Start / pause / resume Current Session",
         hint: "Space",
@@ -500,6 +749,11 @@ const PALETTE_ITEMS: [PaletteItem; 15] = [
         command: PaletteCommand::Today,
     },
     PaletteItem {
+        label: "Open History review",
+        hint: "",
+        command: PaletteCommand::Review,
+    },
+    PaletteItem {
         label: "Open Session History",
         hint: "",
         command: PaletteCommand::History,
@@ -533,6 +787,7 @@ fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
         PaletteCommand::CompleteTask => "完成 / 重新打开任务",
         PaletteCommand::DeleteTask => "删除任务…",
         PaletteCommand::Today => "打开今日汇总",
+        PaletteCommand::Review => "打开历史复盘",
         PaletteCommand::History => "打开时段历史",
         PaletteCommand::Settings => "打开设置",
         PaletteCommand::Help => "打开帮助",
@@ -542,7 +797,8 @@ fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
 const fn next_view(view: View) -> View {
     match view {
         View::Dashboard => View::Today,
-        View::Today => View::History,
+        View::Today => View::Review,
+        View::Review => View::History,
         View::History => View::Dashboard,
     }
 }
@@ -550,7 +806,8 @@ const fn next_view(view: View) -> View {
 const fn previous_view(view: View) -> View {
     match view {
         View::Dashboard => View::History,
-        View::History => View::Today,
+        View::History => View::Review,
+        View::Review => View::Today,
         View::Today => View::Dashboard,
     }
 }
@@ -558,7 +815,7 @@ const fn previous_view(view: View) -> View {
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     app.narrow = area.width < 74;
-    let colors = colors(app.theme);
+    let colors = colors(app.theme, app.color_overrides);
     frame.render_widget(
         Block::default().style(Style::default().bg(colors.background).fg(colors.text)),
         area,
@@ -569,11 +826,45 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Constraint::Length(if app.narrow { 2 } else { 3 }),
     ])
     .split(area);
+    if app.view == View::History {
+        let visible = history_visible_records(rows[1], app.narrow);
+        let total = app
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.recent_history.len());
+        app.history_cursor = app.history_cursor.min(total.saturating_sub(1));
+        let valid_ids = app.snapshot.as_ref().map(|snapshot| {
+            snapshot
+                .recent_history
+                .iter()
+                .map(|record| record.id)
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        app.marked_history
+            .retain(|id| valid_ids.as_ref().is_some_and(|ids| ids.contains(id)));
+        if app.history_cursor < app.history_offset {
+            app.history_offset = app.history_cursor;
+        } else if app.history_cursor >= app.history_offset.saturating_add(visible) {
+            app.history_offset = app.history_cursor.saturating_add(1).saturating_sub(visible);
+        }
+        app.history_offset = app.history_offset.min(total.saturating_sub(visible));
+    }
     header(frame, rows[0], app, colors);
     match app.view {
         View::Dashboard => dashboard(frame, rows[1], app, colors),
         View::Today => today_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
-        View::History => history_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
+        View::Review => review_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
+        View::History => history_view(
+            frame,
+            rows[1],
+            app.snapshot.as_ref(),
+            colors,
+            app.language,
+            app.history_offset,
+            app.history_cursor,
+            app.visual_anchor,
+            &app.marked_history,
+        ),
     }
     footer(frame, rows[2], app, colors);
     render_overlay(frame, area, app, colors);
@@ -626,13 +917,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         |snapshot| session_heading(snapshot, app.language),
     );
     let title = if area.width >= 72 {
-        format!(
-            " POMOTUI  •  {session}  │  {}",
-            match app.theme {
-                Theme::VermilionPaperLight => "Vermilion Paper Light",
-                Theme::VermilionPaperDark => "Vermilion Paper Dark",
-            }
-        )
+        format!(" POMOTUI  •  {session}  │  {}", app.theme.name())
     } else {
         format!(" POMOTUI  •  {session}")
     };
@@ -755,7 +1040,7 @@ fn tasks_panel(
             let time = clock(task.focus_seconds);
             let width = usize::from(area.width.saturating_sub(if narrow { 13 } else { 16 }));
             let title = truncate(&task.title, width);
-            let line = format!("{marker}{status}{title:<width$} {time}");
+            let line = format!("{marker}{status}{} {time}", pad_display(&title, width));
             let style = if index == selected {
                 Style::default()
                     .fg(colors.background)
@@ -787,8 +1072,8 @@ fn tasks_panel(
         List::new(items).block(panel(
             text(
                 language,
-                "TASKS  ↑↓ select · Enter start · n new · : all actions",
-                "任务  ↑↓ 选择 · Enter 开始 · n 新建 · : 全部操作",
+                "TASKS  ↑↓ move · Enter select · Space start · n new · : actions",
+                "任务  ↑↓ 移动 · Enter 选择 · Space 开始 · n 新建 · : 操作",
             ),
             colors,
         )),
@@ -1030,12 +1315,171 @@ fn trend(values: [u64; 7]) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
+fn review_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: Option<&Snapshot>,
+    colors: Colors,
+    language: Language,
+) {
+    let Some(snapshot) = snapshot else {
+        frame.render_widget(
+            Paragraph::new(text(
+                language,
+                "Review is waiting for the Timer Service.",
+                "复盘正在等待计时服务。",
+            ))
+            .block(panel(text(language, "REVIEW", "复盘"), colors)),
+            area,
+        );
+        return;
+    };
+    let mut tasks = std::collections::BTreeMap::<String, u64>::new();
+    let mut completed = 0_usize;
+    let mut stopped = 0_usize;
+    let mut skipped = 0_usize;
+    let mut focus = 0_u64;
+    let mut breaks = 0_u64;
+    for record in &snapshot.recent_history {
+        match record.outcome.as_str() {
+            "Completed" => completed += 1,
+            "Stopped" => stopped += 1,
+            "Skipped" => skipped += 1,
+            _ => {}
+        }
+        if record.kind == SessionKind::Focus {
+            focus = focus.saturating_add(record.actual_seconds);
+            let task = record
+                .task_title
+                .clone()
+                .unwrap_or_else(|| text(language, "No Task", "无任务").into());
+            let total = tasks.entry(task).or_default();
+            *total = total.saturating_add(record.actual_seconds);
+        } else {
+            breaks = breaks.saturating_add(record.actual_seconds);
+        }
+    }
+    let mut ranked = tasks.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let maximum = ranked.first().map_or(1, |item| item.1.max(1));
+    let rhythm = snapshot
+        .recent_history
+        .iter()
+        .rev()
+        .take(40)
+        .map(|record| match record.kind {
+            SessionKind::Focus => '■',
+            SessionKind::ShortBreak => '·',
+            SessionKind::LongBreak => '◆',
+        })
+        .collect::<String>();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            text(language, "WHAT YOU DID", "做了什么"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "{} {}  ·  {} {}",
+            human_duration(focus),
+            text(language, "focus", "专注"),
+            human_duration(breaks),
+            text(language, "breaks", "休息")
+        )),
+        Line::from(vec![
+            Span::styled(
+                trend(snapshot.today.seven_day_focus_seconds),
+                Style::default().fg(colors.gold),
+            ),
+            Span::raw(format!(
+                "  {} {}",
+                text(language, "7-day · avg", "7 天 · 平均"),
+                human_duration(snapshot.today.average_focus_seconds)
+            )),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "FOCUS BY TASK", "各任务专注"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if ranked.is_empty() {
+        lines.push(Line::from(text(
+            language,
+            "No Focus Sessions yet",
+            "尚无专注时段",
+        )));
+    } else {
+        lines.extend(ranked.into_iter().take(6).map(|(task, seconds)| {
+            let bars = usize::try_from(seconds.saturating_mul(18) / maximum)
+                .unwrap_or(18)
+                .max(1);
+            Line::from(format!(
+                "  {} {}  {}",
+                "█".repeat(bars),
+                human_duration(seconds),
+                task
+            ))
+        }));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "SESSION OUTCOMES", "时段结果"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "{} {completed}  {} {stopped}  {} {skipped}",
+            text(language, "Completed", "完成"),
+            text(language, "Stopped", "停止"),
+            text(language, "Skipped", "跳过")
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "FOCUS / BREAK RHYTHM", "专注 / 休息节奏"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(if rhythm.is_empty() {
+            text(language, "No Sessions yet", "尚无时段").into()
+        } else {
+            rhythm
+        }),
+        Line::from(Span::styled(
+            text(
+                language,
+                "■ Focus  · Short Break  ◆ Long Break",
+                "■ 专注  · 短休息  ◆ 长休息",
+            ),
+            Style::default().fg(colors.muted),
+        )),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(text(language, "HISTORY REVIEW", "历史复盘"), colors))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn history_view(
     frame: &mut Frame<'_>,
     area: Rect,
     snapshot: Option<&Snapshot>,
     colors: Colors,
     language: Language,
+    offset: usize,
+    cursor: usize,
+    visual_anchor: Option<usize>,
+    marked: &std::collections::BTreeSet<u64>,
 ) {
     let Some(snapshot) = snapshot else {
         frame.render_widget(
@@ -1053,8 +1497,82 @@ fn history_view(
         );
         return;
     };
+    let compact = area.width < 72;
+    let visible = history_visible_records(area, compact);
+    let lines = history_view_lines(
+        snapshot,
+        colors,
+        language,
+        compact,
+        offset,
+        visible,
+        cursor,
+        visual_anchor,
+        marked,
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(
+                text(
+                    language,
+                    "SESSION FLOW · PAST / CURRENT / NEXT",
+                    "时段流程 · 过去 / 当前 / 下一时段",
+                ),
+                colors,
+            ))
+            .wrap(Wrap { trim: false }),
+        area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        }),
+    );
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn history_view_lines(
+    snapshot: &Snapshot,
+    colors: Colors,
+    language: Language,
+    compact: bool,
+    offset: usize,
+    visible: usize,
+    cursor: usize,
+    visual_anchor: Option<usize>,
+    marked: &std::collections::BTreeSet<u64>,
+) -> Vec<Line<'static>> {
+    let total = snapshot.recent_history.len();
+    let first = offset.saturating_add(1).min(total);
+    let last = offset.saturating_add(visible).min(total);
+    let selected_count = if marked.is_empty() {
+        visual_anchor.map_or(1, |anchor| anchor.abs_diff(cursor).saturating_add(1))
+    } else {
+        marked.len()
+    };
+    let heading = if !marked.is_empty() {
+        format!(
+            "{} · {} {selected_count} · {}",
+            text(language, "PAST", "过去"),
+            text(language, "MARKED", "已选"),
+            text(language, "D delete", "D 删除")
+        )
+    } else if visual_anchor.is_some() {
+        format!(
+            "{} · {} {selected_count} · {}",
+            text(language, "PAST", "过去"),
+            text(language, "VISUAL", "多选"),
+            text(language, "D delete", "D 删除")
+        )
+    } else if total > visible {
+        format!(
+            "{} · {first}–{last} / {total} · {}",
+            text(language, "PAST", "过去"),
+            text(language, "↑↓ scroll", "↑↓ 滚动")
+        )
+    } else {
+        text(language, "PAST", "过去").into()
+    };
     let mut lines = vec![Line::from(Span::styled(
-        text(language, "PAST", "过去"),
+        heading,
         Style::default().fg(colors.muted),
     ))];
     if snapshot.recent_history.is_empty() {
@@ -1064,14 +1582,41 @@ fn history_view(
             "  尚无已完成时段",
         )));
     } else {
+        if !compact {
+            lines.push(Line::from(Span::styled(
+                text(
+                    language,
+                    "  TYPE        RESULT      TASK                            TIME",
+                    "  类型        结果        任务                            时长",
+                ),
+                Style::default().fg(colors.muted),
+            )));
+        }
         lines.extend(
             snapshot
                 .recent_history
                 .iter()
-                .map(|item| history_line(item, colors, language)),
+                .skip(offset)
+                .take(visible)
+                .enumerate()
+                .flat_map(|(relative, item)| {
+                    let index = offset + relative;
+                    let selected = visual_anchor.is_some_and(|anchor| {
+                        (anchor.min(cursor)..=anchor.max(cursor)).contains(&index)
+                    });
+                    history_lines(
+                        item,
+                        colors,
+                        language,
+                        compact,
+                        index == cursor,
+                        selected || marked.contains(&item.id),
+                    )
+                }),
         );
     }
     lines.extend([
+        Line::from(""),
         Line::from("│"),
         Line::from(vec![
             Span::styled(
@@ -1112,48 +1657,113 @@ fn history_view(
             )),
         ]),
     ]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(
-                text(
-                    language,
-                    "SESSION FLOW · PAST / CURRENT / NEXT",
-                    "时段流程 · 过去 / 当前 / 下一时段",
-                ),
-                colors,
-            ))
-            .wrap(Wrap { trim: false }),
-        area.inner(Margin {
-            horizontal: 1,
-            vertical: 1,
-        }),
-    );
+    lines
 }
 
-fn history_line(
+fn history_visible_records(area: Rect, compact: bool) -> usize {
+    let content_height = usize::from(area.height.saturating_sub(4));
+    let fixed_lines = if compact { 6 } else { 7 };
+    let lines_per_record = if compact { 2 } else { 1 };
+    content_height
+        .saturating_sub(fixed_lines)
+        .checked_div(lines_per_record)
+        .unwrap_or(0)
+        .max(1)
+}
+
+fn history_lines(
     item: &pomotui_protocol::RecentSessionSummary,
     colors: Colors,
     language: Language,
-) -> Line<'static> {
+    compact: bool,
+    cursor: bool,
+    marked: bool,
+) -> Vec<Line<'static>> {
     let task = match (&item.kind, item.task_title.as_deref()) {
         (SessionKind::Focus, Some(title)) => title.to_owned(),
         (SessionKind::Focus, None) => text(language, "No Task", "无任务").into(),
         _ => text(language, "Break · no Task", "休息 · 无任务").into(),
     };
-    Line::from(vec![
-        Span::styled(
-            format!("  {}  ", kind_label(&item.kind, language)),
-            Style::default()
-                .fg(session_color_for_kind(&item.kind, colors))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "{}  ·  {}  ·  {}",
-            outcome_label(&item.outcome, language),
-            task,
-            human_duration_precise(item.actual_seconds)
-        )),
-    ])
+    let kind = kind_label(&item.kind, language);
+    let outcome = outcome_label(&item.outcome, language);
+    let duration = human_duration_precise(item.actual_seconds);
+    let indicator = if cursor {
+        "› "
+    } else if marked {
+        "✓ "
+    } else {
+        "  "
+    };
+    let cursor_text = contrasting_text(colors.accent);
+    let cursor_style = if cursor {
+        Style::default()
+            .fg(cursor_text)
+            .bg(colors.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    if compact {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{indicator}{}", pad_display(kind, 10)),
+                    Style::default()
+                        .fg(if cursor {
+                            cursor_text
+                        } else {
+                            session_color_for_kind(&item.kind, colors)
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("{}  {duration}", pad_display(outcome, 10))),
+            ])
+            .style(cursor_style),
+            Line::from(format!("    {task}")).style(cursor_style),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{indicator}{}", pad_display(kind, 10)),
+                    Style::default()
+                        .fg(if cursor {
+                            cursor_text
+                        } else {
+                            session_color_for_kind(&item.kind, colors)
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "{}{}{}",
+                    pad_display(outcome, 12),
+                    pad_display(&task, 32),
+                    duration
+                )),
+            ])
+            .style(cursor_style),
+        ]
+    }
+}
+
+fn contrasting_text(background: Color) -> Color {
+    match background {
+        Color::Rgb(red, green, blue) => {
+            let luminance = u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114;
+            if luminance >= 150_000 {
+                Color::Black
+            } else {
+                Color::White
+            }
+        }
+        Color::White
+        | Color::Gray
+        | Color::Yellow
+        | Color::LightYellow
+        | Color::LightGreen
+        | Color::LightCyan => Color::Black,
+        _ => Color::White,
+    }
 }
 
 fn session_color_for_kind(kind: &SessionKind, colors: Colors) -> Color {
@@ -1342,9 +1952,16 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let view = match app.view {
         View::Dashboard => text(app.language, "DASHBOARD", "仪表盘"),
         View::Today => text(app.language, "TODAY", "今日"),
+        View::Review => text(app.language, "REVIEW", "复盘"),
         View::History => text(app.language, "HISTORY", "历史"),
     };
-    let keys = if app.narrow {
+    let keys = if app.view == View::History {
+        text(
+            app.language,
+            "j/k move · Space mark · v range · gg/G ends · u/d page · D delete",
+            "j/k 移动 · Space 勾选 · v 连选 · gg/G 首尾 · u/d 翻页 · D 删除",
+        )
+    } else if app.narrow {
         text(
             app.language,
             "h/l views · j/k Tasks · Space toggle · : commands · ? help",
@@ -1353,8 +1970,8 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     } else {
         text(
             app.language,
-            "h/l or ←/→ views  j/k Tasks  Enter start  Space toggle  n new Task  : commands  ? help  q quit",
-            "h/l 或 ←/→ 切换视图  j/k 任务  Enter 开始  Space 切换  n 新建  : 命令  ? 帮助  q 退出",
+            "h/l or ←/→ views  j/k Tasks  Enter select  Space start/toggle  n new  : commands  ? help  q quit",
+            "h/l 或 ←/→ 切换视图  j/k 任务  Enter 选择  Space 开始/切换  n 新建  : 命令  ? 帮助  q 退出",
         )
     };
     let mut lines = vec![Line::from(Span::styled(
@@ -1392,9 +2009,11 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::Palette => area.height.saturating_sub(4).min(21),
         Overlay::Help => area.height.saturating_sub(4).min(20),
         Overlay::Settings => 17.min(area.height.saturating_sub(2)),
-        Overlay::CreateTask | Overlay::RenameTask | Overlay::ConfirmDelete => {
-            7.min(area.height.saturating_sub(2))
-        }
+        Overlay::CreateTask
+        | Overlay::RenameTask
+        | Overlay::ConfirmDelete
+        | Overlay::ConfirmTaskSwitch
+        | Overlay::ConfirmHistoryDelete => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
     };
     let modal = if app.narrow {
@@ -1409,6 +2028,8 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
         Overlay::CreateTask | Overlay::RenameTask => text_entry_overlay(frame, modal, app, colors),
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
+        Overlay::ConfirmTaskSwitch => confirm_task_switch_overlay(frame, modal, app, colors),
+        Overlay::ConfirmHistoryDelete => confirm_history_delete_overlay(frame, modal, app, colors),
         Overlay::None => {}
     }
 }
@@ -1473,7 +2094,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .fg(colors.gold)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  Enter  用所选任务开始专注    Space  开始/暂停/继续"),
+            Line::from("  Enter  确认所选任务          Space  开始/暂停/继续"),
             Line::from("  X      停止当前时段          K      跳过当前时段"),
             Line::from(""),
             Line::from(Span::styled(
@@ -1500,8 +2121,8 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .fg(colors.gold)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  h/l or ←/→  switch Dashboard, Today, History"),
-            Line::from("  j/k or ↑/↓  select a Task                 q  quit"),
+            Line::from("  h/l or ←/→  switch Dashboard, Today, Review, History"),
+            Line::from("  j/k move  gg/G ends  u/d page  Space mark  v range  q quit"),
             Line::from(""),
             Line::from(Span::styled(
                 "SESSIONS",
@@ -1509,7 +2130,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .fg(colors.gold)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  Enter  start Focus with selected Task    Space  start/pause/resume"),
+            Line::from("  Enter  confirm selected Task             Space  start/pause/resume"),
             Line::from("  X      stop Current Session              K      skip Current Session"),
             Line::from(""),
             Line::from(Span::styled(
@@ -1519,7 +2140,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("  n  Create task     r  Rename task       c  Complete/reopen task"),
-            Line::from("  D  Delete task (confirmation required)"),
+            Line::from("  D  Delete task / selected History (confirmation required)"),
             Line::from(""),
             Line::from(Span::styled(
                 "TOOLS",
@@ -1547,10 +2168,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
 }
 
 fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
-    let theme = match app.theme {
-        Theme::VermilionPaperLight => "Vermilion Paper Light",
-        Theme::VermilionPaperDark => "Vermilion Paper Dark",
-    };
+    let theme = app.theme.name();
     let language = match app.language {
         Language::English => "English",
         Language::SimplifiedChinese => "简体中文",
@@ -1562,23 +2180,18 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
                 .fg(colors.gold)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(format!(
-            "  {}                    {theme}",
-            text(app.language, "Theme", "主题")
+        Line::from(settings_row(text(app.language, "Theme", "主题"), theme)),
+        Line::from(settings_row(
+            text(app.language, "t or ←/→", "t 或 ←/→"),
+            text(app.language, "preview theme", "预览主题"),
         )),
-        Line::from(text(
-            app.language,
-            "  t or ←/→                 preview theme",
-            "  t 或 ←/→                  预览主题",
+        Line::from(settings_row(
+            text(app.language, "Language", "语言"),
+            language,
         )),
-        Line::from(format!(
-            "  {}                 {language}",
-            text(app.language, "Language", "语言")
-        )),
-        Line::from(text(
-            app.language,
-            "  g                         switch and save language",
-            "  g                         切换并保存语言",
+        Line::from(settings_row(
+            "g",
+            text(app.language, "switch and save language", "切换并保存语言"),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -1684,8 +2297,80 @@ fn confirm_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: 
     );
 }
 
-const fn colors(theme: Theme) -> Colors {
-    match theme {
+fn confirm_task_switch_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let task = app
+        .selected_task()
+        .map_or(text(app.language, "selected Task", "所选任务"), |task| {
+            task.title.as_str()
+        });
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!(
+                "{} “{task}”？",
+                text(
+                    app.language,
+                    "Stop this Session and switch to",
+                    "停止当前时段并切换到"
+                )
+            )),
+            Line::from(text(
+                app.language,
+                "Elapsed focus time will remain in Session History.",
+                "已经专注的时间会保留在时段历史中。",
+            )),
+            Line::from(Span::styled(
+                text(
+                    app.language,
+                    "y / Enter switch · n / Esc cancel",
+                    "y / Enter 切换 · n / Esc 取消",
+                ),
+                Style::default().fg(colors.muted),
+            )),
+        ])
+        .block(
+            panel(
+                text(app.language, "CONFIRM TASK SWITCH", "确认切换任务"),
+                colors,
+            )
+            .border_style(Style::default().fg(colors.accent)),
+        ),
+        area,
+    );
+}
+
+fn confirm_history_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let count = app.history_ids_for_action().len();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!(
+                "{} {count} {}？",
+                text(app.language, "Delete", "删除"),
+                text(app.language, "Session History entries", "条时段历史记录")
+            )),
+            Line::from(text(
+                app.language,
+                "Review totals and charts will be recalculated.",
+                "复盘总计和图表将重新计算。",
+            )),
+            Line::from(Span::styled(
+                text(
+                    app.language,
+                    "y / Enter delete · n / Esc cancel",
+                    "y / Enter 删除 · n / Esc 取消",
+                ),
+                Style::default().fg(colors.muted),
+            )),
+        ])
+        .block(
+            panel(text(app.language, "DELETE HISTORY", "删除历史"), colors)
+                .border_style(Style::default().fg(colors.accent)),
+        ),
+        area,
+    );
+}
+
+fn colors(theme: Theme, overrides: ColorOverrides) -> Colors {
+    let base = match theme {
         Theme::VermilionPaperLight => Colors {
             background: Color::Rgb(247, 243, 235),
             surface: Color::Rgb(235, 228, 216),
@@ -1706,6 +2391,36 @@ const fn colors(theme: Theme) -> Colors {
             good: Color::Rgb(112, 177, 132),
             border: Color::Rgb(84, 73, 65),
         },
+        Theme::RanPaperLight => Colors {
+            background: Color::Rgb(232, 223, 201),
+            surface: Color::Rgb(198, 187, 165),
+            text: Color::Rgb(33, 31, 26),
+            muted: Color::Rgb(112, 103, 91),
+            accent: Color::Rgb(166, 35, 31),
+            gold: Color::Rgb(184, 135, 34),
+            good: Color::Rgb(49, 92, 120),
+            border: Color::Rgb(166, 154, 132),
+        },
+        Theme::RanPaperDark => Colors {
+            background: Color::Rgb(17, 16, 15),
+            surface: Color::Rgb(37, 33, 28),
+            text: Color::Rgb(221, 210, 185),
+            muted: Color::Rgb(156, 149, 136),
+            accent: Color::Rgb(214, 74, 60),
+            gold: Color::Rgb(216, 173, 67),
+            good: Color::Rgb(101, 145, 173),
+            border: Color::Rgb(86, 78, 67),
+        },
+    };
+    Colors {
+        background: overrides.background.unwrap_or(base.background),
+        surface: overrides.surface.unwrap_or(base.surface),
+        text: overrides.text.unwrap_or(base.text),
+        muted: overrides.muted.unwrap_or(base.muted),
+        accent: overrides.accent.unwrap_or(base.accent),
+        gold: overrides.gold.unwrap_or(base.gold),
+        good: overrides.good.unwrap_or(base.good),
+        border: overrides.border.unwrap_or(base.border),
     }
 }
 
@@ -1776,15 +2491,33 @@ fn human_duration(seconds: u64) -> String {
 }
 
 fn truncate(value: &str, maximum: usize) -> String {
-    if value.chars().count() <= maximum {
+    if UnicodeWidthStr::width(value) <= maximum {
         return value.to_owned();
     }
     if maximum <= 1 {
-        return "…".chars().take(maximum).collect();
+        return "…".repeat(maximum);
     }
-    let mut output = value.chars().take(maximum - 1).collect::<String>();
+    let mut output = String::new();
+    let content_width = maximum - 1;
+    for character in value.chars() {
+        let next_width = character.width().unwrap_or(0);
+        if UnicodeWidthStr::width(output.as_str()) + next_width > content_width {
+            break;
+        }
+        output.push(character);
+    }
     output.push('…');
     output
+}
+
+fn pad_display(value: &str, width: usize) -> String {
+    let value = truncate(value, width);
+    let padding = width.saturating_sub(UnicodeWidthStr::width(value.as_str()));
+    format!("{value}{}", " ".repeat(padding))
+}
+
+fn settings_row(label: &str, value: &str) -> String {
+    format!("  {}{value}", pad_display(label, 28))
 }
 
 fn big_clock(value: &str) -> Vec<String> {
@@ -1882,12 +2615,14 @@ mod tests {
             }),
             recent_history: vec![
                 pomotui_protocol::RecentSessionSummary {
+                    id: 1,
                     kind: SessionKind::Focus,
                     outcome: "Completed".into(),
                     actual_seconds: 1_500,
                     task_title: Some("Ship Pomotui".into()),
                 },
                 pomotui_protocol::RecentSessionSummary {
+                    id: 1,
                     kind: SessionKind::ShortBreak,
                     outcome: "Completed".into(),
                     actual_seconds: 300,
@@ -1900,7 +2635,12 @@ mod tests {
     #[test]
     fn wide_and_narrow_dashboard_render_all_session_states_and_themes() {
         for (width, height) in [(100, 32), (60, 24)] {
-            for theme in [Theme::VermilionPaperLight, Theme::VermilionPaperDark] {
+            for theme in [
+                Theme::VermilionPaperLight,
+                Theme::VermilionPaperDark,
+                Theme::RanPaperLight,
+                Theme::RanPaperDark,
+            ] {
                 for (state, kind) in [
                     ("running", SessionKind::Focus),
                     ("running", SessionKind::ShortBreak),
@@ -2173,6 +2913,7 @@ mod tests {
             value.recent_history.insert(
                 1,
                 pomotui_protocol::RecentSessionSummary {
+                    id: 1,
                     kind: SessionKind::Focus,
                     outcome: "Stopped".into(),
                     actual_seconds: 42,
@@ -2196,6 +2937,359 @@ mod tests {
             for label in expected {
                 assert!(rendered.contains(label), "missing {label}: {rendered}");
             }
+        }
+    }
+
+    fn symbol_column(terminal: &Terminal<TestBackend>, symbol: &str) -> Option<u16> {
+        let area = terminal.backend().buffer().area;
+        (0..area.height).find_map(|y| {
+            (0..area.width).find(|&x| {
+                (x..area.width)
+                    .map(|cell_x| terminal.backend().buffer()[(cell_x, y)].symbol())
+                    .collect::<String>()
+                    .starts_with(symbol)
+            })
+        })
+    }
+
+    fn symbol_columns(terminal: &Terminal<TestBackend>, symbol: &str) -> Vec<u16> {
+        let area = terminal.backend().buffer().area;
+        (0..area.height)
+            .flat_map(|y| {
+                (0..area.width).filter(move |&x| {
+                    (x..area.width)
+                        .map(|cell_x| terminal.backend().buffer()[(cell_x, y)].symbol())
+                        .collect::<String>()
+                        .starts_with(symbol)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wide_character_task_titles_keep_times_in_one_column() {
+        let mut value = snapshot("pending", SessionKind::Focus);
+        value.tasks = vec![
+            pomotui_protocol::TaskSummary {
+                id: 1,
+                title: "cnn".into(),
+                completed: false,
+                focus_seconds: 13_500,
+            },
+            pomotui_protocol::TaskSummary {
+                id: 2,
+                title: "写日记".into(),
+                completed: false,
+                focus_seconds: 0,
+            },
+        ];
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("dashboard");
+
+        let first = symbol_column(&terminal, "225:00");
+        let second = symbol_column(&terminal, "00:00");
+        assert!(first.is_some() && second.is_some());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn simplified_chinese_settings_values_share_a_column() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::VermilionPaperLight,
+        );
+        app.language = Language::SimplifiedChinese;
+        app.overlay = Overlay::Settings;
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("settings");
+
+        let language_column = symbol_column(&terminal, "简").expect("language value");
+        assert!(symbol_columns(&terminal, "V").contains(&language_column));
+    }
+
+    #[test]
+    fn simplified_chinese_history_uses_stable_columns() {
+        let mut value = snapshot("pending", SessionKind::Focus);
+        value.recent_history = vec![
+            pomotui_protocol::RecentSessionSummary {
+                id: 1,
+                kind: SessionKind::Focus,
+                outcome: "Stopped".into(),
+                actual_seconds: 3,
+                task_title: Some("写日记".into()),
+            },
+            pomotui_protocol::RecentSessionSummary {
+                id: 1,
+                kind: SessionKind::ShortBreak,
+                outcome: "Skipped".into(),
+                actual_seconds: 0,
+                task_title: None,
+            },
+        ];
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+        app.language = Language::SimplifiedChinese;
+        app.view = View::History;
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("history");
+
+        assert_eq!(
+            symbol_column(&terminal, "停"),
+            symbol_column(&terminal, "跳")
+        );
+        let first = symbol_column(&terminal, "3s");
+        let second = symbol_column(&terminal, "0s");
+        assert!(first.is_some() && second.is_some());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn selecting_a_pending_task_rebinds_without_starting() {
+        let mut value = snapshot("pending", SessionKind::Focus);
+        value.tasks.push(pomotui_protocol::TaskSummary {
+            id: 2,
+            title: "Write journal".into(),
+            completed: false,
+            focus_seconds: 0,
+        });
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+
+        assert_eq!(app.handle_key(InputKey::Down), None);
+        assert_eq!(app.selected_task, 1);
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::TaskSelect {
+                id: 2,
+                stop_current: false,
+            }))
+        );
+        assert_eq!(
+            app.handle_key(InputKey::Char(' ')),
+            Some(Action::Command(pomotui_protocol::Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(2),
+            }))
+        );
+    }
+
+    #[test]
+    fn history_navigation_scrolls_to_older_records() {
+        let mut value = snapshot("pending", SessionKind::Focus);
+        value.recent_history = (0..10)
+            .map(|index| pomotui_protocol::RecentSessionSummary {
+                id: 1,
+                kind: SessionKind::Focus,
+                outcome: "Stopped".into(),
+                actual_seconds: index,
+                task_title: Some(format!("History Task {index}")),
+            })
+            .collect();
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+        app.view = View::History;
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("initial history");
+        let initial = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(initial.contains("History Task 0"));
+
+        for _ in 0..5 {
+            assert_eq!(app.handle_key(InputKey::Down), None);
+        }
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("scrolled history");
+        let scrolled = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(!scrolled.contains("History Task 0"));
+        assert!(scrolled.contains("History Task 5"));
+        assert_eq!(app.selected_task, 0);
+    }
+
+    #[test]
+    fn active_task_switch_and_visual_history_delete_require_confirmation() {
+        let mut value = snapshot("running", SessionKind::Focus);
+        value.tasks.push(pomotui_protocol::TaskSummary {
+            id: 2,
+            title: "Next".into(),
+            completed: false,
+            focus_seconds: 0,
+        });
+        value.recent_history = (1..=8)
+            .map(|id| pomotui_protocol::RecentSessionSummary {
+                id,
+                kind: SessionKind::Focus,
+                outcome: "Stopped".into(),
+                actual_seconds: id,
+                task_title: Some(format!("Task {id}")),
+            })
+            .collect();
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+        app.handle_key(InputKey::Down);
+        assert_eq!(app.handle_key(InputKey::Enter), None);
+        assert_eq!(app.overlay, Overlay::ConfirmTaskSwitch);
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::TaskSelect {
+                id: 2,
+                stop_current: true,
+            }))
+        );
+
+        app.view = View::History;
+        app.handle_key(InputKey::Char('G'));
+        assert_eq!(app.history_cursor, 7);
+        app.handle_key(InputKey::Char('g'));
+        app.handle_key(InputKey::Char('g'));
+        assert_eq!(app.history_cursor, 0);
+        app.handle_key(InputKey::Char('v'));
+        app.handle_key(InputKey::Char('d'));
+        assert_eq!(app.history_cursor, 5);
+        app.handle_key(InputKey::Char('D'));
+        assert_eq!(app.overlay, Overlay::ConfirmHistoryDelete);
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::HistoryDelete {
+                ids: vec![1, 2, 3, 4, 5, 6],
+            }))
+        );
+    }
+
+    #[test]
+    fn review_renders_history_derived_charts() {
+        let mut value = snapshot("pending", SessionKind::Focus);
+        value.recent_history = vec![
+            pomotui_protocol::RecentSessionSummary {
+                id: 1,
+                kind: SessionKind::Focus,
+                outcome: "Completed".into(),
+                actual_seconds: 1_500,
+                task_title: Some("Write".into()),
+            },
+            pomotui_protocol::RecentSessionSummary {
+                id: 2,
+                kind: SessionKind::ShortBreak,
+                outcome: "Completed".into(),
+                actual_seconds: 300,
+                task_title: None,
+            },
+        ];
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+        app.view = View::Review;
+        let mut terminal = Terminal::new(TestBackend::new(90, 30)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("review");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("FOCUS BY TASK"));
+        assert!(rendered.contains("SESSION OUTCOMES"));
+        assert!(rendered.contains("Write"));
+    }
+
+    #[test]
+    fn history_cursor_and_space_marks_support_disjoint_deletion() {
+        let mut value = snapshot("pending", SessionKind::Focus);
+        value.recent_history = (1..=5)
+            .map(|id| pomotui_protocol::RecentSessionSummary {
+                id,
+                kind: SessionKind::Focus,
+                outcome: "Stopped".into(),
+                actual_seconds: id,
+                task_title: Some(format!("Record {id}")),
+            })
+            .collect();
+        let mut app = App::new(Some(value), Theme::VermilionPaperDark);
+        app.view = View::History;
+
+        app.handle_key(InputKey::Char(' '));
+        app.handle_key(InputKey::Down);
+        app.handle_key(InputKey::Down);
+        app.handle_key(InputKey::AltSpace);
+        assert_eq!(
+            app.marked_history.iter().copied().collect::<Vec<_>>(),
+            [1, 3]
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("history");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains('›'));
+        assert!(rendered.contains('✓'));
+
+        app.handle_key(InputKey::Char('D'));
+        assert_eq!(app.overlay, Overlay::ConfirmHistoryDelete);
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::HistoryDelete {
+                ids: vec![1, 3]
+            }))
+        );
+    }
+
+    #[test]
+    fn history_cursor_text_contrasts_with_every_theme_and_custom_accent() {
+        let cases = [
+            (Theme::VermilionPaperLight, None),
+            (Theme::VermilionPaperDark, None),
+            (Theme::RanPaperLight, None),
+            (Theme::RanPaperDark, None),
+            (Theme::RanPaperLight, Some(Color::Rgb(245, 220, 90))),
+            (Theme::RanPaperDark, Some(Color::Rgb(20, 30, 40))),
+        ];
+        for (theme, accent) in cases {
+            let mut app = App::new(Some(snapshot("pending", SessionKind::Focus)), theme);
+            app.view = View::History;
+            app.color_overrides.accent = accent;
+            let palette = colors(theme, app.color_overrides);
+            let expected = contrasting_text(palette.accent);
+            let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("history");
+
+            let cursor_text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .filter(|cell| cell.bg == palette.accent && !cell.symbol().trim().is_empty())
+                .collect::<Vec<_>>();
+            assert!(!cursor_text.is_empty(), "{theme:?}");
+            assert!(
+                cursor_text.iter().all(|cell| cell.fg == expected),
+                "{theme:?}"
+            );
         }
     }
 

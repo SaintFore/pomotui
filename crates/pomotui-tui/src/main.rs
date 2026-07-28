@@ -1,6 +1,7 @@
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -36,11 +37,7 @@ fn run(
     );
     let mut client = Client::connect(&socket).ok();
     let config = load_config()?;
-    let theme = if config.theme == "Vermilion Paper Light" {
-        Theme::VermilionPaperLight
-    } else {
-        Theme::VermilionPaperDark
-    };
+    let theme = Theme::from_name(&config.theme).unwrap_or(Theme::VermilionPaperDark);
     let (completion_animation, warning) = config.animation.as_ref().map_or_else(
         || (pomotui_tui::animation::built_in(), None),
         |path| match std::fs::read_to_string(path) {
@@ -54,6 +51,7 @@ fn run(
         },
     );
     let mut app = App::new(read_snapshot(client.as_mut()), theme);
+    app.color_overrides = config.color_overrides()?;
     app.language = if config.language == "zh-CN" {
         Language::SimplifiedChinese
     } else {
@@ -82,6 +80,9 @@ fn run(
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let input = match key.code {
+                    KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Some(InputKey::AltSpace)
+                    }
                     KeyCode::Char(value) => {
                         Some(InputKey::Char(canonical_key(value, &config.keybindings)))
                     }

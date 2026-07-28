@@ -29,6 +29,14 @@ systemctl --user daemon-reload
 systemctl --user enable --now pomotui.socket
 ```
 
+To rebuild, reinstall, and restart after updating the source, run:
+
+```sh
+./packaging/rebuild-restart.sh
+```
+
+This preserves the existing configuration, Tasks, and Session History.
+
 The default installation places executables in `~/.local/bin`. Ensure that
 directory is in `PATH`, then verify the service:
 

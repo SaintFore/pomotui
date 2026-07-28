@@ -3,11 +3,24 @@ short_break_minutes = 5
 long_break_minutes = 15
 rounds_per_cycle = 4
 theme = "Vermilion Paper Dark"
+# Built-ins: Vermilion Paper Light, Vermilion Paper Dark,
+# Ran Paper Light, Ran Paper Dark
 language = "en"
 reminder_enabled = true
 volume = 100
 # sound = "builtin:complete"
 # animation = "/absolute/path/to/completion.animation"
+
+# Override any subset of the selected theme with strict #RRGGBB values:
+# [colors]
+# background = "#11100F"
+# surface = "#25211C"
+# text = "#DDD2B9"
+# muted = "#9C9588"
+# accent = "#D64A3C"
+# gold = "#D8AD43"
+# good = "#6591AD"
+# border = "#564E43"
 
 [keybindings]
 down = "j"

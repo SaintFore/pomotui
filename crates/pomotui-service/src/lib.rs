@@ -182,8 +182,8 @@ impl Service {
                 .records()
                 .iter()
                 .rev()
-                .take(5)
                 .map(|record| RecentSessionSummary {
+                    id: record.id,
                     kind: map_kind(record.kind),
                     outcome: format!("{:?}", record.outcome),
                     actual_seconds: record.actual_seconds,
@@ -265,6 +265,7 @@ impl Service {
         for event in transition.events() {
             self.history.push(SessionRecord::from_event(
                 *event,
+                self.next_event_id,
                 self.wall,
                 planned_seconds,
                 &self.tasks,
@@ -432,11 +433,43 @@ impl Handler for Service {
                 .tasks
                 .reopen(pomotui_domain::TaskId::new(id))
                 .map_err(|error| error.to_string()),
-            Command::TaskDelete { id } => self
-                .tasks
-                .delete(pomotui_domain::TaskId::new(id), self.timer.current_task())
-                .map(drop)
-                .map_err(|error| error.to_string()),
+            Command::TaskDelete { id } => {
+                let id = pomotui_domain::TaskId::new(id);
+                self.tasks
+                    .get(id)
+                    .map_err(|error| error.to_string())
+                    .and_then(|_| {
+                        self.timer
+                            .detach_pending_task(id)
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|()| {
+                        self.tasks
+                            .delete(id, self.timer.current_task())
+                            .map(drop)
+                            .map_err(|error| error.to_string())
+                    })
+            }
+            Command::TaskSelect { id, stop_current } => {
+                let id = pomotui_domain::TaskId::new(id);
+                if let Err(error) = self.tasks.get(id) {
+                    Err(error.to_string())
+                } else if matches!(self.timer.current_session(), CurrentSession::Pending(_)) {
+                    self.timer
+                        .select_pending_task(id)
+                        .map_err(|error| error.to_string())
+                } else if stop_current {
+                    let planned = self.timer.planned_seconds();
+                    let transition = self.timer.stop(self.now);
+                    self.apply_transition(transition, planned).and_then(|()| {
+                        self.timer
+                            .select_pending_task(id)
+                            .map_err(|error| error.to_string())
+                    })
+                } else {
+                    Err("Current Session must be stopped before switching Task".into())
+                }
+            }
             Command::History => {
                 return Response::Data {
                     value: serde_json::Value::Array(
@@ -457,6 +490,15 @@ impl Handler for Service {
                             .collect(),
                     ),
                 };
+            }
+            Command::HistoryDelete { ids } => {
+                if ids.is_empty() {
+                    Err("Select at least one Session History entry".into())
+                } else if self.history.delete(&ids) == 0 {
+                    Err("Selected Session History entries no longer exist".into())
+                } else {
+                    Ok(())
+                }
             }
             Command::Summary => {
                 let starts = local_day_boundaries(self.wall);
@@ -606,6 +648,8 @@ struct PersistedTask {
 
 #[derive(Deserialize, Serialize)]
 struct PersistedRecord {
+    #[serde(default)]
+    id: u64,
     ended_at: i64,
     kind: String,
     outcome: String,
@@ -679,6 +723,7 @@ impl PersistedService {
                 .records()
                 .iter()
                 .map(|record| PersistedRecord {
+                    id: record.id,
                     ended_at: record.ended_at,
                     kind: domain_kind_name(record.kind).into(),
                     outcome: outcome_name(record.outcome).into(),
@@ -786,8 +831,14 @@ impl PersistedService {
             persisted
                 .history
                 .into_iter()
-                .map(|record| {
+                .enumerate()
+                .map(|(index, record)| {
                     Ok(SessionRecord {
+                        id: if record.id == 0 {
+                            u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+                        } else {
+                            record.id
+                        },
                         ended_at: record.ended_at,
                         kind: parse_kind(&record.kind)?,
                         outcome: parse_outcome(&record.outcome)?,
@@ -999,6 +1050,153 @@ mod tests {
     }
 
     #[test]
+    fn pending_session_releases_its_task_for_deletion() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("create-delete"),
+            Command::TaskCreate {
+                title: "Disposable".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start-delete"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-delete"), Command::Stop));
+
+        let response = service.handle(request(
+            Some("delete-pending"),
+            Command::TaskDelete { id: 1 },
+        ));
+
+        assert!(matches!(response, Response::Snapshot { .. }));
+        assert!(service.snapshot().tasks.is_empty());
+        assert_eq!(service.timer.current_task(), None);
+    }
+
+    #[test]
+    fn running_session_keeps_its_task_when_deletion_is_requested() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("create-protected"),
+            Command::TaskCreate {
+                title: "Protected".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start-protected"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+
+        let response = service.handle(request(
+            Some("delete-running"),
+            Command::TaskDelete { id: 1 },
+        ));
+
+        assert!(matches!(response, Response::Error { .. }));
+        assert_eq!(service.snapshot().tasks.len(), 1);
+        assert_eq!(service.timer.current_task(), Some(TaskId::new(1)));
+    }
+
+    #[test]
+    fn snapshot_exposes_all_session_history() {
+        let mut service = Service::new();
+        for index in 0..8 {
+            service.history.push(SessionRecord {
+                id: 1,
+                ended_at: index,
+                kind: DomainKind::Focus,
+                outcome: SessionOutcome::Stopped,
+                planned_seconds: 1_500,
+                actual_seconds: 1,
+                task_id: None,
+                task_title: Some(format!("Task {index}")),
+            });
+        }
+
+        assert_eq!(service.snapshot().recent_history.len(), 8);
+    }
+
+    #[test]
+    fn task_selection_rebinds_pending_and_confirmed_switch_stops_running_focus() {
+        let mut service = Service::new();
+        for (key, title) in [("create-one", "One"), ("create-two", "Two")] {
+            service.handle(request(
+                Some(key),
+                Command::TaskCreate {
+                    title: title.into(),
+                },
+            ));
+        }
+        service.handle(request(
+            Some("select-one"),
+            Command::TaskSelect {
+                id: 1,
+                stop_current: false,
+            },
+        ));
+        assert_eq!(service.snapshot().current_task_id, Some(1));
+        service.handle(request(
+            Some("start-one"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(
+            Some("switch-two"),
+            Command::TaskSelect {
+                id: 2,
+                stop_current: true,
+            },
+        ));
+
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.state, "pending");
+        assert_eq!(snapshot.current_task_id, Some(2));
+        assert_eq!(snapshot.recent_history.len(), 1);
+        assert_eq!(snapshot.recent_history[0].actual_seconds, 0);
+        assert_eq!(
+            snapshot.recent_history[0].task_title.as_deref(),
+            Some("One")
+        );
+    }
+
+    #[test]
+    fn deleting_history_recalculates_task_and_daily_totals() {
+        let mut service = Service::new();
+        service.tasks.create("Tracked").expect("task");
+        service.history.push(SessionRecord {
+            id: 41,
+            ended_at: service.wall,
+            kind: DomainKind::Focus,
+            outcome: SessionOutcome::Completed,
+            planned_seconds: 60,
+            actual_seconds: 60,
+            task_id: Some(TaskId::new(1)),
+            task_title: Some("Tracked".into()),
+        });
+        assert_eq!(service.snapshot().today.focus_seconds, 60);
+
+        let response = service.handle(request(
+            Some("delete-history"),
+            Command::HistoryDelete { ids: vec![41] },
+        ));
+
+        assert!(matches!(response, Response::Snapshot { .. }));
+        let snapshot = service.snapshot();
+        assert!(snapshot.recent_history.is_empty());
+        assert_eq!(snapshot.today.focus_seconds, 0);
+        assert_eq!(snapshot.tasks[0].focus_seconds, 0);
+    }
+
+    #[test]
     fn local_day_boundaries_are_ordered_and_contain_the_observation() {
         let wall = LinuxClock.wall_seconds().expect("wall clock");
         let boundaries = local_day_boundaries(wall);
@@ -1011,13 +1209,14 @@ mod tests {
     fn today_task_focus_excludes_older_history_and_sorts_descending() {
         let mut service = Service::new();
         let starts = local_day_boundaries(service.wall);
-        for (ended_at, title, seconds) in [
-            (starts[6] + 10, Some("Second"), 300),
-            (starts[6] + 20, Some("First"), 900),
-            (starts[5] + 20, Some("Older"), 3_600),
-            (starts[6] + 30, None, 120),
+        for (id, ended_at, title, seconds) in [
+            (1, starts[6] + 10, Some("Second"), 300),
+            (2, starts[6] + 20, Some("First"), 900),
+            (3, starts[5] + 20, Some("Older"), 3_600),
+            (4, starts[6] + 30, None, 120),
         ] {
             service.history.push(SessionRecord {
+                id,
                 ended_at,
                 kind: DomainKind::Focus,
                 outcome: SessionOutcome::Completed,

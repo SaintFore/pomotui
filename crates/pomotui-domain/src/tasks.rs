@@ -177,6 +177,7 @@ impl std::error::Error for TaskError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRecord {
+    pub id: u64,
     pub ended_at: i64,
     pub kind: SessionKind,
     pub outcome: SessionOutcome,
@@ -190,6 +191,7 @@ impl SessionRecord {
     #[must_use]
     pub fn from_event(
         event: DomainEvent,
+        id: u64,
         ended_at: i64,
         planned_seconds: u64,
         tasks: &TaskStore,
@@ -204,6 +206,7 @@ impl SessionRecord {
             .and_then(|id| tasks.get(id).ok())
             .map(|task| task.title.clone());
         Self {
+            id,
             ended_at,
             kind,
             outcome,
@@ -228,6 +231,12 @@ impl History {
 
     pub fn push(&mut self, record: SessionRecord) {
         self.records.push(record);
+    }
+
+    pub fn delete(&mut self, ids: &[u64]) -> usize {
+        let before = self.records.len();
+        self.records.retain(|record| !ids.contains(&record.id));
+        before.saturating_sub(self.records.len())
     }
 
     #[must_use]

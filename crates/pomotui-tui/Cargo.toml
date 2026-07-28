@@ -11,6 +11,7 @@ ratatui = "0.30"
 crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+unicode-width = "0.2"
 
 [lints]
 workspace = true

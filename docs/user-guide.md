@@ -59,9 +59,35 @@ Press `g` in Settings to switch between English and Simplified Chinese and save
 the choice. The equivalent configuration values are `language = "en"` and
 `language = "zh-CN"`.
 
-Use arrows or `j/k` for Tasks and arrows or `h/l` for Dashboard, Today, and
-History. Press `Enter` to start Focus with the selected Task, `Space` to
-start/pause/resume, `X` to stop, and `K` to skip.
+Built-in themes are `Vermilion Paper Light`, `Vermilion Paper Dark`,
+`Ran Paper Light`, and `Ran Paper Dark`. Select one with `theme`:
+
+```toml
+theme = "Ran Paper Dark"
+```
+
+Every semantic color is an optional TOML interface. Values use strict
+`#RRGGBB`; omitted fields continue to come from the selected built-in theme:
+
+```toml
+[colors]
+background = "#11100F"
+surface = "#25211C"
+text = "#DDD2B9"
+muted = "#9C9588"
+accent = "#D64A3C"
+gold = "#D8AD43"
+good = "#6591AD"
+border = "#564E43"
+```
+
+Use arrows or `j/k` for Tasks and arrows or `h/l` for Dashboard, Today, Review,
+and History. Use `gg`/`G` for the first/last item, `u`/`d` to move by a page,
+and `v` for contiguous visual History selection. In History, `Space` or
+`Alt+Space` toggles individual records so unrelated entries can be selected
+together, and `D` deletes the marked records after confirmation. On the
+Dashboard, press `Enter` to bind the selected Task to the Current Session and
+`Space` to start/pause/resume; `X` stops and `K` skips.
 
 Task management is available without leaving the TUI: `n` creates, `r` renames,
 `c` completes or reopens, and uppercase `D` deletes after confirmation. `:`
