@@ -84,6 +84,24 @@ pub enum Command {
         reflection: Option<String>,
         chain_entry_title: Option<String>,
     },
+    RewardCreate {
+        name: String,
+        threshold: u64,
+        budget: Option<u64>,
+    },
+    RewardUpdate {
+        id: u64,
+        name: String,
+        threshold: u64,
+        budget: Option<u64>,
+    },
+    RewardDelete {
+        id: u64,
+    },
+    RewardClaim {
+        unlock_id: u64,
+    },
+    Rewards,
 }
 
 impl Command {
@@ -97,6 +115,7 @@ impl Command {
                 | Self::Summary
                 | Self::ActionChainCurrent
                 | Self::ActionChainArchive
+                | Self::Rewards
         )
     }
 }
@@ -148,6 +167,8 @@ pub struct Snapshot {
     pub pending_review: Option<PendingReviewSummary>,
     pub recent_chain_links: Vec<ChainLinkSummary>,
     pub recent_ended_chains: Vec<EndedChainSummary>,
+    pub next_reward: Option<RewardMilestoneSummary>,
+    pub current_chain_rewards: Vec<RewardUnlockSummary>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -180,6 +201,23 @@ pub struct EndedChainSummary {
     pub break_task_title: String,
     pub break_actual_seconds: u64,
     pub break_reflection: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RewardMilestoneSummary {
+    pub id: u64,
+    pub name: String,
+    pub threshold: u64,
+    pub budget: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RewardUnlockSummary {
+    pub id: u64,
+    pub name: String,
+    pub threshold: u64,
+    pub budget: Option<u64>,
+    pub state: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

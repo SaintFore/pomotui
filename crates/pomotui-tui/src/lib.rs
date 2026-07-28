@@ -1160,6 +1160,18 @@ fn chain_view(
         }),
         Line::from(""),
     ];
+    if let Some(reward) = &snapshot.next_reward {
+        lines.push(Line::from(format!(
+            "{}: {} @ {}",
+            text(language, "Next reward", "下一个奖励"),
+            reward.name,
+            reward.threshold
+        )));
+    }
+    for reward in &snapshot.current_chain_rewards {
+        lines.push(Line::from(format!("{}  [{}]", reward.name, reward.state)));
+    }
+    lines.push(Line::from(""));
     if snapshot.recent_chain_links.is_empty() {
         lines.push(Line::from(text(
             language,
@@ -2986,6 +2998,8 @@ mod tests {
             pending_review: None,
             recent_chain_links: vec![],
             recent_ended_chains: vec![],
+            next_reward: None,
+            current_chain_rewards: vec![],
         }
     }
 

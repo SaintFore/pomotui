@@ -11,8 +11,8 @@ use pomotui_platform::{
 use pomotui_protocol::{
     ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState,
     EndedChainSummary, Handler, PendingReviewSummary, ProtocolError, RecentSessionSummary,
-    ReminderDelivery, Request, Response, SessionKind, Snapshot, TaskFocusSummary, TaskSummary,
-    TodaySummary,
+    ReminderDelivery, Request, Response, RewardMilestoneSummary, RewardUnlockSummary, SessionKind,
+    Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -135,6 +135,10 @@ pub struct Service {
     next_chain_entry_id: u64,
     void_task_id: Option<u64>,
     ended_chains: Vec<EndedChainState>,
+    reward_milestones: Vec<RewardMilestoneState>,
+    reward_unlocks: Vec<RewardUnlockState>,
+    next_reward_milestone_id: u64,
+    next_reward_unlock_id: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -172,6 +176,26 @@ struct EndedChainState {
     id: u64,
     links: Vec<ChainLinkState>,
     chain_break: ChainBreakState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RewardMilestoneState {
+    id: u64,
+    name: String,
+    threshold: u64,
+    budget: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RewardUnlockState {
+    id: u64,
+    milestone_id: u64,
+    chain_id: u64,
+    name: String,
+    threshold: u64,
+    budget: Option<u64>,
+    state: String,
+    claimed_at: Option<i64>,
 }
 
 impl Service {
@@ -213,6 +237,10 @@ impl Service {
             next_chain_entry_id: 1,
             void_task_id: None,
             ended_chains: Vec::new(),
+            reward_milestones: Vec::new(),
+            reward_unlocks: Vec::new(),
+            next_reward_milestone_id: 1,
+            next_reward_unlock_id: 1,
         }
     }
 
@@ -405,6 +433,29 @@ impl Service {
                     break_reflection: chain.chain_break.reflection.clone(),
                 })
                 .collect(),
+            next_reward: self
+                .reward_milestones
+                .iter()
+                .filter(|milestone| milestone.threshold > self.current_chain_length)
+                .min_by_key(|milestone| milestone.threshold)
+                .map(|milestone| RewardMilestoneSummary {
+                    id: milestone.id,
+                    name: milestone.name.clone(),
+                    threshold: milestone.threshold,
+                    budget: milestone.budget,
+                }),
+            current_chain_rewards: self
+                .reward_unlocks
+                .iter()
+                .filter(|unlock| unlock.chain_id == self.current_chain_id)
+                .map(|unlock| RewardUnlockSummary {
+                    id: unlock.id,
+                    name: unlock.name.clone(),
+                    threshold: unlock.threshold,
+                    budget: unlock.budget,
+                    state: unlock.state.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -587,7 +638,29 @@ impl Service {
         });
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.current_chain_length = self.current_chain_length.saturating_add(1);
+        self.unlock_eligible_rewards();
         Ok(())
+    }
+
+    fn unlock_eligible_rewards(&mut self) {
+        for milestone in &self.reward_milestones {
+            let exists = self.reward_unlocks.iter().any(|unlock| {
+                unlock.chain_id == self.current_chain_id && unlock.milestone_id == milestone.id
+            });
+            if milestone.threshold <= self.current_chain_length && !exists {
+                self.reward_unlocks.push(RewardUnlockState {
+                    id: self.next_reward_unlock_id,
+                    milestone_id: milestone.id,
+                    chain_id: self.current_chain_id,
+                    name: milestone.name.clone(),
+                    threshold: milestone.threshold,
+                    budget: milestone.budget,
+                    state: "unlocked".into(),
+                    claimed_at: None,
+                });
+                self.next_reward_unlock_id = self.next_reward_unlock_id.saturating_add(1);
+            }
+        }
     }
 
     fn review_failure(
@@ -1210,6 +1283,83 @@ impl Handler for Service {
                 reflection,
                 chain_entry_title,
             } => self.edit_chain_entry(id, reflection, chain_entry_title),
+            Command::RewardCreate {
+                name,
+                threshold,
+                budget,
+            } => {
+                let name = name.trim();
+                if name.is_empty() || threshold == 0 {
+                    Err("Reward Milestone requires a name and positive threshold".into())
+                } else {
+                    self.reward_milestones.push(RewardMilestoneState {
+                        id: self.next_reward_milestone_id,
+                        name: name.to_owned(),
+                        threshold,
+                        budget,
+                    });
+                    self.next_reward_milestone_id = self.next_reward_milestone_id.saturating_add(1);
+                    Ok(())
+                }
+            }
+            Command::RewardUpdate {
+                id,
+                name,
+                threshold,
+                budget,
+            } => {
+                let name = name.trim();
+                if name.is_empty() || threshold == 0 {
+                    Err("Reward Milestone requires a name and positive threshold".into())
+                } else if let Some(milestone) = self
+                    .reward_milestones
+                    .iter_mut()
+                    .find(|milestone| milestone.id == id)
+                {
+                    name.clone_into(&mut milestone.name);
+                    milestone.threshold = threshold;
+                    milestone.budget = budget;
+                    Ok(())
+                } else {
+                    Err(format!("Reward Milestone {id} does not exist"))
+                }
+            }
+            Command::RewardDelete { id } => {
+                let before = self.reward_milestones.len();
+                self.reward_milestones
+                    .retain(|milestone| milestone.id != id);
+                if before == self.reward_milestones.len() {
+                    Err(format!("Reward Milestone {id} does not exist"))
+                } else {
+                    Ok(())
+                }
+            }
+            Command::RewardClaim { unlock_id } => {
+                let Some(unlock) = self
+                    .reward_unlocks
+                    .iter_mut()
+                    .find(|unlock| unlock.id == unlock_id)
+                else {
+                    return Self::rejected(format!("Reward unlock {unlock_id} does not exist"));
+                };
+                if unlock.state == "unlocked" {
+                    unlock.state = "claimed".into();
+                    unlock.claimed_at = Some(self.wall);
+                    Ok(())
+                } else if unlock.state == "claimed" {
+                    Ok(())
+                } else {
+                    Err("Unavailable reward cannot be claimed".into())
+                }
+            }
+            Command::Rewards => {
+                return Response::Data {
+                    value: serde_json::json!({
+                        "milestones": self.reward_milestones,
+                        "unlocks": self.reward_unlocks,
+                    }),
+                };
+            }
         };
         match result {
             Ok(()) => match self.persist(mutation_key.as_deref()) {
@@ -1318,6 +1468,14 @@ struct PersistedService {
     void_task_id: Option<u64>,
     #[serde(default)]
     ended_chains: Vec<EndedChainState>,
+    #[serde(default)]
+    reward_milestones: Vec<RewardMilestoneState>,
+    #[serde(default)]
+    reward_unlocks: Vec<RewardUnlockState>,
+    #[serde(default = "default_next_identity")]
+    next_reward_milestone_id: u64,
+    #[serde(default = "default_next_identity")]
+    next_reward_unlock_id: u64,
 }
 
 const fn default_chain_id() -> u64 {
@@ -1465,6 +1623,10 @@ impl PersistedService {
             next_chain_entry_id: service.next_chain_entry_id,
             void_task_id: service.void_task_id,
             ended_chains: service.ended_chains.clone(),
+            reward_milestones: service.reward_milestones.clone(),
+            reward_unlocks: service.reward_unlocks.clone(),
+            next_reward_milestone_id: service.next_reward_milestone_id,
+            next_reward_unlock_id: service.next_reward_unlock_id,
         };
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
@@ -1603,6 +1765,10 @@ impl PersistedService {
             next_chain_entry_id: persisted.next_chain_entry_id,
             void_task_id: persisted.void_task_id,
             ended_chains: persisted.ended_chains,
+            reward_milestones: persisted.reward_milestones,
+            reward_unlocks: persisted.reward_unlocks,
+            next_reward_milestone_id: persisted.next_reward_milestone_id,
+            next_reward_unlock_id: persisted.next_reward_unlock_id,
         })
     }
 }
@@ -2054,6 +2220,52 @@ mod tests {
         );
         assert_eq!(service.chain_links[0].session_id, session_id);
         assert_eq!(service.chain_links[0].task_title, "Stable identity");
+    }
+
+    #[test]
+    fn reward_unlocks_once_at_threshold_and_can_be_claimed_once() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Eat KFC".into(),
+                threshold: 1,
+                budget: Some(50),
+            },
+        ));
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Earn reward".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop"), Command::StopReview));
+        let response = service.handle(request(
+            Some("review"),
+            Command::ReviewSuccess { reflection: None },
+        ));
+        let Response::Snapshot { snapshot } = response else {
+            panic!("review snapshot");
+        };
+        assert_eq!(snapshot.current_chain_rewards.len(), 1);
+        assert_eq!(snapshot.current_chain_rewards[0].name, "Eat KFC");
+        assert_eq!(snapshot.current_chain_rewards[0].state, "unlocked");
+        let unlock_id = snapshot.current_chain_rewards[0].id;
+
+        service.handle(request(Some("claim"), Command::RewardClaim { unlock_id }));
+        service.handle(request(
+            Some("claim-retry"),
+            Command::RewardClaim { unlock_id },
+        ));
+        assert_eq!(service.snapshot().current_chain_rewards[0].state, "claimed");
+        assert_eq!(service.reward_unlocks.len(), 1);
     }
 
     #[test]

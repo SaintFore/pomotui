@@ -2,6 +2,7 @@
 
 use pomotui_protocol::{Command, PROTOCOL_VERSION, ProtocolError, Request, Response, SessionKind};
 
+#[allow(clippy::too_many_lines)]
 pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
     let json = args.iter().any(|arg| arg == "--json");
     let words: Vec<_> = args
@@ -94,6 +95,27 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
             task_id: None,
             use_void: true,
             chain_entry_title: Some((*title).into()),
+        },
+        ["reward", "list"] => Command::Rewards,
+        ["reward", "create", threshold, name] => Command::RewardCreate {
+            name: (*name).into(),
+            threshold: parse_id(threshold)?,
+            budget: None,
+        },
+        ["reward", "create", threshold, name, "--budget", budget] => Command::RewardCreate {
+            name: (*name).into(),
+            threshold: parse_id(threshold)?,
+            budget: Some(parse_id(budget)?),
+        },
+        ["reward", "update", id, threshold, name] => Command::RewardUpdate {
+            id: parse_id(id)?,
+            name: (*name).into(),
+            threshold: parse_id(threshold)?,
+            budget: None,
+        },
+        ["reward", "delete", id] => Command::RewardDelete { id: parse_id(id)? },
+        ["reward", "claim", id] => Command::RewardClaim {
+            unlock_id: parse_id(id)?,
         },
         _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
     };
@@ -222,6 +244,8 @@ mod tests {
                         pending_review: None,
                         recent_chain_links: vec![],
                         recent_ended_chains: vec![],
+                        next_reward: None,
+                        current_chain_rewards: vec![],
                     },
                 },
                 false,
@@ -269,6 +293,8 @@ mod tests {
                 pending_review: None,
                 recent_chain_links: vec![],
                 recent_ended_chains: vec![],
+                next_reward: None,
+                current_chain_rewards: vec![],
             },
         };
 
@@ -307,6 +333,8 @@ mod tests {
             pending_review: None,
             recent_chain_links: vec![],
             recent_ended_chains: vec![],
+            next_reward: None,
+            current_chain_rewards: vec![],
         };
         snapshot.pending_review = Some(pomotui_protocol::PendingReviewSummary {
             session_id: 4,
