@@ -9,9 +9,9 @@ use pomotui_platform::{
     elapsed_during_recovery,
 };
 use pomotui_protocol::{
-    Command, DurableHealth, DurableHealthState, Handler, ProtocolError, RecentSessionSummary,
-    ReminderDelivery, Request, Response, SessionKind, Snapshot, TaskFocusSummary, TaskSummary,
-    TodaySummary,
+    ActionChainSummary, Command, DurableHealth, DurableHealthState, Handler, PendingReviewSummary,
+    ProtocolError, RecentSessionSummary, ReminderDelivery, Request, Response, SessionKind,
+    Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -127,6 +127,17 @@ pub struct Service {
     next_event_id: u64,
     now: u64,
     wall: i64,
+    current_chain_id: u64,
+    current_chain_length: u64,
+    pending_review: Option<PendingReviewState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PendingReviewState {
+    session_id: u64,
+    actual_seconds: u64,
+    task_id: Option<u64>,
+    task_title: Option<String>,
 }
 
 impl Service {
@@ -161,6 +172,9 @@ impl Service {
             next_event_id: 1,
             now: clock.monotonic_seconds().unwrap_or(0),
             wall: clock.wall_seconds().unwrap_or(0),
+            current_chain_id: 1,
+            current_chain_length: 0,
+            pending_review: None,
         }
     }
 
@@ -313,6 +327,19 @@ impl Service {
                     task_title: record.task_title.clone(),
                 })
                 .collect(),
+            action_chain: ActionChainSummary {
+                id: self.current_chain_id,
+                length: self.current_chain_length,
+            },
+            pending_review: self
+                .pending_review
+                .as_ref()
+                .map(|review| PendingReviewSummary {
+                    session_id: review.session_id,
+                    actual_seconds: review.actual_seconds,
+                    task_id: review.task_id,
+                    task_title: review.task_title.clone(),
+                }),
         }
     }
 
@@ -392,13 +419,29 @@ impl Service {
 
     fn record(&mut self, transition: &Transition, planned_seconds: u64) {
         for event in transition.events() {
-            self.history.push(SessionRecord::from_event(
+            let record = SessionRecord::from_event(
                 *event,
                 self.next_event_id,
                 self.wall,
                 planned_seconds,
                 &self.tasks,
-            ));
+            );
+            if matches!(
+                event,
+                pomotui_domain::DomainEvent::SessionEnded {
+                    kind: DomainKind::Focus,
+                    outcome: SessionOutcome::Completed,
+                    ..
+                }
+            ) {
+                self.pending_review = Some(PendingReviewState {
+                    session_id: record.id,
+                    actual_seconds: record.actual_seconds,
+                    task_id: record.task_id.map(TaskId::get),
+                    task_title: record.task_title.clone(),
+                });
+            }
+            self.history.push(record);
             self.next_event_id = self.next_event_id.saturating_add(1);
         }
     }
@@ -616,6 +659,11 @@ impl Handler for Service {
                 };
             }
             Command::Start { kind, task_id } => {
+                if kind == SessionKind::Focus && self.pending_review.is_some() {
+                    return Self::rejected(
+                        "Pending Review must be resolved before starting another Focus Session",
+                    );
+                }
                 let current_kind = match self.timer.current_session() {
                     CurrentSession::Pending(session) => map_kind(session.kind()),
                     _ => kind.clone(),
@@ -637,6 +685,11 @@ impl Handler for Service {
                 }
             }
             Command::StartTitle { title } => {
+                if self.pending_review.is_some() {
+                    return Self::rejected(
+                        "Pending Review must be resolved before starting another Focus Session",
+                    );
+                }
                 let task_id = match self.tasks.resolve_title(&title) {
                     Ok(id) => Ok(id),
                     Err(pomotui_domain::TaskError::TitleNotFound(_)) => self.tasks.create(title),
@@ -890,6 +943,16 @@ struct PersistedService {
     boot_id: String,
     observed_monotonic: u64,
     observed_wall: i64,
+    #[serde(default = "default_chain_id")]
+    current_chain_id: u64,
+    #[serde(default)]
+    current_chain_length: u64,
+    #[serde(default)]
+    pending_review: Option<PendingReviewState>,
+}
+
+const fn default_chain_id() -> u64 {
+    1
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1022,6 +1085,9 @@ impl PersistedService {
             boot_id: clock.boot_id().unwrap_or_else(|_| "unknown".into()),
             observed_monotonic: service.now,
             observed_wall: service.wall,
+            current_chain_id: service.current_chain_id,
+            current_chain_length: service.current_chain_length,
+            pending_review: service.pending_review.clone(),
         };
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
@@ -1153,6 +1219,9 @@ impl PersistedService {
             next_event_id: persisted.next_event_id.max(1),
             now: current_observation.monotonic_seconds,
             wall: current_observation.wall_seconds,
+            current_chain_id: persisted.current_chain_id,
+            current_chain_length: persisted.current_chain_length,
+            pending_review: persisted.pending_review,
         })
     }
 }
@@ -1296,6 +1365,59 @@ mod tests {
         assert_eq!(restarted.history.records().len(), 1);
         assert_eq!(restarted.timer.focus_cycle().completed_rounds(), 1);
         std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn completed_focus_requires_review_before_another_focus_but_allows_break() {
+        let mut service = Service::new();
+        service.reminders_enabled = false;
+        service
+            .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+            .expect("configure");
+        let start = service.now;
+
+        assert!(matches!(
+            service.handle(request(
+                Some("start-focus"),
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: None,
+                },
+            )),
+            Response::Snapshot { .. }
+        ));
+        service.apply_observation(start + 1, service.wall + 1);
+
+        let Response::Snapshot { snapshot } = service.handle(request(None, Command::Status)) else {
+            panic!("status");
+        };
+        assert_eq!(snapshot.action_chain.length, 0);
+        assert!(snapshot.pending_review.is_some());
+
+        assert!(matches!(
+            service.handle(request(
+                Some("start-break"),
+                Command::Start {
+                    kind: SessionKind::ShortBreak,
+                    task_id: None,
+                },
+            )),
+            Response::Snapshot { .. }
+        ));
+        service.apply_observation(start + 2, service.wall + 2);
+
+        assert!(matches!(
+            service.handle(request(
+                Some("blocked-focus"),
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: None,
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::Rejected { message }
+            } if message == "Pending Review must be resolved before starting another Focus Session"
+        ));
     }
 
     #[test]

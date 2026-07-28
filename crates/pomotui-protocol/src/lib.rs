@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
@@ -116,6 +116,22 @@ pub struct Snapshot {
     pub tasks: Vec<TaskSummary>,
     pub today: Box<TodaySummary>,
     pub recent_history: Vec<RecentSessionSummary>,
+    pub action_chain: ActionChainSummary,
+    pub pending_review: Option<PendingReviewSummary>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActionChainSummary {
+    pub id: u64,
+    pub length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingReviewSummary {
+    pub session_id: u64,
+    pub actual_seconds: u64,
+    pub task_id: Option<u64>,
+    pub task_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -175,6 +191,7 @@ pub struct TaskFocusSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     Snapshot { snapshot: Snapshot },
     Data { value: serde_json::Value },

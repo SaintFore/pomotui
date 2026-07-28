@@ -74,12 +74,18 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
             "percentage": percentage(snapshot.remaining_seconds, snapshot.planned_seconds),
         })).map_err(|error| error.to_string()),
         Response::Snapshot { snapshot } => Ok(format!(
-            "{:?} {} · {} · round {}/{}{}",
+            "{:?} {} · {} · round {}/{} · chain {}{}{}",
             snapshot.kind,
             clock(snapshot.remaining_seconds),
             snapshot.state,
             snapshot.completed_rounds,
             snapshot.rounds_per_cycle,
+            snapshot.action_chain.length,
+            if snapshot.pending_review.is_some() {
+                " · pending review"
+            } else {
+                ""
+            },
             reminder_delivery_label(&snapshot.reminder_delivery)
         )),
         Response::Data { value } => Ok(value.to_string()),
@@ -150,6 +156,8 @@ mod tests {
                         tasks: vec![],
                         today: Box::new(pomotui_protocol::TodaySummary::default()),
                         recent_history: vec![],
+                        action_chain: pomotui_protocol::ActionChainSummary::default(),
+                        pending_review: None,
                     },
                 },
                 false,
@@ -193,6 +201,8 @@ mod tests {
                 tasks: vec![],
                 today: Box::new(pomotui_protocol::TodaySummary::default()),
                 recent_history: vec![],
+                action_chain: pomotui_protocol::ActionChainSummary::default(),
+                pending_review: None,
             },
         };
 
@@ -204,6 +214,42 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&render(&response, true, false).expect("json")).expect("value");
         assert_eq!(json["snapshot"]["reminder_delivery"]["retrying"], 2);
+    }
+
+    #[test]
+    fn human_status_shows_chain_length_and_pending_review() {
+        let mut snapshot = Snapshot {
+            state: "pending".into(),
+            kind: SessionKind::ShortBreak,
+            remaining_seconds: 300,
+            planned_seconds: 300,
+            current_task: Some("Write tests".into()),
+            current_task_id: Some(1),
+            completed_rounds: 1,
+            rounds_per_cycle: 4,
+            next_kind: Some(SessionKind::Focus),
+            durable_health: pomotui_protocol::DurableHealth {
+                state: pomotui_protocol::DurableHealthState::Healthy,
+                last_successful_commit: None,
+                error: None,
+            },
+            reminder_delivery: pomotui_protocol::ReminderDelivery::default(),
+            tasks: vec![],
+            today: Box::new(pomotui_protocol::TodaySummary::default()),
+            recent_history: vec![],
+            action_chain: pomotui_protocol::ActionChainSummary { id: 7, length: 12 },
+            pending_review: None,
+        };
+        snapshot.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 4,
+            actual_seconds: 1_500,
+            task_id: Some(1),
+            task_title: Some("Write tests".into()),
+        });
+
+        let rendered = render(&Response::Snapshot { snapshot }, false, false).expect("status");
+        assert!(rendered.contains("chain 12"));
+        assert!(rendered.contains("pending review"));
     }
 
     #[test]

@@ -1877,6 +1877,10 @@ fn timer_panel(
                 Style::default().fg(colors.muted),
             )),
             Line::from(next_session_line(snapshot, language)),
+            Line::from(Span::styled(
+                chain_status(snapshot, language),
+                Style::default().fg(colors.gold),
+            )),
         ]
     } else {
         let mut lines = vec![Line::from("")];
@@ -1909,6 +1913,10 @@ fn timer_panel(
                 ),
                 Style::default().fg(colors.muted),
             )),
+            Line::from(Span::styled(
+                chain_status(snapshot, language),
+                Style::default().fg(colors.gold),
+            )),
         ]);
         lines
     };
@@ -1919,6 +1927,19 @@ fn timer_panel(
         area,
     );
     timer_progress(frame, area, snapshot, state_colors, colors);
+}
+
+fn chain_status(snapshot: &Snapshot, language: Language) -> String {
+    let pending = if snapshot.pending_review.is_some() {
+        text(language, " · Pending Review", " · 待复盘")
+    } else {
+        ""
+    };
+    format!(
+        "{} {}{pending}",
+        text(language, "Chain", "行动链"),
+        snapshot.action_chain.length
+    )
 }
 
 fn disconnected_timer_panel(frame: &mut Frame<'_>, area: Rect, colors: Colors, language: Language) {
@@ -2665,6 +2686,8 @@ mod tests {
                     task_title: None,
                 },
             ],
+            action_chain: pomotui_protocol::ActionChainSummary::default(),
+            pending_review: None,
         }
     }
 

@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReminderEffectKind {
@@ -95,6 +95,7 @@ impl SqliteRepository {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn from_connection(mut connection: Connection) -> Result<Self, RepositoryError> {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let found = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -160,7 +161,23 @@ impl SqliteRepository {
                     last_error TEXT,
                     UNIQUE(session_key, effect_kind)
                 );
-                PRAGMA user_version = 2;
+                CREATE TABLE action_chains (
+                    id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL CHECK (state IN ('current', 'ended')),
+                    link_count INTEGER NOT NULL DEFAULT 0 CHECK (link_count >= 0)
+                );
+                CREATE UNIQUE INDEX one_current_action_chain
+                    ON action_chains(state) WHERE state = 'current';
+                INSERT INTO action_chains(id, state, link_count)
+                    VALUES (1, 'current', 0);
+                CREATE TABLE pending_reviews (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    session_id INTEGER NOT NULL UNIQUE,
+                    actual_seconds INTEGER NOT NULL,
+                    task_id INTEGER,
+                    task_title TEXT
+                );
+                PRAGMA user_version = 3;
                 ",
             )?;
             transaction.commit()?;
@@ -182,7 +199,47 @@ impl SqliteRepository {
                     last_error TEXT,
                     UNIQUE(session_key, effect_kind)
                 );
-                PRAGMA user_version = 2;
+                CREATE TABLE action_chains (
+                    id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL CHECK (state IN ('current', 'ended')),
+                    link_count INTEGER NOT NULL DEFAULT 0 CHECK (link_count >= 0)
+                );
+                CREATE UNIQUE INDEX one_current_action_chain
+                    ON action_chains(state) WHERE state = 'current';
+                INSERT INTO action_chains(id, state, link_count)
+                    VALUES (1, 'current', 0);
+                CREATE TABLE pending_reviews (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    session_id INTEGER NOT NULL UNIQUE,
+                    actual_seconds INTEGER NOT NULL,
+                    task_id INTEGER,
+                    task_title TEXT
+                );
+                PRAGMA user_version = 3;
+                ",
+            )?;
+            transaction.commit()?;
+        } else if found == 2 {
+            let transaction = connection.transaction()?;
+            transaction.execute_batch(
+                "
+                CREATE TABLE action_chains (
+                    id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL CHECK (state IN ('current', 'ended')),
+                    link_count INTEGER NOT NULL DEFAULT 0 CHECK (link_count >= 0)
+                );
+                CREATE UNIQUE INDEX one_current_action_chain
+                    ON action_chains(state) WHERE state = 'current';
+                INSERT INTO action_chains(id, state, link_count)
+                    VALUES (1, 'current', 0);
+                CREATE TABLE pending_reviews (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    session_id INTEGER NOT NULL UNIQUE,
+                    actual_seconds INTEGER NOT NULL,
+                    task_id INTEGER,
+                    task_title TEXT
+                );
+                PRAGMA user_version = 3;
                 ",
             )?;
             transaction.commit()?;
@@ -469,7 +526,7 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
-    fn migration_creates_complete_v2_schema() {
+    fn migration_creates_complete_v3_schema() {
         let repository = SqliteRepository::open_in_memory().expect("open");
         let names: Vec<String> = repository
             .connection
@@ -485,9 +542,11 @@ mod tests {
         assert_eq!(
             names,
             [
+                "action_chains",
                 "current_session",
                 "focus_cycle",
                 "mutation_keys",
+                "pending_reviews",
                 "recovery_observations",
                 "reminder_outbox",
                 "reminders",
@@ -561,16 +620,16 @@ mod tests {
             error,
             RepositoryError::IncompatibleSchema {
                 found: 99,
-                supported: 2
+                supported: 3
             }
         ));
     }
 
     #[test]
-    fn schema_version_is_two() {
+    fn schema_version_is_three() {
         let repository = SqliteRepository::open_in_memory().expect("open");
-        repository.set_user_version(2).expect("set");
-        assert_eq!(SqliteRepository::schema_version(), 2);
+        repository.set_user_version(3).expect("set");
+        assert_eq!(SqliteRepository::schema_version(), 3);
     }
 
     #[test]
@@ -596,7 +655,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("schema version");
         assert_eq!(value, "keep");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
