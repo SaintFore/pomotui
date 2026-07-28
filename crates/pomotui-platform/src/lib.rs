@@ -10,7 +10,9 @@ pub use recovery::{
     Clock, DesktopReminder, LinuxClock, RecoveryElapsed, RecoveryObservation, RecoverySource,
     ReminderPort, dispatch_reminder, elapsed_during_recovery, observe,
 };
-pub use repository::{RepositoryError, SqliteRepository};
+pub use repository::{
+    PendingReminderEffect, ReminderEffectKind, RepositoryError, SqliteRepository,
+};
 
 /// Returns the domain model version targeted by these adapters.
 #[must_use]

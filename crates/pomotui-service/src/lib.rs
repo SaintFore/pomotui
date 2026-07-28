@@ -4,8 +4,8 @@ use pomotui_domain::{
     Transition,
 };
 use pomotui_platform::{
-    Clock, DesktopReminder, LinuxClock, RecoveryObservation, ReminderPort, SqliteRepository,
-    elapsed_during_recovery,
+    Clock, DesktopReminder, LinuxClock, PendingReminderEffect, RecoveryObservation,
+    ReminderEffectKind, ReminderPort, SqliteRepository, elapsed_during_recovery,
 };
 use pomotui_protocol::{
     Command, DurableHealth, DurableHealthState, Handler, ProtocolError, RecentSessionSummary,
@@ -17,7 +17,15 @@ use std::path::Path;
 trait ServiceRepository: Send {
     fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String>;
     fn save_state(&mut self, payload: &str) -> Result<(), String>;
-    fn save_completion(&mut self, payload: &str, reminder_key: &str) -> Result<bool, String>;
+    fn save_completion(
+        &mut self,
+        payload: &str,
+        reminder_key: &str,
+        effects: &[ReminderEffectKind],
+        created_at: i64,
+    ) -> Result<bool, String>;
+    fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, String>;
+    fn acknowledge_reminder_effect(&mut self, id: i64, acknowledged_at: i64) -> Result<(), String>;
 }
 
 impl ServiceRepository for SqliteRepository {
@@ -30,9 +38,46 @@ impl ServiceRepository for SqliteRepository {
         self.save_state(payload).map_err(|error| error.to_string())
     }
 
-    fn save_completion(&mut self, payload: &str, reminder_key: &str) -> Result<bool, String> {
-        self.save_completion(payload, reminder_key)
+    fn save_completion(
+        &mut self,
+        payload: &str,
+        reminder_key: &str,
+        effects: &[ReminderEffectKind],
+        created_at: i64,
+    ) -> Result<bool, String> {
+        self.save_completion(payload, reminder_key, effects, created_at)
             .map_err(|error| error.to_string())
+    }
+
+    fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, String> {
+        self.pending_reminder_effects()
+            .map_err(|error| error.to_string())
+    }
+
+    fn acknowledge_reminder_effect(&mut self, id: i64, acknowledged_at: i64) -> Result<(), String> {
+        self.acknowledge_reminder_effect(id, acknowledged_at)
+            .map_err(|error| error.to_string())
+    }
+}
+
+trait ReminderEffects: Send {
+    fn configure(&mut self, sound: Option<std::path::PathBuf>, volume_percent: u8);
+    fn notify(&mut self) -> Result<(), String>;
+    fn play_sound(&mut self) -> Result<(), String>;
+}
+
+impl ReminderEffects for DesktopReminder {
+    fn configure(&mut self, sound: Option<std::path::PathBuf>, volume_percent: u8) {
+        self.sound = sound;
+        self.volume_percent = volume_percent;
+    }
+
+    fn notify(&mut self) -> Result<(), String> {
+        ReminderPort::notify(self).map_err(|error| error.to_string())
+    }
+
+    fn play_sound(&mut self) -> Result<(), String> {
+        ReminderPort::play_sound(self).map_err(|error| error.to_string())
     }
 }
 
@@ -45,8 +90,9 @@ pub struct Service {
     durable_health: DurableHealthState,
     last_successful_commit: Option<i64>,
     durable_error: Option<String>,
-    reminder: DesktopReminder,
+    reminder: Box<dyn ReminderEffects>,
     reminders_enabled: bool,
+    sound_enabled: bool,
     next_event_id: u64,
     now: u64,
     wall: i64,
@@ -75,11 +121,12 @@ impl Service {
             durable_health: DurableHealthState::Healthy,
             last_successful_commit: None,
             durable_error: None,
-            reminder: DesktopReminder {
+            reminder: Box::new(DesktopReminder {
                 sound: None,
                 volume_percent: 100,
-            },
+            }),
             reminders_enabled: true,
+            sound_enabled: false,
             next_event_id: 1,
             now: clock.monotonic_seconds().unwrap_or(0),
             wall: clock.wall_seconds().unwrap_or(0),
@@ -147,12 +194,13 @@ impl Service {
         volume_percent: u8,
     ) {
         self.reminders_enabled = enabled;
-        self.reminder.sound = sound;
-        self.reminder.volume_percent = volume_percent.min(100);
+        self.sound_enabled = sound.is_some();
+        self.reminder.configure(sound, volume_percent.min(100));
     }
 
     pub fn tick(&mut self) {
         self.observe_time();
+        self.dispatch_pending_reminders();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -283,13 +331,16 @@ impl Service {
             let reminder_key = format!("session-event-{}", self.next_event_id);
             self.record(&transition, planned);
             if completed {
-                if self.persist_completion(&reminder_key).unwrap_or(false) && self.reminders_enabled
+                let effects = self.enabled_reminder_effects();
+                if self
+                    .persist_completion(&reminder_key, &effects)
+                    .unwrap_or(false)
+                    && self.reminders_enabled
                 {
-                    if let Err(error) = self.reminder.notify() {
-                        eprintln!("Session Reminder notification failed: {error}");
-                    }
-                    if let Err(error) = self.reminder.play_sound() {
-                        eprintln!("Session Reminder sound failed: {error}");
+                    if self.repository.is_some() {
+                        self.dispatch_pending_reminders();
+                    } else {
+                        self.dispatch_immediate_reminder(&effects);
                     }
                 }
             } else if changed {
@@ -347,12 +398,16 @@ impl Service {
         }
     }
 
-    fn persist_completion(&mut self, reminder_key: &str) -> Result<bool, String> {
+    fn persist_completion(
+        &mut self,
+        reminder_key: &str,
+        effects: &[ReminderEffectKind],
+    ) -> Result<bool, String> {
         let payload = PersistedService::encode(self)?;
         let Some(repository) = &mut self.repository else {
             return Ok(true);
         };
-        match repository.save_completion(&payload, reminder_key) {
+        match repository.save_completion(&payload, reminder_key, effects, self.wall) {
             Ok(claimed) => {
                 self.last_successful_commit = Some(self.wall);
                 Ok(claimed)
@@ -363,6 +418,75 @@ impl Service {
                 Err(error)
             }
         }
+    }
+
+    fn enabled_reminder_effects(&self) -> Vec<ReminderEffectKind> {
+        if !self.reminders_enabled {
+            return Vec::new();
+        }
+        let mut effects = vec![ReminderEffectKind::Notification];
+        if self.sound_enabled {
+            effects.push(ReminderEffectKind::Sound);
+        }
+        effects
+    }
+
+    fn dispatch_immediate_reminder(&mut self, effects: &[ReminderEffectKind]) {
+        for effect in effects {
+            let result = match effect {
+                ReminderEffectKind::Notification => self.reminder.notify(),
+                ReminderEffectKind::Sound => self.reminder.play_sound(),
+            };
+            if let Err(error) = result {
+                eprintln!("Session Reminder {effect:?} failed: {error}");
+            }
+        }
+    }
+
+    fn dispatch_pending_reminders(&mut self) {
+        if self.durable_health == DurableHealthState::Degraded {
+            return;
+        }
+        let effects = match self
+            .repository
+            .as_ref()
+            .map(|repository| repository.pending_reminder_effects())
+        {
+            None => return,
+            Some(Ok(effects)) => effects,
+            Some(Err(error)) => {
+                self.mark_durable_failure(error);
+                return;
+            }
+        };
+        for effect in effects {
+            let delivered = match effect.kind {
+                ReminderEffectKind::Notification => self.reminder.notify(),
+                ReminderEffectKind::Sound => self.reminder.play_sound(),
+            };
+            if let Err(error) = delivered {
+                eprintln!(
+                    "Session Reminder {:?} delivery failed: {error}",
+                    effect.kind
+                );
+                continue;
+            }
+            let acknowledged = self
+                .repository
+                .as_mut()
+                .expect("repository exists while dispatching durable effects")
+                .acknowledge_reminder_effect(effect.id, self.wall);
+            if let Err(error) = acknowledged {
+                self.mark_durable_failure(error);
+                return;
+            }
+            self.last_successful_commit = Some(self.wall);
+        }
+    }
+
+    fn mark_durable_failure(&mut self, error: String) {
+        self.durable_health = DurableHealthState::Degraded;
+        self.durable_error = Some(error);
     }
 
     fn task_rejected(error: TaskError) -> Response {
@@ -958,11 +1082,12 @@ impl PersistedService {
             durable_health: DurableHealthState::Healthy,
             last_successful_commit: None,
             durable_error: None,
-            reminder: DesktopReminder {
+            reminder: Box::new(DesktopReminder {
                 sound: None,
                 volume_percent: 100,
-            },
+            }),
             reminders_enabled: true,
+            sound_enabled: false,
             next_event_id: persisted.next_event_id.max(1),
             now: current_observation.monotonic_seconds,
             wall: current_observation.wall_seconds,
@@ -1275,11 +1400,38 @@ mod tests {
             })
         }
 
-        fn save_completion(&mut self, payload: &str, reminder_key: &str) -> Result<bool, String> {
+        fn save_completion(
+            &mut self,
+            payload: &str,
+            reminder_key: &str,
+            effects: &[ReminderEffectKind],
+            created_at: i64,
+        ) -> Result<bool, String> {
             self.write()?;
             self.inner.as_mut().map_or(Ok(true), |inner| {
                 inner
-                    .save_completion(payload, reminder_key)
+                    .save_completion(payload, reminder_key, effects, created_at)
+                    .map_err(|error| error.to_string())
+            })
+        }
+
+        fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, String> {
+            self.inner.as_ref().map_or(Ok(Vec::new()), |inner| {
+                inner
+                    .pending_reminder_effects()
+                    .map_err(|error| error.to_string())
+            })
+        }
+
+        fn acknowledge_reminder_effect(
+            &mut self,
+            id: i64,
+            acknowledged_at: i64,
+        ) -> Result<(), String> {
+            self.write()?;
+            self.inner.as_mut().map_or(Ok(()), |inner| {
+                inner
+                    .acknowledge_reminder_effect(id, acknowledged_at)
                     .map_err(|error| error.to_string())
             })
         }
@@ -1341,6 +1493,101 @@ mod tests {
         service.apply_observation(start + 100, service.wall + 100);
         assert_eq!(service.history.records().len(), 1);
         assert_eq!(service.timer.focus_cycle().completed_rounds(), 1);
+    }
+
+    #[test]
+    fn reminder_effects_are_independent_and_recover_after_restart() {
+        let path = database_path().with_extension("outbox.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        let first_attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let mut service = Service::open(&path).expect("service");
+            service.reminder = Box::new(RecordingReminder {
+                attempts: std::sync::Arc::clone(&first_attempts),
+                fail_notification: true,
+            });
+            service.configure_reminder(
+                true,
+                Some(std::path::PathBuf::from("configured-sound")),
+                100,
+            );
+            service
+                .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+                .expect("configure");
+            let start = service.now;
+            let transition = service.timer.start(start, None);
+            service
+                .apply_transition(transition, 1)
+                .expect("start transition");
+            service
+                .persist(Some("outbox-start"))
+                .expect("persist start");
+
+            service.apply_observation(start + 1, service.wall + 1);
+            assert_eq!(
+                *first_attempts.lock().expect("attempts"),
+                vec![ReminderEffectKind::Notification, ReminderEffectKind::Sound]
+            );
+            let pending = service
+                .repository
+                .as_ref()
+                .expect("repository")
+                .pending_reminder_effects()
+                .expect("pending");
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].kind, ReminderEffectKind::Notification);
+        }
+
+        let recovered_attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut restarted = Service::open(&path).expect("restart");
+        restarted.reminder = Box::new(RecordingReminder {
+            attempts: std::sync::Arc::clone(&recovered_attempts),
+            fail_notification: false,
+        });
+        restarted.tick();
+        assert_eq!(
+            *recovered_attempts.lock().expect("attempts"),
+            vec![ReminderEffectKind::Notification]
+        );
+        assert!(
+            restarted
+                .repository
+                .as_ref()
+                .expect("repository")
+                .pending_reminder_effects()
+                .expect("pending")
+                .is_empty()
+        );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    struct RecordingReminder {
+        attempts: std::sync::Arc<std::sync::Mutex<Vec<ReminderEffectKind>>>,
+        fail_notification: bool,
+    }
+
+    impl ReminderEffects for RecordingReminder {
+        fn configure(&mut self, _sound: Option<std::path::PathBuf>, _volume_percent: u8) {}
+
+        fn notify(&mut self) -> Result<(), String> {
+            self.attempts
+                .lock()
+                .expect("attempts")
+                .push(ReminderEffectKind::Notification);
+            if self.fail_notification {
+                Err("injected notification failure".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn play_sound(&mut self) -> Result<(), String> {
+            self.attempts
+                .lock()
+                .expect("attempts")
+                .push(ReminderEffectKind::Sound);
+            Ok(())
+        }
     }
 
     impl FailingRepository {
