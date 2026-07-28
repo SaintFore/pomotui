@@ -2331,24 +2331,37 @@ fn confirm_review_failure_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, 
         .snapshot
         .as_ref()
         .map_or(0, |snapshot| snapshot.action_chain.length);
+    let mut lines = vec![Line::from(format!(
+        "{} {length}",
+        text(
+            app.language,
+            "This will end the Action Chain at length",
+            "这将结束行动链，当前长度"
+        )
+    ))];
+    if let Some(snapshot) = &app.snapshot {
+        for reward in snapshot
+            .current_chain_rewards
+            .iter()
+            .filter(|reward| reward.state == "unlocked")
+        {
+            lines.push(Line::from(format!(
+                "{}: {}",
+                text(app.language, "Will become unavailable", "将变为不可领取"),
+                reward.name
+            )));
+        }
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(text(
+            app.language,
+            "Enter/Y confirm · N cancel",
+            "Enter/Y 确认 · N 取消",
+        )),
+    ]);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(format!(
-                "{} {length}",
-                text(
-                    app.language,
-                    "This will end the Action Chain at length",
-                    "这将结束行动链，当前长度"
-                )
-            )),
-            Line::from(""),
-            Line::from(text(
-                app.language,
-                "Enter/Y confirm · N cancel",
-                "Enter/Y 确认 · N 取消",
-            )),
-        ])
-        .block(panel(
+        Paragraph::new(lines).block(panel(
             text(app.language, "CONFIRM FAILED REVIEW", "确认失败复盘"),
             colors,
         )),

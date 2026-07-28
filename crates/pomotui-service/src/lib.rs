@@ -738,6 +738,11 @@ impl Service {
             links: std::mem::take(&mut self.chain_links),
             chain_break,
         });
+        for unlock in &mut self.reward_unlocks {
+            if unlock.chain_id == self.current_chain_id && unlock.state == "unlocked" {
+                unlock.state = "unavailable".into();
+            }
+        }
         self.current_chain_id = self.current_chain_id.saturating_add(1);
         self.current_chain_length = 0;
         Ok(())
@@ -1299,6 +1304,7 @@ impl Handler for Service {
                         budget,
                     });
                     self.next_reward_milestone_id = self.next_reward_milestone_id.saturating_add(1);
+                    self.unlock_eligible_rewards();
                     Ok(())
                 }
             }
@@ -1319,6 +1325,7 @@ impl Handler for Service {
                     name.clone_into(&mut milestone.name);
                     milestone.threshold = threshold;
                     milestone.budget = budget;
+                    self.unlock_eligible_rewards();
                     Ok(())
                 } else {
                     Err(format!("Reward Milestone {id} does not exist"))
@@ -2266,6 +2273,80 @@ mod tests {
         ));
         assert_eq!(service.snapshot().current_chain_rewards[0].state, "claimed");
         assert_eq!(service.reward_unlocks.len(), 1);
+    }
+
+    #[test]
+    fn rewards_unlock_retroactively_and_settle_when_chain_fails() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Build chain".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start-success"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-success"), Command::StopReview));
+        service.handle(request(
+            Some("success"),
+            Command::ReviewSuccess { reflection: None },
+        ));
+
+        service.handle(request(
+            Some("claimed-rule"),
+            Command::RewardCreate {
+                name: "Claimed reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
+        let claimed_id = service.snapshot().current_chain_rewards[0].id;
+        service.handle(request(
+            Some("claim"),
+            Command::RewardClaim {
+                unlock_id: claimed_id,
+            },
+        ));
+        service.handle(request(
+            Some("unclaimed-rule"),
+            Command::RewardCreate {
+                name: "At-risk reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
+        assert_eq!(service.snapshot().current_chain_rewards.len(), 2);
+
+        service.handle(request(
+            Some("start-failure"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-failure"), Command::StopReview));
+        service.handle(request(
+            Some("failure"),
+            Command::ReviewFailure {
+                reflection: "Stopped deliberately".into(),
+                task_id: None,
+                use_void: false,
+                chain_entry_title: None,
+            },
+        ));
+
+        let states = service
+            .reward_unlocks
+            .iter()
+            .map(|unlock| unlock.state.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(states, ["claimed", "unavailable"]);
+        assert!(service.snapshot().current_chain_rewards.is_empty());
     }
 
     #[test]
