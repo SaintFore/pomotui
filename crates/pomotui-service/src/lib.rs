@@ -8,18 +8,43 @@ use pomotui_platform::{
     elapsed_during_recovery,
 };
 use pomotui_protocol::{
-    Command, Handler, ProtocolError, RecentSessionSummary, Request, Response, SessionKind,
-    Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
+    Command, DurableHealth, DurableHealthState, Handler, ProtocolError, RecentSessionSummary,
+    Request, Response, SessionKind, Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+trait ServiceRepository: Send {
+    fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String>;
+    fn save_state(&mut self, payload: &str) -> Result<(), String>;
+    fn save_completion(&mut self, payload: &str, reminder_key: &str) -> Result<bool, String>;
+}
+
+impl ServiceRepository for SqliteRepository {
+    fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String> {
+        self.save_state_once(key, payload)
+            .map_err(|error| error.to_string())
+    }
+
+    fn save_state(&mut self, payload: &str) -> Result<(), String> {
+        self.save_state(payload).map_err(|error| error.to_string())
+    }
+
+    fn save_completion(&mut self, payload: &str, reminder_key: &str) -> Result<bool, String> {
+        self.save_completion(payload, reminder_key)
+            .map_err(|error| error.to_string())
+    }
+}
 
 pub struct Service {
     timer: Timer,
     tasks: TaskStore,
     history: History,
     applied_keys: std::collections::HashSet<String>,
-    repository: Option<SqliteRepository>,
+    repository: Option<Box<dyn ServiceRepository>>,
+    durable_health: DurableHealthState,
+    last_successful_commit: Option<i64>,
+    durable_error: Option<String>,
     reminder: DesktopReminder,
     reminders_enabled: bool,
     next_event_id: u64,
@@ -47,6 +72,9 @@ impl Service {
             history: History::default(),
             applied_keys: std::collections::HashSet::new(),
             repository: None,
+            durable_health: DurableHealthState::Healthy,
+            last_successful_commit: None,
+            durable_error: None,
             reminder: DesktopReminder {
                 sound: None,
                 volume_percent: 100,
@@ -80,7 +108,7 @@ impl Service {
             Self::new()
         };
         service.applied_keys = keys;
-        service.repository = Some(repository);
+        service.repository = Some(Box::new(repository));
         if !had_payload {
             service.persist(None)?;
         }
@@ -159,6 +187,11 @@ impl Service {
             completed_rounds: self.timer.focus_cycle().completed_rounds(),
             rounds_per_cycle: self.timer.focus_cycle().rounds_per_cycle(),
             next_kind,
+            durable_health: DurableHealth {
+                state: self.durable_health.clone(),
+                last_successful_commit: self.last_successful_commit,
+                error: self.durable_error.clone(),
+            },
             tasks: self
                 .tasks
                 .all()
@@ -223,6 +256,9 @@ impl Service {
     }
 
     fn observe_time(&mut self) {
+        if self.durable_health == DurableHealthState::Degraded {
+            return;
+        }
         let clock = LinuxClock;
         let now = clock.monotonic_seconds().unwrap_or(self.now);
         let wall = clock.wall_seconds().unwrap_or(self.wall);
@@ -290,17 +326,25 @@ impl Service {
         let Some(repository) = &mut self.repository else {
             return Ok(());
         };
-        if let Some(key) = key {
-            repository
-                .save_state_once(key, &payload)
-                .map_err(|error| error.to_string())?;
-            self.applied_keys.insert(key.to_owned());
+        let result = if let Some(key) = key {
+            repository.save_state_once(key, &payload).map(|_| ())
         } else {
-            repository
-                .save_state(&payload)
-                .map_err(|error| error.to_string())?;
+            repository.save_state(&payload)
+        };
+        match result {
+            Ok(()) => {
+                if let Some(key) = key {
+                    self.applied_keys.insert(key.to_owned());
+                }
+                self.last_successful_commit = Some(self.wall);
+                Ok(())
+            }
+            Err(error) => {
+                self.durable_health = DurableHealthState::Degraded;
+                self.durable_error = Some(error.clone());
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     fn persist_completion(&mut self, reminder_key: &str) -> Result<bool, String> {
@@ -308,9 +352,17 @@ impl Service {
         let Some(repository) = &mut self.repository else {
             return Ok(true);
         };
-        repository
-            .save_completion(&payload, reminder_key)
-            .map_err(|error| error.to_string())
+        match repository.save_completion(&payload, reminder_key) {
+            Ok(claimed) => {
+                self.last_successful_commit = Some(self.wall);
+                Ok(claimed)
+            }
+            Err(error) => {
+                self.durable_health = DurableHealthState::Degraded;
+                self.durable_error = Some(error.clone());
+                Err(error)
+            }
+        }
     }
 
     fn task_rejected(error: TaskError) -> Response {
@@ -331,6 +383,16 @@ impl Service {
             Self::rejected(error)
         }
     }
+
+    fn durable_rejected(&self, error: String) -> Response {
+        if self.durable_health == DurableHealthState::Degraded {
+            Response::Error {
+                error: ProtocolError::DurableWriteUnavailable { message: error },
+            }
+        } else {
+            Self::rejected(error)
+        }
+    }
 }
 
 impl Default for Service {
@@ -342,6 +404,16 @@ impl Default for Service {
 impl Handler for Service {
     #[allow(clippy::too_many_lines)]
     fn handle(&mut self, request: Request) -> Response {
+        if self.durable_health == DurableHealthState::Degraded && request.command.mutates() {
+            return Response::Error {
+                error: ProtocolError::DurableWriteUnavailable {
+                    message: self
+                        .durable_error
+                        .clone()
+                        .unwrap_or_else(|| "durable state is unavailable".into()),
+                },
+            };
+        }
         self.observe_time();
         let mutation_key = request.idempotency_key.clone();
         if let Some(key) = &mutation_key
@@ -419,7 +491,7 @@ impl Handler for Service {
                         Ok(()) => Response::Data {
                             value: serde_json::json!({ "id": id.get() }),
                         },
-                        Err(error) => Self::rejected(error),
+                        Err(error) => self.durable_rejected(error),
                     },
                     Err(error) => Self::task_rejected(error),
                 };
@@ -447,7 +519,7 @@ impl Handler for Service {
                         Ok(()) => Response::Snapshot {
                             snapshot: self.snapshot(),
                         },
-                        Err(error) => Self::rejected(error),
+                        Err(error) => self.durable_rejected(error),
                     },
                     Err(error) => Self::task_rejected(error),
                 };
@@ -544,7 +616,7 @@ impl Handler for Service {
                 Ok(()) => Response::Snapshot {
                     snapshot: self.snapshot(),
                 },
-                Err(error) => Self::rejected(error),
+                Err(error) => self.durable_rejected(error),
             },
             Err(error) => Self::rejected(error),
         }
@@ -883,6 +955,9 @@ impl PersistedService {
             history,
             applied_keys: std::collections::HashSet::new(),
             repository: None,
+            durable_health: DurableHealthState::Healthy,
+            last_successful_commit: None,
+            durable_error: None,
             reminder: DesktopReminder {
                 sound: None,
                 volume_percent: 100,
@@ -1128,6 +1203,155 @@ mod tests {
             service.tasks.get(TaskId::new(1)).expect("task").title(),
             "Safe"
         );
+    }
+
+    #[test]
+    fn durable_write_failure_is_visible_and_blocks_later_mutations() {
+        let mut service = Service::new();
+        service.repository = Some(Box::new(FailingRepository {
+            successful_writes_remaining: 1,
+            inner: None,
+        }));
+        service.persist(None).expect("initial durable commit");
+
+        assert!(matches!(
+            service.handle(request(
+                Some("first-write-failure"),
+                Command::TaskCreate {
+                    title: "Volatile".into(),
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::DurableWriteUnavailable { .. }
+            }
+        ));
+
+        let Response::Snapshot { snapshot } = service.handle(request(None, Command::Status)) else {
+            panic!("status remains available");
+        };
+        assert_eq!(
+            snapshot.durable_health.state,
+            pomotui_protocol::DurableHealthState::Degraded
+        );
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert!(snapshot.durable_health.last_successful_commit.is_some());
+
+        assert!(matches!(
+            service.handle(request(
+                Some("blocked-mutation"),
+                Command::TaskCreate {
+                    title: "Must not appear".into(),
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::DurableWriteUnavailable { .. }
+            }
+        ));
+        let Response::Data { value } = service.handle(request(None, Command::TaskList)) else {
+            panic!("Task list remains available");
+        };
+        assert_eq!(value.as_array().expect("tasks").len(), 1);
+    }
+
+    struct FailingRepository {
+        successful_writes_remaining: usize,
+        inner: Option<SqliteRepository>,
+    }
+
+    impl ServiceRepository for FailingRepository {
+        fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String> {
+            self.write()?;
+            self.inner.as_mut().map_or(Ok(true), |inner| {
+                inner
+                    .save_state_once(key, payload)
+                    .map_err(|error| error.to_string())
+            })
+        }
+
+        fn save_state(&mut self, payload: &str) -> Result<(), String> {
+            self.write()?;
+            self.inner.as_mut().map_or(Ok(()), |inner| {
+                inner.save_state(payload).map_err(|error| error.to_string())
+            })
+        }
+
+        fn save_completion(&mut self, payload: &str, reminder_key: &str) -> Result<bool, String> {
+            self.write()?;
+            self.inner.as_mut().map_or(Ok(true), |inner| {
+                inner
+                    .save_completion(payload, reminder_key)
+                    .map_err(|error| error.to_string())
+            })
+        }
+    }
+
+    #[test]
+    fn restart_recovers_last_commit_after_a_degraded_mutation() {
+        let path = database_path().with_extension("degraded.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        let mut service = Service::open(&path).expect("service");
+        service.repository = Some(Box::new(FailingRepository {
+            successful_writes_remaining: 0,
+            inner: Some(SqliteRepository::open(&path).expect("failure-injected repository")),
+        }));
+
+        assert!(matches!(
+            service.handle(request(
+                Some("volatile-task"),
+                Command::TaskCreate {
+                    title: "Not durable".into(),
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::DurableWriteUnavailable { .. }
+            }
+        ));
+        drop(service);
+
+        let restarted = Service::open(&path).expect("restart from last commit");
+        assert!(restarted.snapshot().tasks.is_empty());
+        assert_eq!(
+            restarted.snapshot().durable_health.state,
+            DurableHealthState::Healthy
+        );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn deadline_write_failure_degrades_and_freezes_progression() {
+        let mut service = Service::new();
+        service.reminders_enabled = false;
+        service
+            .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+            .expect("configure");
+        let start = service.now;
+        let transition = service.timer.start(start, None);
+        service
+            .apply_transition(transition, 1)
+            .expect("start transition");
+        service.repository = Some(Box::new(FailingRepository {
+            successful_writes_remaining: 0,
+            inner: None,
+        }));
+
+        service.apply_observation(start + 1, service.wall + 1);
+        assert_eq!(service.durable_health, DurableHealthState::Degraded);
+        assert_eq!(service.history.records().len(), 1);
+
+        service.apply_observation(start + 100, service.wall + 100);
+        assert_eq!(service.history.records().len(), 1);
+        assert_eq!(service.timer.focus_cycle().completed_rounds(), 1);
+    }
+
+    impl FailingRepository {
+        fn write(&mut self) -> Result<(), String> {
+            if self.successful_writes_remaining == 0 {
+                Err("injected durable write failure".into())
+            } else {
+                self.successful_writes_remaining -= 1;
+                Ok(())
+            }
+        }
     }
 
     #[test]

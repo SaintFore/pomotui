@@ -111,9 +111,24 @@ pub struct Snapshot {
     pub completed_rounds: u8,
     pub rounds_per_cycle: u8,
     pub next_kind: Option<SessionKind>,
+    pub durable_health: DurableHealth,
     pub tasks: Vec<TaskSummary>,
     pub today: Box<TodaySummary>,
     pub recent_history: Vec<RecentSessionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DurableHealth {
+    pub state: DurableHealthState,
+    pub last_successful_commit: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableHealthState {
+    Healthy,
+    Degraded,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -167,6 +182,7 @@ pub enum ProtocolError {
     RequestTimeout,
     ServerBusy,
     InvalidTaskTitle { rule: TaskTitleRule },
+    DurableWriteUnavailable { message: String },
     Malformed { message: String },
     Rejected { message: String },
     Disconnected { message: String },

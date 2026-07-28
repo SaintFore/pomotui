@@ -7,19 +7,29 @@ and the last durable commit.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] A failed durable write places the Timer Service in an explicit degraded
+- [x] A failed durable write places the Timer Service in an explicit degraded
       state with a safe diagnostic and last successful commit observation.
-- [ ] Subsequent state-changing commands are rejected before changing domain
+- [x] Subsequent state-changing commands are rejected before changing domain
       state while read-only requests remain available.
-- [ ] The first failed transition is never presented as unqualified durable
+- [x] The first failed transition is never presented as unqualified durable
       success.
-- [ ] Timer Frontends can distinguish durable health through stable protocol
+- [x] Timer Frontends can distinguish durable health through stable protocol
       data and errors.
-- [ ] Recovery is bounded and never silently replays rejected commands.
-- [ ] One service-level persistence seam supports both production SQLite and
+- [x] Recovery is bounded and never silently replays rejected commands.
+- [x] One service-level persistence seam supports both production SQLite and
       deterministic injected write failures.
-- [ ] Tests prove restart recovers the last committed state after failures at
+- [x] Tests prove restart recovers the last committed state after failures at
       representative mutation and deadline boundaries.
 
+## Comments
+
+Implemented explicit healthy/degraded durable state in every Snapshot and a
+stable durable-write protocol error. A failed write freezes automatic
+progression, preserves read-only status and Task listing, and rejects later
+mutations before domain state changes. A single Service repository port enables
+deterministic write failure injection while production continues to use
+SQLite. Tests prove the first volatile mutation is reported, later mutations
+are contained, and restart recovers the last committed state. Workspace lint,
+tests, and process end-to-end smoke pass.

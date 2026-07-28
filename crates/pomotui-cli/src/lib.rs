@@ -128,6 +128,11 @@ mod tests {
                         completed_rounds: 2,
                         rounds_per_cycle: 4,
                         next_kind: None,
+                        durable_health: pomotui_protocol::DurableHealth {
+                            state: pomotui_protocol::DurableHealthState::Healthy,
+                            last_successful_commit: None,
+                            error: None,
+                        },
                         tasks: vec![],
                         today: Box::new(pomotui_protocol::TodaySummary::default()),
                         recent_history: vec![],

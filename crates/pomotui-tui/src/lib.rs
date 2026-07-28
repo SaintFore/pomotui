@@ -2582,6 +2582,11 @@ mod tests {
             completed_rounds: 2,
             rounds_per_cycle: 4,
             next_kind: Some(SessionKind::ShortBreak),
+            durable_health: pomotui_protocol::DurableHealth {
+                state: pomotui_protocol::DurableHealthState::Healthy,
+                last_successful_commit: None,
+                error: None,
+            },
             tasks: vec![pomotui_protocol::TaskSummary {
                 id: 1,
                 title: "Ship Pomotui".into(),
