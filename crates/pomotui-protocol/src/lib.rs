@@ -198,6 +198,7 @@ pub struct ChainLinkSummary {
 pub struct EndedChainSummary {
     pub id: u64,
     pub length: u64,
+    pub break_id: u64,
     pub break_task_title: String,
     pub break_actual_seconds: u64,
     pub break_reflection: String,

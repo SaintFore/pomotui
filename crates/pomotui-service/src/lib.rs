@@ -265,13 +265,32 @@ impl Service {
         } else {
             Self::new()
         };
+        let created_void = service.ensure_void_task()?;
         service.applied_keys = keys;
         service.repository = Some(Box::new(repository));
-        if !had_payload {
+        if !had_payload || created_void {
             service.persist(None)?;
         }
         service.observe_time();
         Ok(service)
+    }
+
+    fn ensure_void_task(&mut self) -> Result<bool, String> {
+        const VOID_TASK_ID: u64 = u64::MAX;
+        if self.void_task_id.is_some() {
+            return Ok(false);
+        }
+        let mut tasks = self
+            .tasks
+            .all()
+            .iter()
+            .map(|task| (task.id(), task.title().to_owned(), task.status()))
+            .collect::<Vec<_>>();
+        tasks.push((TaskId::new(VOID_TASK_ID), "Void".into(), TaskStatus::Open));
+        self.tasks =
+            TaskStore::restore(tasks, self.tasks.next_id()).map_err(|error| error.to_string())?;
+        self.void_task_id = Some(VOID_TASK_ID);
+        Ok(true)
     }
 
     /// Applies defaults for Sessions that have not started yet.
@@ -428,6 +447,7 @@ impl Service {
                 .map(|chain| EndedChainSummary {
                     id: chain.id,
                     length: u64::try_from(chain.links.len()).unwrap_or(u64::MAX),
+                    break_id: chain.chain_break.id,
                     break_task_title: chain.chain_break.task_title.clone(),
                     break_actual_seconds: chain.chain_break.actual_seconds,
                     break_reflection: chain.chain_break.reflection.clone(),
@@ -1870,8 +1890,14 @@ mod tests {
             else {
                 panic!("task list response");
             };
-            assert_eq!(tasks.as_array().expect("array").len(), 1);
-            assert_eq!(tasks[0]["title"], "Durable Task");
+            assert_eq!(tasks.as_array().expect("array").len(), 2);
+            assert!(
+                tasks
+                    .as_array()
+                    .expect("array")
+                    .iter()
+                    .any(|task| task["title"] == "Durable Task")
+            );
             let Response::Data { value: history } = service.handle(request(None, Command::History))
             else {
                 panic!("history response");
@@ -1883,6 +1909,51 @@ mod tests {
                 Some("Durable Task")
             );
         }
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn durable_service_has_one_protected_void_identity_across_restarts() {
+        let path = database_path().with_extension("void.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut service = Service::open(&path).expect("service");
+            let void_id = service.void_task_id.expect("Void identity");
+            assert_eq!(
+                service
+                    .snapshot()
+                    .tasks
+                    .iter()
+                    .filter(|task| task.id == void_id && task.title == "Void")
+                    .count(),
+                1
+            );
+            service.handle(request(
+                Some("ordinary-void"),
+                Command::TaskCreate {
+                    title: "Void".into(),
+                },
+            ));
+            assert_eq!(
+                service
+                    .snapshot()
+                    .tasks
+                    .iter()
+                    .filter(|task| task.title == "Void")
+                    .count(),
+                2
+            );
+        }
+        let service = Service::open(&path).expect("restart");
+        assert_eq!(
+            service
+                .tasks
+                .all()
+                .iter()
+                .filter(|task| task.id().get() == u64::MAX)
+                .count(),
+            1
+        );
         std::fs::remove_file(path).expect("cleanup");
     }
 
@@ -2600,7 +2671,15 @@ mod tests {
         drop(service);
 
         let restarted = Service::open(&path).expect("restart from last commit");
-        assert!(restarted.snapshot().tasks.is_empty());
+        assert_eq!(
+            restarted
+                .snapshot()
+                .tasks
+                .iter()
+                .filter(|task| task.title != "Void")
+                .count(),
+            0
+        );
         assert_eq!(
             restarted.snapshot().durable_health.state,
             DurableHealthState::Healthy

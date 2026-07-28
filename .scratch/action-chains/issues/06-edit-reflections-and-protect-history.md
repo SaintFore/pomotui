@@ -6,17 +6,17 @@
 
 **Status:** ready-for-agent
 
-- [ ] A user can add or revise the Reflection on a Chain Link.
-- [ ] A user can revise the required Reflection on a Chain Break without making it empty.
-- [ ] A user can revise the Chain Entry Title of a Void Chain Link or Void Chain Break without changing its attribution.
-- [ ] Non-Void entries reject a separate Chain Entry Title.
-- [ ] Edit operations cannot change review judgment, source Session, Action Chain, Task attribution, Task title snapshot, duration, entry kind, or reward history.
-- [ ] Edits work for both the current Action Chain and Ended Chains.
-- [ ] Task rename does not rewrite stored Task title snapshots.
-- [ ] Deleting an eligible regular Task does not delete or alter Chain Links or Chain Breaks.
-- [ ] Deleting reviewed Session History does not cascade into Action Chain history, while a Session with Pending Review cannot be deleted.
-- [ ] Edit mutations are idempotent and expose stable validation or conflict errors.
-- [ ] Chain and Chain Archive TUI pages and CLI commands expose only the permitted edits.
-- [ ] English uses `Reflection`, Simplified Chinese uses `复盘`, and `Void` remains untranslated.
-- [ ] Service, protocol, CLI, Ratatui, localization, Task lifecycle, and archive immutability tests verify observable behavior.
+- [x] A user can add or revise the Reflection on a Chain Link.
+- [x] A user can revise the required Reflection on a Chain Break without making it empty.
+- [x] A user can revise the Chain Entry Title of a Void Chain Link or Void Chain Break without changing its attribution.
+- [x] Non-Void entries reject a separate Chain Entry Title.
+- [x] Edit operations cannot change review judgment, source Session, Action Chain, Task attribution, Task title snapshot, duration, entry kind, or reward history.
+- [x] Edits work for both the current Action Chain and Ended Chains.
+- [x] Task rename does not rewrite stored Task title snapshots.
+- [x] Deleting an eligible regular Task does not delete or alter Chain Links or Chain Breaks.
+- [x] Deleting reviewed Session History does not cascade into Action Chain history, while a Session with Pending Review cannot be deleted.
+- [x] Edit mutations are idempotent and expose stable validation or conflict errors.
+- [x] Chain and Chain Archive TUI pages and CLI commands expose only the permitted edits.
+- [x] English uses `Reflection`, Simplified Chinese uses `复盘`, and `Void` remains untranslated.
+- [x] Service, protocol, CLI, Ratatui, localization, Task lifecycle, and archive immutability tests verify observable behavior.
 

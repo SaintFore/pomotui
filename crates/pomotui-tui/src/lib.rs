@@ -94,6 +94,9 @@ pub enum Overlay {
     ReviewVoidTitle,
     ReviewFailureReflection,
     ConfirmReviewFailure,
+    EditReflection,
+    CreateReward,
+    ReviewFailureVoidTitle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +138,8 @@ pub struct App {
     pub warning: Option<String>,
     pub message: Option<String>,
     pending_failure_reflection: Option<String>,
+    edit_entry_id: Option<u64>,
+    pending_failure_void_title: Option<String>,
     completion: Option<CompletionPlayback>,
 }
 
@@ -174,6 +179,8 @@ impl App {
             warning: None,
             message: None,
             pending_failure_reflection: None,
+            edit_entry_id: None,
+            pending_failure_void_title: None,
             completion: None,
         }
     }
@@ -239,6 +246,36 @@ impl App {
                         .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
             {
                 self.begin_text_entry(Overlay::ReviewFailureReflection);
+            }
+            InputKey::Char('R') if self.view == View::Chain => {
+                self.begin_text_entry(Overlay::CreateReward);
+            }
+            InputKey::Char('C') if self.view == View::Chain => {
+                let unlock_id = self.snapshot.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .current_chain_rewards
+                        .iter()
+                        .find(|reward| reward.state == "unlocked")
+                        .map(|reward| reward.id)
+                });
+                if let Some(unlock_id) = unlock_id {
+                    return Some(self.emit(pomotui_protocol::Command::RewardClaim { unlock_id }));
+                }
+            }
+            InputKey::Char('E') if matches!(self.view, View::Chain | View::ChainArchive) => {
+                self.edit_entry_id = self.snapshot.as_ref().and_then(|snapshot| {
+                    if self.view == View::Chain {
+                        snapshot.recent_chain_links.first().map(|link| link.id)
+                    } else {
+                        snapshot
+                            .recent_ended_chains
+                            .first()
+                            .map(|chain| chain.break_id)
+                    }
+                });
+                if self.edit_entry_id.is_some() {
+                    self.begin_text_entry(Overlay::EditReflection);
+                }
             }
             InputKey::Char('j') | InputKey::Down => {
                 if self.view == View::History {
@@ -352,7 +389,10 @@ impl App {
             Overlay::CreateTask
             | Overlay::RenameTask
             | Overlay::ReviewVoidTitle
-            | Overlay::ReviewFailureReflection => match key {
+            | Overlay::ReviewFailureReflection
+            | Overlay::EditReflection
+            | Overlay::CreateReward
+            | Overlay::ReviewFailureVoidTitle => match key {
                 InputKey::Char(value) if !value.is_control() => {
                     self.input.push(value);
                     None
@@ -425,11 +465,13 @@ impl App {
                         .is_some_and(|review| review.task_id.is_none())
                         .then(|| self.selected_task().map(|task| task.id))
                         .flatten();
+                    let use_void = task_id == Some(u64::MAX);
+                    let chain_entry_title = self.pending_failure_void_title.take();
                     Some(self.emit(pomotui_protocol::Command::ReviewFailure {
                         reflection,
-                        task_id,
-                        use_void: false,
-                        chain_entry_title: None,
+                        task_id: if use_void { None } else { task_id },
+                        use_void,
+                        chain_entry_title,
                     }))
                 }
                 InputKey::Char('n' | 'N') => {
@@ -597,8 +639,52 @@ impl App {
             Overlay::ReviewFailureReflection => {
                 self.pending_failure_reflection = Some(title);
                 self.input.clear();
+                let needs_void_title = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.pending_review.as_ref())
+                    .is_some_and(|review| review.task_id.is_none())
+                    && self.selected_task().is_some_and(|task| task.id == u64::MAX);
+                self.overlay = if needs_void_title {
+                    Overlay::ReviewFailureVoidTitle
+                } else {
+                    Overlay::ConfirmReviewFailure
+                };
+                return None;
+            }
+            Overlay::ReviewFailureVoidTitle => {
+                self.pending_failure_void_title = Some(title);
+                self.input.clear();
                 self.overlay = Overlay::ConfirmReviewFailure;
                 return None;
+            }
+            Overlay::EditReflection => pomotui_protocol::Command::ChainEntryEdit {
+                id: self.edit_entry_id.take()?,
+                reflection: Some(title),
+                chain_entry_title: None,
+            },
+            Overlay::CreateReward => {
+                let Some((threshold, name)) = title.split_once(' ') else {
+                    self.message = Some(
+                        text(
+                            self.language,
+                            "Use: THRESHOLD REWARD NAME",
+                            "格式：阈值 奖励名称",
+                        )
+                        .into(),
+                    );
+                    return None;
+                };
+                let Ok(threshold) = threshold.parse::<u64>() else {
+                    self.message =
+                        Some(text(self.language, "Invalid threshold", "阈值无效").into());
+                    return None;
+                };
+                pomotui_protocol::Command::RewardCreate {
+                    name: name.trim().to_owned(),
+                    threshold,
+                    budget: None,
+                }
             }
             _ => return None,
         };
@@ -1183,7 +1269,7 @@ fn chain_view(
             Line::from(format!(
                 "{}  {}  {}",
                 link.task_title,
-                human_duration_precise(link.actual_seconds),
+                chain_duration(link.actual_seconds),
                 link.reflection.as_deref().unwrap_or("")
             ))
         }));
@@ -1226,7 +1312,7 @@ fn chain_archive_view(
                         text(language, "Length", "长度"),
                         chain.length,
                         chain.break_task_title,
-                        human_duration_precise(chain.break_actual_seconds),
+                        chain_duration(chain.break_actual_seconds),
                         chain.break_reflection
                     ))
                 })
@@ -2049,6 +2135,18 @@ fn human_duration_precise(seconds: u64) -> String {
     }
 }
 
+fn chain_duration(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let remainder = seconds % 60;
+    if remainder == 0 {
+        format!("{minutes}m")
+    } else if minutes == 0 {
+        format!("{remainder}s")
+    } else {
+        format!("{minutes}m {remainder}s")
+    }
+}
+
 fn timer_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2298,7 +2396,10 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::StopChoice
         | Overlay::ReviewVoidTitle
         | Overlay::ReviewFailureReflection
-        | Overlay::ConfirmReviewFailure => 7.min(area.height.saturating_sub(2)),
+        | Overlay::ConfirmReviewFailure
+        | Overlay::EditReflection
+        | Overlay::CreateReward
+        | Overlay::ReviewFailureVoidTitle => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
     };
     let modal = if app.narrow {
@@ -2314,7 +2415,10 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::CreateTask
         | Overlay::RenameTask
         | Overlay::ReviewVoidTitle
-        | Overlay::ReviewFailureReflection => {
+        | Overlay::ReviewFailureReflection
+        | Overlay::EditReflection
+        | Overlay::CreateReward
+        | Overlay::ReviewFailureVoidTitle => {
             text_entry_overlay(frame, modal, app, colors);
         }
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
@@ -2604,6 +2708,18 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         Overlay::ReviewFailureReflection => (
             text(app.language, "FAILED REVIEW", "失败复盘"),
             text(app.language, "Reflection", "复盘"),
+        ),
+        Overlay::EditReflection => (
+            text(app.language, "EDIT REFLECTION", "编辑复盘"),
+            text(app.language, "Reflection", "复盘"),
+        ),
+        Overlay::CreateReward => (
+            text(app.language, "CREATE REWARD", "新建奖励"),
+            text(app.language, "Threshold and reward name", "阈值和奖励名称"),
+        ),
+        Overlay::ReviewFailureVoidTitle => (
+            text(app.language, "FAILED VOID REVIEW", "失败 VOID 复盘"),
+            text(app.language, "Chain Entry Title", "行动链条目标题"),
         ),
         _ => (
             text(app.language, "RENAME TASK", "重命名任务"),
@@ -3054,6 +3170,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn chain_duration_uses_one_truthful_value() {
+        assert_eq!(chain_duration(3_000), "50m");
+        assert_eq!(chain_duration(1_052), "17m 32s");
+        assert_eq!(chain_duration(32), "32s");
+    }
+
+    #[test]
+    fn chain_workflows_emit_review_stop_and_reward_commands() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 9,
+            actual_seconds: 1_500,
+            task_id: Some(1),
+            task_title: Some("Ship Pomotui".into()),
+        });
+        state.current_chain_rewards = vec![pomotui_protocol::RewardUnlockSummary {
+            id: 4,
+            name: "KFC".into(),
+            threshold: 10,
+            budget: None,
+            state: "unlocked".into(),
+        }];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.view = View::Chain;
+
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ReviewSuccess {
+                reflection: None
+            }))
+        );
+        assert_eq!(
+            app.handle_key(InputKey::Char('C')),
+            Some(Action::Command(pomotui_protocol::Command::RewardClaim {
+                unlock_id: 4
+            }))
+        );
+        app.handle_key(InputKey::Char('R'));
+        for character in "10 KFC".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::RewardCreate {
+                name: "KFC".into(),
+                threshold: 10,
+                budget: None,
+            }))
+        );
+        app.handle_key(InputKey::Char('X'));
+        assert_eq!(app.overlay, Overlay::StopChoice);
+        assert_eq!(
+            app.handle_key(InputKey::Char('R')),
+            Some(Action::Command(pomotui_protocol::Command::StopReview))
+        );
     }
 
     #[test]

@@ -6,15 +6,15 @@
 
 **Status:** ready-for-agent
 
-- [ ] Existing databases migrate to exactly one current Action Chain without changing existing Session History, Tasks, totals, or timer settings.
-- [ ] New databases start with exactly one current Action Chain whose length is zero.
-- [ ] A Focus Session reaching its deadline durably creates one Pending Review for that Session.
-- [ ] Pending Review survives Timer Frontend closure and Timer Service restart.
-- [ ] Starting and completing Break Sessions is permitted while Pending Review exists and does not clear or mutate it.
-- [ ] Starting another Focus Session while Pending Review exists returns a stable user-facing domain error.
-- [ ] Repeated completion or recovery processing cannot create duplicate Pending Reviews.
-- [ ] The authoritative service snapshot exposes a compact current-chain and Pending Review summary without embedding unbounded history.
-- [ ] The Dashboard displays current chain length and Pending Review state while retaining the existing Task list.
-- [ ] Human CLI status exposes the same compact state, and detailed or JSON output includes stable identities.
-- [ ] Domain scenarios, real-SQLite service tests, protocol tests, Ratatui tests, and restart coverage verify the delivered behavior.
+- [x] Existing databases migrate to exactly one current Action Chain without changing existing Session History, Tasks, totals, or timer settings.
+- [x] New databases start with exactly one current Action Chain whose length is zero.
+- [x] A Focus Session reaching its deadline durably creates one Pending Review for that Session.
+- [x] Pending Review survives Timer Frontend closure and Timer Service restart.
+- [x] Starting and completing Break Sessions is permitted while Pending Review exists and does not clear or mutate it.
+- [x] Starting another Focus Session while Pending Review exists returns a stable user-facing domain error.
+- [x] Repeated completion or recovery processing cannot create duplicate Pending Reviews.
+- [x] The authoritative service snapshot exposes a compact current-chain and Pending Review summary without embedding unbounded history.
+- [x] The Dashboard displays current chain length and Pending Review state while retaining the existing Task list.
+- [x] Human CLI status exposes the same compact state, and detailed or JSON output includes stable identities.
+- [x] Domain scenarios, real-SQLite service tests, protocol tests, Ratatui tests, and restart coverage verify the delivered behavior.
 

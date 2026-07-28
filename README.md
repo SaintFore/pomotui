@@ -63,10 +63,14 @@ terminals. Its primary controls are:
 | Key | Action |
 | --- | --- |
 | `j`/`k`, `↑`/`↓` | Select a Task |
-| `h`/`l`, `←`/`→` | Switch Dashboard, Today, and History |
+| `h`/`l`, `←`/`→` | Switch Dashboard, Chain, Chain Archive, Today, Review, and History |
 | `Enter` | Start Focus with the selected Task |
 | `Space` | Start, pause, or resume the Current Session |
-| `X` / `K` | Stop / skip the Current Session |
+| `X` / `K` | Choose how to stop / skip the Current Session |
+| `Enter` on Chain | Review a Pending Review as successful |
+| `F` / `V` on Chain | Review as failed / review an unattributed success with Void |
+| `E` on Chain or Chain Archive | Edit the latest Reflection |
+| `R` / `C` on Chain | Create / claim a Reward Milestone |
 | `n` / `r` | Create / rename a Task |
 | `c` / `D` | Complete or reopen / delete a Task |
 | `:` | Open the executable command palette |
@@ -87,12 +91,30 @@ pomotui start focus --task 1
 pomotui pause
 pomotui resume
 pomotui stop
+pomotui review success --reflection "Finished the vertical slice"
+pomotui chain
 ```
 
 Other commands include `start short-break`, `start long-break`, `skip`,
 `history`, `summary`, and the complete Task lifecycle:
 `create/rename/complete/reopen/delete`. Use `--json` with status, history, and
 other commands when integrating with scripts.
+
+Use `stop --review` to send an early Focus Session to Session Review, or
+`stop --no-review` to record it without affecting the Action Chain. A failed
+review requires a Reflection:
+
+```sh
+pomotui review failure "Interrupted and lost the intended thread"
+pomotui chain archive
+pomotui reward create 10 "Eat KFC" --budget 50
+pomotui reward list
+pomotui reward claim 1
+```
+
+When a reviewed Session has no Task, assign one with `--task ID`, or use
+`--void "Chain Entry Title"`. Run a command with `--json` to obtain stable
+internal identities for editing entries or claiming rewards.
 
 ## Add Pomotui to Waybar
 
