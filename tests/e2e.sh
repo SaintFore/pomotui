@@ -126,16 +126,33 @@ test -x "$install_prefix/bin/pomotui-service"
 test -f "$install_config/systemd/user/pomotui.socket"
 test -f "$install_prefix/share/pomotui/building-collapse.animation"
 test -f "$install_data/applications/pomotui.desktop"
+for icon_size in 16 32 192 512; do
+  test -f \
+    "$install_data/icons/hicolor/${icon_size}x${icon_size}/apps/pomotui.png"
+done
+cmp favicon_io/pomotui-16x16.png \
+  "$install_data/icons/hicolor/16x16/apps/pomotui.png"
+cmp favicon_io/pomotui-32x32.png \
+  "$install_data/icons/hicolor/32x32/apps/pomotui.png"
+cmp favicon_io/pomotui-192x192.png \
+  "$install_data/icons/hicolor/192x192/apps/pomotui.png"
+cmp favicon_io/pomotui-512x512.png \
+  "$install_data/icons/hicolor/512x512/apps/pomotui.png"
 grep -F "Exec=$install_prefix/bin/pomotui-tui" \
   "$install_data/applications/pomotui.desktop" >/dev/null
+grep -Fx "Icon=pomotui" "$install_data/applications/pomotui.desktop" >/dev/null
 grep -F "Terminal=true" "$install_data/applications/pomotui.desktop" >/dev/null
 printf '%s\n' "user_setting = true" >"$install_config/pomotui/config.toml"
 printf '%s\n' "history" >"$install_data/pomotui/pomotui.sqlite3"
 printf '%s\n' "socket" >"$install_runtime/pomotui/pomotui.sock"
+printf '%s\n' "unrelated" \
+  >"$install_data/icons/hicolor/32x32/apps/unrelated.png"
 HOME="$install_home" PREFIX="$install_prefix" XDG_CONFIG_HOME="$install_config" \
   XDG_DATA_HOME="$install_data" XDG_RUNTIME_DIR="$install_runtime" \
   packaging/install.sh >/dev/null
 test "$(cat "$install_config/pomotui/config.toml")" = "user_setting = true"
+cmp favicon_io/pomotui-32x32.png \
+  "$install_data/icons/hicolor/32x32/apps/pomotui.png"
 
 HOME="$install_home" PREFIX="$install_prefix" XDG_CONFIG_HOME="$install_config" \
   XDG_DATA_HOME="$install_data" XDG_RUNTIME_DIR="$install_runtime" \
@@ -146,6 +163,11 @@ test ! -e "$install_prefix/bin/pomotui-service"
 test ! -e "$install_config/systemd/user/pomotui.socket"
 test ! -e "$install_prefix/share/pomotui"
 test ! -e "$install_data/applications/pomotui.desktop"
+for icon_size in 16 32 192 512; do
+  test ! -e \
+    "$install_data/icons/hicolor/${icon_size}x${icon_size}/apps/pomotui.png"
+done
+test -f "$install_data/icons/hicolor/32x32/apps/unrelated.png"
 test -f "$install_config/pomotui/config.toml"
 test -f "$install_data/pomotui/pomotui.sqlite3"
 test ! -e "$install_runtime/pomotui"

@@ -8,6 +8,7 @@ Keywords=Pomodoro;Timer;Focus;Tasks;
 Keywords[zh_CN]=番茄钟;计时器;专注;任务;
 Exec=@EXEC@
 TryExec=@TRY_EXEC@
+Icon=pomotui
 Terminal=true
 Categories=Utility;Clock;
 StartupNotify=false
