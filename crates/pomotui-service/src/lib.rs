@@ -5,14 +5,19 @@ use pomotui_domain::{
 };
 use pomotui_platform::{
     Clock, DesktopReminder, LinuxClock, PendingReminderEffect, RecoveryObservation,
-    ReminderEffectKind, ReminderPort, SqliteRepository, elapsed_during_recovery,
+    ReminderDeliveryCounts, ReminderEffectKind, ReminderPort, SqliteRepository,
+    elapsed_during_recovery,
 };
 use pomotui_protocol::{
     Command, DurableHealth, DurableHealthState, Handler, ProtocolError, RecentSessionSummary,
-    Request, Response, SessionKind, Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
+    ReminderDelivery, Request, Response, SessionKind, Snapshot, TaskFocusSummary, TaskSummary,
+    TodaySummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+const MAX_REMINDER_ATTEMPTS: u32 = 3;
+const MAX_REMINDER_AGE_SECONDS: i64 = 60 * 60;
 
 trait ServiceRepository: Send {
     fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String>;
@@ -24,8 +29,17 @@ trait ServiceRepository: Send {
         effects: &[ReminderEffectKind],
         created_at: i64,
     ) -> Result<bool, String>;
-    fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, String>;
+    fn due_reminder_effects(&self, now: i64) -> Result<Vec<PendingReminderEffect>, String>;
     fn acknowledge_reminder_effect(&mut self, id: i64, acknowledged_at: i64) -> Result<(), String>;
+    fn record_reminder_failure(
+        &mut self,
+        id: i64,
+        failed_at: i64,
+        next_attempt_at: i64,
+        exhausted: bool,
+        error: &str,
+    ) -> Result<(), String>;
+    fn reminder_delivery_counts(&self) -> Result<ReminderDeliveryCounts, String>;
 }
 
 impl ServiceRepository for SqliteRepository {
@@ -49,13 +63,30 @@ impl ServiceRepository for SqliteRepository {
             .map_err(|error| error.to_string())
     }
 
-    fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, String> {
-        self.pending_reminder_effects()
+    fn due_reminder_effects(&self, now: i64) -> Result<Vec<PendingReminderEffect>, String> {
+        self.due_reminder_effects(now)
             .map_err(|error| error.to_string())
     }
 
     fn acknowledge_reminder_effect(&mut self, id: i64, acknowledged_at: i64) -> Result<(), String> {
         self.acknowledge_reminder_effect(id, acknowledged_at)
+            .map_err(|error| error.to_string())
+    }
+
+    fn record_reminder_failure(
+        &mut self,
+        id: i64,
+        failed_at: i64,
+        next_attempt_at: i64,
+        exhausted: bool,
+        error: &str,
+    ) -> Result<(), String> {
+        self.record_reminder_failure(id, failed_at, next_attempt_at, exhausted, error)
+            .map_err(|error| error.to_string())
+    }
+
+    fn reminder_delivery_counts(&self) -> Result<ReminderDeliveryCounts, String> {
+        self.reminder_delivery_counts()
             .map_err(|error| error.to_string())
     }
 }
@@ -240,6 +271,16 @@ impl Service {
                 last_successful_commit: self.last_successful_commit,
                 error: self.durable_error.clone(),
             },
+            reminder_delivery: self
+                .repository
+                .as_ref()
+                .and_then(|repository| repository.reminder_delivery_counts().ok())
+                .map_or_else(ReminderDelivery::default, |counts| ReminderDelivery {
+                    pending: counts.pending,
+                    retrying: counts.retrying,
+                    delivered: counts.delivered,
+                    exhausted: counts.exhausted,
+                }),
             tasks: self
                 .tasks
                 .all()
@@ -450,7 +491,7 @@ impl Service {
         let effects = match self
             .repository
             .as_ref()
-            .map(|repository| repository.pending_reminder_effects())
+            .map(|repository| repository.due_reminder_effects(self.wall))
         {
             None => return,
             Some(Ok(effects)) => effects,
@@ -465,10 +506,31 @@ impl Service {
                 ReminderEffectKind::Sound => self.reminder.play_sound(),
             };
             if let Err(error) = delivered {
-                eprintln!(
-                    "Session Reminder {:?} delivery failed: {error}",
-                    effect.kind
-                );
+                let attempt = effect.attempt_count.saturating_add(1);
+                let exhausted = attempt >= MAX_REMINDER_ATTEMPTS
+                    || self.wall.saturating_sub(effect.created_at) >= MAX_REMINDER_AGE_SECONDS;
+                let base_delay = 5_i64
+                    .saturating_mul(1_i64 << effect.attempt_count.min(6))
+                    .min(300);
+                let jitter = effect.id.rem_euclid(3);
+                let next_attempt = self.wall.saturating_add(base_delay).saturating_add(jitter);
+                let safe_error: String = error.chars().take(200).collect();
+                let recorded = self
+                    .repository
+                    .as_mut()
+                    .expect("repository exists while dispatching durable effects")
+                    .record_reminder_failure(
+                        effect.id,
+                        self.wall,
+                        next_attempt,
+                        exhausted,
+                        &safe_error,
+                    );
+                if let Err(error) = recorded {
+                    self.mark_durable_failure(error);
+                    return;
+                }
+                self.last_successful_commit = Some(self.wall);
                 continue;
             }
             let acknowledged = self
@@ -1415,10 +1477,10 @@ mod tests {
             })
         }
 
-        fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, String> {
+        fn due_reminder_effects(&self, now: i64) -> Result<Vec<PendingReminderEffect>, String> {
             self.inner.as_ref().map_or(Ok(Vec::new()), |inner| {
                 inner
-                    .pending_reminder_effects()
+                    .due_reminder_effects(now)
                     .map_err(|error| error.to_string())
             })
         }
@@ -1434,6 +1496,32 @@ mod tests {
                     .acknowledge_reminder_effect(id, acknowledged_at)
                     .map_err(|error| error.to_string())
             })
+        }
+
+        fn record_reminder_failure(
+            &mut self,
+            id: i64,
+            failed_at: i64,
+            next_attempt_at: i64,
+            exhausted: bool,
+            error: &str,
+        ) -> Result<(), String> {
+            self.write()?;
+            self.inner.as_mut().map_or(Ok(()), |inner| {
+                inner
+                    .record_reminder_failure(id, failed_at, next_attempt_at, exhausted, error)
+                    .map_err(|error| error.to_string())
+            })
+        }
+
+        fn reminder_delivery_counts(&self) -> Result<ReminderDeliveryCounts, String> {
+            self.inner
+                .as_ref()
+                .map_or(Ok(ReminderDeliveryCounts::default()), |inner| {
+                    inner
+                        .reminder_delivery_counts()
+                        .map_err(|error| error.to_string())
+                })
         }
     }
 
@@ -1532,7 +1620,7 @@ mod tests {
                 .repository
                 .as_ref()
                 .expect("repository")
-                .pending_reminder_effects()
+                .due_reminder_effects(i64::MAX)
                 .expect("pending");
             assert_eq!(pending.len(), 1);
             assert_eq!(pending[0].kind, ReminderEffectKind::Notification);
@@ -1544,7 +1632,8 @@ mod tests {
             attempts: std::sync::Arc::clone(&recovered_attempts),
             fail_notification: false,
         });
-        restarted.tick();
+        restarted.wall = restarted.wall.saturating_add(10);
+        restarted.dispatch_pending_reminders();
         assert_eq!(
             *recovered_attempts.lock().expect("attempts"),
             vec![ReminderEffectKind::Notification]
@@ -1554,10 +1643,81 @@ mod tests {
                 .repository
                 .as_ref()
                 .expect("repository")
-                .pending_reminder_effects()
+                .due_reminder_effects(i64::MAX)
                 .expect("pending")
                 .is_empty()
         );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn reminder_retries_are_time_bounded_and_visible_in_snapshot() {
+        let path = database_path().with_extension("retry.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut service = Service::open(&path).expect("service");
+        service.reminder = Box::new(RecordingReminder {
+            attempts: std::sync::Arc::clone(&attempts),
+            fail_notification: true,
+        });
+        service
+            .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+            .expect("configure");
+        let start = service.now;
+        let transition = service.timer.start(start, None);
+        service
+            .apply_transition(transition, 1)
+            .expect("start transition");
+        service.persist(Some("retry-start")).expect("persist start");
+
+        service.apply_observation(start + 1, service.wall + 1);
+        assert_eq!(service.snapshot().reminder_delivery.retrying, 1);
+        service.dispatch_pending_reminders();
+        assert_eq!(attempts.lock().expect("attempts").len(), 1);
+
+        service.wall = service.wall.saturating_add(20);
+        service.dispatch_pending_reminders();
+        assert_eq!(service.snapshot().reminder_delivery.retrying, 1);
+        service.wall = service.wall.saturating_add(100);
+        service.dispatch_pending_reminders();
+
+        assert_eq!(attempts.lock().expect("attempts").len(), 3);
+        assert_eq!(service.snapshot().reminder_delivery.retrying, 0);
+        assert_eq!(service.snapshot().reminder_delivery.exhausted, 1);
+        service.wall = service.wall.saturating_add(10_000);
+        service.dispatch_pending_reminders();
+        assert_eq!(attempts.lock().expect("attempts").len(), 3);
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn stale_reminder_delivery_exhausts_before_the_attempt_limit() {
+        let path = database_path().with_extension("retry-age.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut service = Service::open(&path).expect("service");
+        service.reminder = Box::new(RecordingReminder {
+            attempts: std::sync::Arc::clone(&attempts),
+            fail_notification: true,
+        });
+        service
+            .configure_durations(SessionDurations::new(1, 1, 1).expect("durations"))
+            .expect("configure");
+        let start = service.now;
+        let transition = service.timer.start(start, None);
+        service
+            .apply_transition(transition, 1)
+            .expect("start transition");
+        service
+            .persist(Some("retry-age-start"))
+            .expect("persist start");
+        service.apply_observation(start + 1, service.wall + 1);
+
+        service.wall = service.wall.saturating_add(MAX_REMINDER_AGE_SECONDS + 1);
+        service.dispatch_pending_reminders();
+
+        assert_eq!(attempts.lock().expect("attempts").len(), 2);
+        assert_eq!(service.snapshot().reminder_delivery.exhausted, 1);
         std::fs::remove_file(path).expect("cleanup");
     }
 

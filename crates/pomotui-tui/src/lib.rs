@@ -903,11 +903,41 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             modal,
         );
     }
-    if let Some(warning) = &app.warning {
+    if let Some(warning) = visible_warning(app) {
         frame.render_widget(
-            Paragraph::new(warning.as_str()).style(Style::default().fg(Color::Rgb(201, 166, 107))),
+            Paragraph::new(warning).style(Style::default().fg(Color::Rgb(201, 166, 107))),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
+    }
+}
+
+fn visible_warning(app: &App) -> Option<String> {
+    if let Some(warning) = &app.warning {
+        return Some(warning.clone());
+    }
+    let delivery = &app.snapshot.as_ref()?.reminder_delivery;
+    if delivery.exhausted > 0 {
+        Some(format!(
+            "{}: {}",
+            text(
+                app.language,
+                "Session Reminders exhausted",
+                "时段提醒已停止重试"
+            ),
+            delivery.exhausted
+        ))
+    } else if delivery.retrying > 0 {
+        Some(format!(
+            "{}: {}",
+            text(
+                app.language,
+                "Session Reminders retrying",
+                "时段提醒正在重试"
+            ),
+            delivery.retrying
+        ))
+    } else {
+        None
     }
 }
 
@@ -2587,6 +2617,7 @@ mod tests {
                 last_successful_commit: None,
                 error: None,
             },
+            reminder_delivery: pomotui_protocol::ReminderDelivery::default(),
             tasks: vec![pomotui_protocol::TaskSummary {
                 id: 1,
                 title: "Ship Pomotui".into(),
@@ -2691,6 +2722,25 @@ mod tests {
                 .all(|row| row.chars().count() == 29),
             "five glyphs and their separators must have stable geometry"
         );
+    }
+
+    #[test]
+    fn exhausted_session_reminders_are_visible_without_an_overlay() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.reminder_delivery.exhausted = 2;
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Session Reminders exhausted: 2"));
     }
 
     #[test]

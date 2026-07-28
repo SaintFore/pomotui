@@ -11,7 +11,8 @@ pub use recovery::{
     ReminderPort, dispatch_reminder, elapsed_during_recovery, observe,
 };
 pub use repository::{
-    PendingReminderEffect, ReminderEffectKind, RepositoryError, SqliteRepository,
+    PendingReminderEffect, ReminderDeliveryCounts, ReminderEffectKind, RepositoryError,
+    SqliteRepository,
 };
 
 /// Returns the domain model version targeted by these adapters.

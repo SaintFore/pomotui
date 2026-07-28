@@ -112,9 +112,18 @@ pub struct Snapshot {
     pub rounds_per_cycle: u8,
     pub next_kind: Option<SessionKind>,
     pub durable_health: DurableHealth,
+    pub reminder_delivery: ReminderDelivery,
     pub tasks: Vec<TaskSummary>,
     pub today: Box<TodaySummary>,
     pub recent_history: Vec<RecentSessionSummary>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReminderDelivery {
+    pub pending: u32,
+    pub retrying: u32,
+    pub delivered: u32,
+    pub exhausted: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

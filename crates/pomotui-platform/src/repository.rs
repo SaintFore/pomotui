@@ -31,6 +31,16 @@ pub struct PendingReminderEffect {
     pub id: i64,
     pub session_key: String,
     pub kind: ReminderEffectKind,
+    pub attempt_count: u32,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReminderDeliveryCounts {
+    pub pending: u32,
+    pub retrying: u32,
+    pub delivered: u32,
+    pub exhausted: u32,
 }
 
 #[derive(Debug)]
@@ -330,7 +340,7 @@ impl SqliteRepository {
     /// Returns a `SQLite` query or data-conversion error.
     pub fn pending_reminder_effects(&self) -> Result<Vec<PendingReminderEffect>, RepositoryError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, session_key, effect_kind
+            "SELECT id, session_key, effect_kind, attempt_count, created_at
              FROM reminder_outbox
              WHERE state = 'pending'
              ORDER BY id",
@@ -341,9 +351,91 @@ impl SqliteRepository {
                     id: row.get(0)?,
                     session_key: row.get(1)?,
                     kind: ReminderEffectKind::parse(&row.get::<_, String>(2)?)?,
+                    attempt_count: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })?
             .collect::<Result<_, _>>()?)
+    }
+
+    /// Reads Session Reminder effects whose delivery time has arrived.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `SQLite` query or data-conversion error.
+    pub fn due_reminder_effects(
+        &self,
+        now: i64,
+    ) -> Result<Vec<PendingReminderEffect>, RepositoryError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_key, effect_kind, attempt_count, created_at
+             FROM reminder_outbox
+             WHERE state = 'pending' AND next_attempt_at <= ?1
+             ORDER BY id",
+        )?;
+        Ok(statement
+            .query_map([now], |row| {
+                Ok(PendingReminderEffect {
+                    id: row.get(0)?,
+                    session_key: row.get(1)?,
+                    kind: ReminderEffectKind::parse(&row.get::<_, String>(2)?)?,
+                    attempt_count: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// Records a failed Session Reminder attempt and either reschedules or
+    /// exhausts it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `SQLite` write error.
+    pub fn record_reminder_failure(
+        &mut self,
+        id: i64,
+        failed_at: i64,
+        next_attempt_at: i64,
+        exhausted: bool,
+        error: &str,
+    ) -> Result<(), RepositoryError> {
+        self.connection.execute(
+            "UPDATE reminder_outbox
+             SET state = CASE WHEN ?4 THEN 'exhausted' ELSE 'pending' END,
+                 attempt_count = attempt_count + 1,
+                 next_attempt_at = ?3,
+                 acknowledged_at = CASE WHEN ?4 THEN ?2 ELSE NULL END,
+                 last_error = ?5
+             WHERE id = ?1 AND state = 'pending'",
+            rusqlite::params![id, failed_at, next_attempt_at, exhausted, error],
+        )?;
+        Ok(())
+    }
+
+    /// Returns aggregate Session Reminder delivery states.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `SQLite` query error.
+    pub fn reminder_delivery_counts(&self) -> Result<ReminderDeliveryCounts, RepositoryError> {
+        Ok(self.connection.query_row(
+            "SELECT
+                 COALESCE(SUM(state = 'pending' AND attempt_count = 0), 0),
+                 COALESCE(SUM(state = 'pending' AND attempt_count > 0), 0),
+                 COALESCE(SUM(state = 'delivered'), 0),
+                 COALESCE(SUM(state = 'exhausted'), 0)
+             FROM reminder_outbox",
+            [],
+            |row| {
+                Ok(ReminderDeliveryCounts {
+                    pending: row.get(0)?,
+                    retrying: row.get(1)?,
+                    delivered: row.get(2)?,
+                    exhausted: row.get(3)?,
+                })
+            },
+        )?)
     }
 
     /// Marks one Session Reminder effect as delivered.
@@ -373,7 +465,7 @@ impl SqliteRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReminderEffectKind, RepositoryError, SqliteRepository};
+    use super::{ReminderDeliveryCounts, ReminderEffectKind, RepositoryError, SqliteRepository};
     use rusqlite::Connection;
 
     #[test]
@@ -557,5 +649,62 @@ mod tests {
         let remaining = repository.pending_reminder_effects().expect("remaining");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].kind, ReminderEffectKind::Sound);
+    }
+
+    #[test]
+    fn reminder_failures_retry_when_due_and_eventually_exhaust() {
+        let mut repository = SqliteRepository::open_in_memory().expect("open");
+        repository
+            .save_completion(
+                "completed",
+                "session-9",
+                &[ReminderEffectKind::Notification],
+                100,
+            )
+            .expect("completion");
+        let effect = repository
+            .due_reminder_effects(100)
+            .expect("initial due")
+            .pop()
+            .expect("effect");
+
+        repository
+            .record_reminder_failure(effect.id, 100, 110, false, "temporary")
+            .expect("first failure");
+        assert!(
+            repository
+                .due_reminder_effects(109)
+                .expect("not due")
+                .is_empty()
+        );
+        assert_eq!(repository.due_reminder_effects(110).expect("due").len(), 1);
+        assert_eq!(
+            repository.reminder_delivery_counts().expect("counts"),
+            ReminderDeliveryCounts {
+                pending: 0,
+                retrying: 1,
+                delivered: 0,
+                exhausted: 0,
+            }
+        );
+
+        repository
+            .record_reminder_failure(effect.id, 110, 130, true, "permanent")
+            .expect("exhaust");
+        assert!(
+            repository
+                .due_reminder_effects(1_000)
+                .expect("terminal")
+                .is_empty()
+        );
+        assert_eq!(
+            repository.reminder_delivery_counts().expect("counts"),
+            ReminderDeliveryCounts {
+                pending: 0,
+                retrying: 0,
+                delivered: 0,
+                exhausted: 1,
+            }
+        );
     }
 }

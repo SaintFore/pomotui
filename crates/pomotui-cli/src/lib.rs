@@ -69,17 +69,18 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
     match response {
         Response::Snapshot { snapshot } if waybar => serde_json::to_string(&serde_json::json!({
             "text": format!("{} {}", snapshot.state, clock(snapshot.remaining_seconds)),
-            "tooltip": format!("{:?} · round {}/{}", snapshot.kind, snapshot.completed_rounds, snapshot.rounds_per_cycle),
+            "tooltip": format!("{:?} · round {}/{}{}", snapshot.kind, snapshot.completed_rounds, snapshot.rounds_per_cycle, reminder_delivery_label(&snapshot.reminder_delivery)),
             "class": [snapshot.state.clone(), format!("{:?}", snapshot.kind).to_lowercase()],
             "percentage": percentage(snapshot.remaining_seconds, snapshot.planned_seconds),
         })).map_err(|error| error.to_string()),
         Response::Snapshot { snapshot } => Ok(format!(
-            "{:?} {} · {} · round {}/{}",
+            "{:?} {} · {} · round {}/{}{}",
             snapshot.kind,
             clock(snapshot.remaining_seconds),
             snapshot.state,
             snapshot.completed_rounds,
-            snapshot.rounds_per_cycle
+            snapshot.rounds_per_cycle,
+            reminder_delivery_label(&snapshot.reminder_delivery)
         )),
         Response::Data { value } => Ok(value.to_string()),
         Response::Accepted => Ok("accepted".into()),
@@ -89,6 +90,18 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
             | ProtocolError::Malformed { message } => message.clone(),
             other => format!("{other:?}"),
         }),
+    }
+}
+
+fn reminder_delivery_label(delivery: &pomotui_protocol::ReminderDelivery) -> String {
+    if delivery.exhausted > 0 {
+        format!(" · reminders exhausted: {}", delivery.exhausted)
+    } else if delivery.retrying > 0 {
+        format!(" · reminders retrying: {}", delivery.retrying)
+    } else if delivery.pending > 0 {
+        format!(" · reminders pending: {}", delivery.pending)
+    } else {
+        String::new()
     }
 }
 
@@ -133,6 +146,7 @@ mod tests {
                             last_successful_commit: None,
                             error: None,
                         },
+                        reminder_delivery: pomotui_protocol::ReminderDelivery::default(),
                         tasks: vec![],
                         today: Box::new(pomotui_protocol::TodaySummary::default()),
                         recent_history: vec![],
@@ -152,6 +166,44 @@ mod tests {
     fn mutation_request_has_identity_but_status_does_not() {
         assert!(request(Command::Pause).idempotency_key.is_some());
         assert!(request(Command::Status).idempotency_key.is_none());
+    }
+
+    #[test]
+    fn reminder_delivery_state_is_visible_in_human_and_json_status() {
+        let response = Response::Snapshot {
+            snapshot: Snapshot {
+                state: "pending".into(),
+                kind: SessionKind::Focus,
+                remaining_seconds: 1_500,
+                planned_seconds: 1_500,
+                current_task: None,
+                current_task_id: None,
+                completed_rounds: 0,
+                rounds_per_cycle: 4,
+                next_kind: None,
+                durable_health: pomotui_protocol::DurableHealth {
+                    state: pomotui_protocol::DurableHealthState::Healthy,
+                    last_successful_commit: None,
+                    error: None,
+                },
+                reminder_delivery: pomotui_protocol::ReminderDelivery {
+                    retrying: 2,
+                    ..pomotui_protocol::ReminderDelivery::default()
+                },
+                tasks: vec![],
+                today: Box::new(pomotui_protocol::TodaySummary::default()),
+                recent_history: vec![],
+            },
+        };
+
+        assert!(
+            render(&response, false, false)
+                .expect("human status")
+                .contains("reminders retrying: 2")
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&response, true, false).expect("json")).expect("value");
+        assert_eq!(json["snapshot"]["reminder_delivery"]["retrying"], 2);
     }
 
     #[test]
