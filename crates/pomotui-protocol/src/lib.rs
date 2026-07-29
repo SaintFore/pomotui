@@ -168,6 +168,8 @@ pub struct Snapshot {
     pub recent_chain_links: Vec<ChainLinkSummary>,
     pub recent_ended_chains: Vec<EndedChainSummary>,
     pub next_reward: Option<RewardMilestoneSummary>,
+    #[serde(default)]
+    pub reward_milestones: Vec<RewardMilestoneSummary>,
     pub current_chain_rewards: Vec<RewardUnlockSummary>,
 }
 

@@ -462,6 +462,20 @@ impl Service {
                     threshold: milestone.threshold,
                     budget: milestone.budget,
                 }),
+            reward_milestones: {
+                let mut milestones = self
+                    .reward_milestones
+                    .iter()
+                    .map(|milestone| RewardMilestoneSummary {
+                        id: milestone.id,
+                        name: milestone.name.clone(),
+                        threshold: milestone.threshold,
+                        budget: milestone.budget,
+                    })
+                    .collect::<Vec<_>>();
+                milestones.sort_by_key(|milestone| (milestone.threshold, milestone.id));
+                milestones
+            },
             current_chain_rewards: self
                 .reward_unlocks
                 .iter()
@@ -2364,6 +2378,34 @@ mod tests {
         ));
         assert_eq!(service.snapshot().current_chain_rewards[0].state, "claimed");
         assert_eq!(service.reward_unlocks.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_exposes_the_complete_reward_ladder_in_threshold_order() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("reward-50"),
+            Command::RewardCreate {
+                name: "Day off".into(),
+                threshold: 50,
+                budget: None,
+            },
+        ));
+        service.handle(request(
+            Some("reward-10"),
+            Command::RewardCreate {
+                name: "KFC".into(),
+                threshold: 10,
+                budget: Some(80),
+            },
+        ));
+
+        let milestones = service.snapshot().reward_milestones;
+        assert_eq!(milestones.len(), 2);
+        assert_eq!(milestones[0].threshold, 10);
+        assert_eq!(milestones[0].name, "KFC");
+        assert_eq!(milestones[0].budget, Some(80));
+        assert_eq!(milestones[1].threshold, 50);
     }
 
     #[test]

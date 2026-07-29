@@ -74,7 +74,8 @@ terminals. Its primary controls are:
 | `E` on Chain | Edit the selected Chain Link's Reflection |
 | `T` on Chain | Edit the selected Void Chain Link's Chain Entry Title |
 | `E` on Chain Archive | Edit the latest Chain Break Reflection |
-| `R` / `C` on Chain | Create / claim a Reward Milestone |
+| `R` on Chain | Open Reward Milestone manager (`n` create, `e` edit, `D` delete) |
+| `C` on Chain | Claim the first unlocked reward |
 | `n` / `r` | Create / rename a Task |
 | `c` / `D` | Complete or reopen / delete a Task |
 | `:` | Open the executable command palette |

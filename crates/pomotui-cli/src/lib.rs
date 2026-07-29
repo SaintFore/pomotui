@@ -245,6 +245,7 @@ mod tests {
                         recent_chain_links: vec![],
                         recent_ended_chains: vec![],
                         next_reward: None,
+                        reward_milestones: vec![],
                         current_chain_rewards: vec![],
                     },
                 },
@@ -294,6 +295,7 @@ mod tests {
                 recent_chain_links: vec![],
                 recent_ended_chains: vec![],
                 next_reward: None,
+                reward_milestones: vec![],
                 current_chain_rewards: vec![],
             },
         };
@@ -334,6 +336,7 @@ mod tests {
             recent_chain_links: vec![],
             recent_ended_chains: vec![],
             next_reward: None,
+            reward_milestones: vec![],
             current_chain_rewards: vec![],
         };
         snapshot.pending_review = Some(pomotui_protocol::PendingReviewSummary {

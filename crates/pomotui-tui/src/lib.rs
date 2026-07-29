@@ -97,7 +97,10 @@ pub enum Overlay {
     ConfirmReviewFailure,
     EditReflection,
     EditChainTitle,
+    RewardManager,
     CreateReward,
+    UpdateReward,
+    ConfirmRewardDelete,
     ReviewFailureVoidTitle,
 }
 
@@ -129,6 +132,7 @@ pub struct App {
     pub overlay: Overlay,
     pub selected_task: usize,
     pub chain_cursor: usize,
+    pub reward_cursor: usize,
     pub history_cursor: usize,
     pub history_offset: usize,
     pub visual_anchor: Option<usize>,
@@ -142,6 +146,7 @@ pub struct App {
     pub message: Option<String>,
     pending_failure_reflection: Option<String>,
     edit_entry_id: Option<u64>,
+    edit_reward_id: Option<u64>,
     pending_failure_void_title: Option<String>,
     last_prompted_review_id: Option<u64>,
     completion: Option<CompletionPlayback>,
@@ -172,6 +177,7 @@ impl App {
             overlay,
             selected_task: 0,
             chain_cursor: 0,
+            reward_cursor: 0,
             history_cursor: 0,
             history_offset: 0,
             visual_anchor: None,
@@ -194,6 +200,7 @@ impl App {
             message: None,
             pending_failure_reflection: None,
             edit_entry_id: None,
+            edit_reward_id: None,
             pending_failure_void_title: None,
             last_prompted_review_id,
             completion: None,
@@ -217,6 +224,11 @@ impl App {
             .as_ref()
             .map_or(0, |snapshot| snapshot.recent_chain_links.len());
         self.chain_cursor = self.chain_cursor.min(link_count.saturating_sub(1));
+        let reward_count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.reward_milestones.len());
+        self.reward_cursor = self.reward_cursor.min(reward_count.saturating_sub(1));
     }
 
     pub fn key(&mut self, key: char) -> Option<Action> {
@@ -273,7 +285,7 @@ impl App {
                 self.begin_text_entry(Overlay::ReviewFailureReflection);
             }
             InputKey::Char('R') if self.view == View::Chain => {
-                self.begin_text_entry(Overlay::CreateReward);
+                self.overlay = Overlay::RewardManager;
             }
             InputKey::Char('C') if self.view == View::Chain => {
                 let unlock_id = self.snapshot.as_ref().and_then(|snapshot| {
@@ -459,6 +471,44 @@ impl App {
                 }
                 _ => None,
             },
+            Overlay::RewardManager => match key {
+                InputKey::Char('j') | InputKey::Down => {
+                    let count = self
+                        .snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.reward_milestones.len());
+                    self.reward_cursor = (self.reward_cursor + 1).min(count.saturating_sub(1));
+                    None
+                }
+                InputKey::Char('k') | InputKey::Up => {
+                    self.reward_cursor = self.reward_cursor.saturating_sub(1);
+                    None
+                }
+                InputKey::Char('n') => {
+                    self.begin_text_entry(Overlay::CreateReward);
+                    None
+                }
+                InputKey::Char('e') | InputKey::Enter => {
+                    self.edit_reward_id = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.reward_milestones.get(self.reward_cursor))
+                        .map(|reward| reward.id);
+                    if self.edit_reward_id.is_some() {
+                        self.begin_text_entry(Overlay::UpdateReward);
+                    }
+                    None
+                }
+                InputKey::Char('D') => {
+                    if self.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.reward_milestones.get(self.reward_cursor).is_some()
+                    }) {
+                        self.overlay = Overlay::ConfirmRewardDelete;
+                    }
+                    None
+                }
+                _ => None,
+            },
             Overlay::Settings => {
                 if matches!(key, InputKey::Char('t') | InputKey::Left | InputKey::Right) {
                     self.theme = self.theme.next();
@@ -480,6 +530,7 @@ impl App {
             | Overlay::EditReflection
             | Overlay::EditChainTitle
             | Overlay::CreateReward
+            | Overlay::UpdateReward
             | Overlay::ReviewFailureVoidTitle => match key {
                 InputKey::Char(value) if !value.is_control() => {
                     self.input.push(value);
@@ -490,6 +541,21 @@ impl App {
                     None
                 }
                 InputKey::Enter => self.submit_text_entry(),
+                _ => None,
+            },
+            Overlay::ConfirmRewardDelete => match key {
+                InputKey::Char('y' | 'Y') | InputKey::Enter => {
+                    let id = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.reward_milestones.get(self.reward_cursor))
+                        .map(|reward| reward.id)?;
+                    Some(self.emit(pomotui_protocol::Command::RewardDelete { id }))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::RewardManager;
+                    None
+                }
                 _ => None,
             },
             Overlay::ConfirmDelete => match key {
@@ -705,6 +771,20 @@ impl App {
         self.input = if overlay == Overlay::RenameTask {
             self.selected_task()
                 .map_or_else(String::new, |task| task.title.clone())
+        } else if overlay == Overlay::UpdateReward {
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.reward_milestones.get(self.reward_cursor))
+                .map_or_else(String::new, |reward| {
+                    format!(
+                        "{} | {} | {}",
+                        reward.threshold,
+                        reward.name,
+                        reward
+                            .budget
+                            .map_or_else(String::new, |value| value.to_string())
+                    )
+                })
         } else {
             String::new()
         };
@@ -768,27 +848,31 @@ impl App {
                 reflection: None,
                 chain_entry_title: Some(title),
             },
-            Overlay::CreateReward => {
-                let Some((threshold, name)) = title.split_once(' ') else {
+            Overlay::CreateReward | Overlay::UpdateReward => {
+                let Ok((threshold, name, budget)) = parse_reward_input(&title) else {
                     self.message = Some(
                         text(
                             self.language,
-                            "Use: THRESHOLD REWARD NAME",
-                            "格式：阈值 奖励名称",
+                            "Use: THRESHOLD | REWARD NAME | OPTIONAL BUDGET",
+                            "格式：阈值 | 奖励名称 | 可选预算",
                         )
                         .into(),
                     );
                     return None;
                 };
-                let Ok(threshold) = threshold.parse::<u64>() else {
-                    self.message =
-                        Some(text(self.language, "Invalid threshold", "阈值无效").into());
-                    return None;
-                };
-                pomotui_protocol::Command::RewardCreate {
-                    name: name.trim().to_owned(),
-                    threshold,
-                    budget: None,
+                if self.overlay == Overlay::UpdateReward {
+                    pomotui_protocol::Command::RewardUpdate {
+                        id: self.edit_reward_id.take()?,
+                        name,
+                        threshold,
+                        budget,
+                    }
+                } else {
+                    pomotui_protocol::Command::RewardCreate {
+                        name,
+                        threshold,
+                        budget,
+                    }
                 }
             }
             _ => return None,
@@ -1364,6 +1448,12 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     for reward in &snapshot.current_chain_rewards {
         lines.push(Line::from(format!("{}  [{}]", reward.name, reward.state)));
     }
+    lines.push(Line::from(format!(
+        "R {} ({}) · C {}",
+        text(language, "manage rewards", "管理奖励"),
+        snapshot.reward_milestones.len(),
+        text(language, "claim unlocked", "领取已解锁奖励")
+    )));
     lines.push(Line::from(""));
     if snapshot.recent_chain_links.is_empty() {
         lines.push(Line::from(text(
@@ -1372,40 +1462,12 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             "完成并复盘一次专注时段以添加第一个节点。",
         )));
     } else {
-        for (index, link) in snapshot.recent_chain_links.iter().enumerate() {
-            let selected = index == app.chain_cursor;
-            let connector = if index + 1 == snapshot.recent_chain_links.len() {
-                "└─"
-            } else {
-                "├─"
-            };
-            let title = link
-                .chain_entry_title
-                .as_deref()
-                .unwrap_or(&link.task_title);
-            let marker = if selected { "›" } else { " " };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{marker} {connector} #{}  {}  {}",
-                    link.id,
-                    title,
-                    chain_duration(link.actual_seconds)
-                ),
-                if selected {
-                    Style::default()
-                        .fg(colors.background)
-                        .bg(colors.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(colors.text)
-                },
-            )));
-            lines.push(Line::from(format!(
-                "      {}: {}",
-                text(language, "Reflection", "复盘"),
-                link.reflection.as_deref().unwrap_or("—")
-            )));
-        }
+        lines.extend(chain_link_lines(
+            snapshot,
+            app.chain_cursor,
+            colors,
+            language,
+        ));
         lines.push(Line::from(""));
         lines.push(Line::from(text(
             language,
@@ -1417,6 +1479,57 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         Paragraph::new(lines).block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
         area,
     );
+}
+
+fn chain_link_lines(
+    snapshot: &Snapshot,
+    cursor: usize,
+    colors: Colors,
+    language: Language,
+) -> Vec<Line<'static>> {
+    let count = snapshot.recent_chain_links.len();
+    snapshot
+        .recent_chain_links
+        .iter()
+        .enumerate()
+        .flat_map(|(index, link)| {
+            let selected = index == cursor;
+            let connector = if index + 1 == count {
+                "└─"
+            } else {
+                "├─"
+            };
+            let title = link
+                .chain_entry_title
+                .as_deref()
+                .unwrap_or(&link.task_title);
+            let marker = if selected { "›" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(colors.background)
+                    .bg(colors.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors.text)
+            };
+            [
+                Line::from(Span::styled(
+                    format!(
+                        "{marker} {connector} #{}  {}  {}",
+                        link.id,
+                        title,
+                        chain_duration(link.actual_seconds)
+                    ),
+                    style,
+                )),
+                Line::from(format!(
+                    "      {}: {}",
+                    text(language, "Reflection", "复盘"),
+                    link.reflection.as_deref().unwrap_or("—")
+                )),
+            ]
+        })
+        .collect()
 }
 
 fn chain_archive_view(
@@ -2286,6 +2399,30 @@ fn chain_duration(seconds: u64) -> String {
     }
 }
 
+fn parse_reward_input(input: &str) -> Result<(u64, String, Option<u64>), ()> {
+    if input.contains('|') {
+        let mut parts = input.split('|').map(str::trim);
+        let threshold = parts.next().ok_or(())?.parse::<u64>().map_err(|_| ())?;
+        let name = parts.next().ok_or(())?.to_owned();
+        let budget = match parts.next() {
+            Some("") | None => None,
+            Some(value) => Some(value.parse::<u64>().map_err(|_| ())?),
+        };
+        if threshold == 0 || name.is_empty() || parts.next().is_some() {
+            return Err(());
+        }
+        Ok((threshold, name, budget))
+    } else {
+        let (threshold, name) = input.split_once(' ').ok_or(())?;
+        let threshold = threshold.parse::<u64>().map_err(|_| ())?;
+        let name = name.trim().to_owned();
+        if threshold == 0 || name.is_empty() {
+            return Err(());
+        }
+        Ok((threshold, name, None))
+    }
+}
+
 fn timer_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2528,6 +2665,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::Palette => area.height.saturating_sub(4).min(21),
         Overlay::Help => area.height.saturating_sub(4).min(20),
         Overlay::Settings => 17.min(area.height.saturating_sub(2)),
+        Overlay::RewardManager => 16.min(area.height.saturating_sub(2)),
         Overlay::CreateTask
         | Overlay::RenameTask
         | Overlay::ConfirmDelete
@@ -2540,6 +2678,8 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::EditReflection
         | Overlay::EditChainTitle
         | Overlay::CreateReward
+        | Overlay::UpdateReward
+        | Overlay::ConfirmRewardDelete
         | Overlay::ReviewFailureVoidTitle => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
     };
@@ -2554,6 +2694,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
         Overlay::Help => help_overlay(frame, modal, app, colors),
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
+        Overlay::RewardManager => reward_manager_overlay(frame, modal, app, colors),
         Overlay::CreateTask
         | Overlay::RenameTask
         | Overlay::ReviewVoidTitle
@@ -2561,6 +2702,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::EditReflection
         | Overlay::EditChainTitle
         | Overlay::CreateReward
+        | Overlay::UpdateReward
         | Overlay::ReviewFailureVoidTitle => {
             text_entry_overlay(frame, modal, app, colors);
         }
@@ -2569,6 +2711,9 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::ConfirmHistoryDelete => confirm_history_delete_overlay(frame, modal, app, colors),
         Overlay::StopChoice => stop_choice_overlay(frame, modal, app, colors),
         Overlay::ConfirmReviewFailure => confirm_review_failure_overlay(frame, modal, app, colors),
+        Overlay::ConfirmRewardDelete => {
+            confirm_reward_delete_overlay(frame, modal, app, colors);
+        }
         Overlay::None => {}
     }
 }
@@ -2899,6 +3044,98 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
     );
 }
 
+fn reward_manager_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let mut lines = Vec::new();
+    let milestones = app
+        .snapshot
+        .as_ref()
+        .map_or(&[][..], |snapshot| snapshot.reward_milestones.as_slice());
+    if milestones.is_empty() {
+        lines.push(Line::from(text(
+            app.language,
+            "No Reward Milestones configured.",
+            "尚未设置奖励里程碑。",
+        )));
+    } else {
+        for (index, reward) in milestones.iter().enumerate() {
+            let marker = if index == app.reward_cursor {
+                "›"
+            } else {
+                " "
+            };
+            let budget = reward.budget.map_or_else(
+                || text(app.language, "no budget", "无预算").to_owned(),
+                |value| format!("{value}"),
+            );
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{marker} #{}  @{}  {}  ·  {}",
+                    reward.id, reward.threshold, reward.name, budget
+                ),
+                if index == app.reward_cursor {
+                    Style::default()
+                        .fg(colors.background)
+                        .bg(colors.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.text)
+                },
+            )));
+        }
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(text(
+            app.language,
+            "j/k select · n new · e/Enter edit · D delete",
+            "j/k 选择 · n 新建 · e/Enter 编辑 · D 删除",
+        )),
+        Line::from(text(app.language, "Esc close", "Esc 关闭")),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                panel(
+                    text(app.language, "REWARD MILESTONES", "奖励里程碑"),
+                    colors,
+                )
+                .border_style(Style::default().fg(colors.accent)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn confirm_reward_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let reward = app
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.reward_milestones.get(app.reward_cursor))
+        .map_or(
+            text(app.language, "selected milestone", "所选里程碑"),
+            |reward| reward.name.as_str(),
+        );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!(
+                "{} “{reward}”?",
+                text(app.language, "Delete Reward Milestone", "删除奖励里程碑")
+            )),
+            Line::from(""),
+            Line::from(text(
+                app.language,
+                "Enter/Y confirm · N cancel",
+                "Enter/Y 确认 · N 取消",
+            )),
+        ])
+        .block(panel(
+            text(app.language, "CONFIRM DELETE", "确认删除"),
+            colors,
+        )),
+        area,
+    );
+}
+
 fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let (title, label) = match app.overlay {
         Overlay::CreateTask => (
@@ -2923,7 +3160,19 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         ),
         Overlay::CreateReward => (
             text(app.language, "CREATE REWARD", "新建奖励"),
-            text(app.language, "Threshold and reward name", "阈值和奖励名称"),
+            text(
+                app.language,
+                "Threshold | reward name | optional budget",
+                "阈值 | 奖励名称 | 可选预算",
+            ),
+        ),
+        Overlay::UpdateReward => (
+            text(app.language, "UPDATE REWARD", "更新奖励"),
+            text(
+                app.language,
+                "Threshold | reward name | optional budget",
+                "阈值 | 奖励名称 | 可选预算",
+            ),
         ),
         Overlay::ReviewFailureVoidTitle => (
             text(app.language, "FAILED VOID REVIEW", "失败 VOID 复盘"),
@@ -3336,6 +3585,7 @@ mod tests {
             recent_chain_links: vec![],
             recent_ended_chains: vec![],
             next_reward: None,
+            reward_milestones: vec![],
             current_chain_rewards: vec![],
         }
     }
@@ -3530,6 +3780,7 @@ mod tests {
             }))
         );
         app.handle_key(InputKey::Char('R'));
+        app.handle_key(InputKey::Char('n'));
         for character in "10 KFC".chars() {
             app.handle_key(InputKey::Char(character));
         }
@@ -3546,6 +3797,99 @@ mod tests {
         assert_eq!(
             app.handle_key(InputKey::Char('R')),
             Some(Action::Command(pomotui_protocol::Command::StopReview))
+        );
+    }
+
+    #[test]
+    fn reward_manager_lists_updates_and_deletes_selected_milestones() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.reward_milestones = vec![
+            pomotui_protocol::RewardMilestoneSummary {
+                id: 2,
+                name: "KFC".into(),
+                threshold: 10,
+                budget: Some(80),
+            },
+            pomotui_protocol::RewardMilestoneSummary {
+                id: 5,
+                name: "Day off".into(),
+                threshold: 50,
+                budget: None,
+            },
+        ];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Chain;
+
+        app.handle_key(InputKey::Char('R'));
+        assert_eq!(app.overlay, Overlay::RewardManager);
+        let mut terminal = Terminal::new(TestBackend::new(64, 20)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("#2"));
+        assert!(rendered.contains("10"));
+        assert!(rendered.contains("KFC"));
+        assert!(rendered.contains("80"));
+
+        app.language = Language::SimplifiedChinese;
+        let mut narrow = Terminal::new(TestBackend::new(48, 18)).expect("terminal");
+        narrow.draw(|frame| render(frame, &mut app)).expect("draw");
+        let rendered = narrow
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains('奖') && rendered.contains('励'));
+
+        app.handle_key(InputKey::Char('j'));
+        app.handle_key(InputKey::Char('e'));
+        assert_eq!(app.overlay, Overlay::UpdateReward);
+        app.input.clear();
+        for character in "60 | Full day off | 200".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::RewardUpdate {
+                id: 5,
+                name: "Full day off".into(),
+                threshold: 60,
+                budget: Some(200),
+            }))
+        );
+
+        app.overlay = Overlay::RewardManager;
+        app.handle_key(InputKey::Char('D'));
+        assert_eq!(app.overlay, Overlay::ConfirmRewardDelete);
+        assert_eq!(
+            app.handle_key(InputKey::Char('y')),
+            Some(Action::Command(pomotui_protocol::Command::RewardDelete {
+                id: 5
+            }))
+        );
+
+        app.overlay = Overlay::RewardManager;
+        app.handle_key(InputKey::Char('n'));
+        for character in "100 | PS5 | 3500".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::RewardCreate {
+                name: "PS5".into(),
+                threshold: 100,
+                budget: Some(3_500),
+            }))
         );
     }
 
