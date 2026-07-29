@@ -96,6 +96,7 @@ pub enum Overlay {
     ReviewFailureReflection,
     ConfirmReviewFailure,
     EditReflection,
+    EditChainTitle,
     CreateReward,
     ReviewFailureVoidTitle,
 }
@@ -127,6 +128,7 @@ pub struct App {
     pub view: View,
     pub overlay: Overlay,
     pub selected_task: usize,
+    pub chain_cursor: usize,
     pub history_cursor: usize,
     pub history_offset: usize,
     pub visual_anchor: Option<usize>,
@@ -169,6 +171,7 @@ impl App {
             view: View::Dashboard,
             overlay,
             selected_task: 0,
+            chain_cursor: 0,
             history_cursor: 0,
             history_offset: 0,
             visual_anchor: None,
@@ -209,6 +212,11 @@ impl App {
             self.overlay = Overlay::None;
         }
         self.snapshot = snapshot;
+        let link_count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.recent_chain_links.len());
+        self.chain_cursor = self.chain_cursor.min(link_count.saturating_sub(1));
     }
 
     pub fn key(&mut self, key: char) -> Option<Action> {
@@ -282,7 +290,10 @@ impl App {
             InputKey::Char('E') if matches!(self.view, View::Chain | View::ChainArchive) => {
                 self.edit_entry_id = self.snapshot.as_ref().and_then(|snapshot| {
                     if self.view == View::Chain {
-                        snapshot.recent_chain_links.first().map(|link| link.id)
+                        snapshot
+                            .recent_chain_links
+                            .get(self.chain_cursor)
+                            .map(|link| link.id)
                     } else {
                         snapshot
                             .recent_ended_chains
@@ -294,9 +305,23 @@ impl App {
                     self.begin_text_entry(Overlay::EditReflection);
                 }
             }
+            InputKey::Char('T') if self.view == View::Chain => {
+                self.edit_entry_id = self.snapshot.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .recent_chain_links
+                        .get(self.chain_cursor)
+                        .filter(|link| link.chain_entry_title.is_some())
+                        .map(|link| link.id)
+                });
+                if self.edit_entry_id.is_some() {
+                    self.begin_text_entry(Overlay::EditChainTitle);
+                }
+            }
             InputKey::Char('j') | InputKey::Down => {
                 if self.view == View::History {
                     self.scroll_history(true);
+                } else if self.view == View::Chain {
+                    self.move_chain_cursor(true);
                 } else {
                     self.move_task(true);
                 }
@@ -304,6 +329,8 @@ impl App {
             InputKey::Char('k') | InputKey::Up => {
                 if self.view == View::History {
                     self.scroll_history(false);
+                } else if self.view == View::Chain {
+                    self.move_chain_cursor(false);
                 } else {
                     self.move_task(false);
                 }
@@ -451,6 +478,7 @@ impl App {
             | Overlay::ReviewVoidTitle
             | Overlay::ReviewFailureReflection
             | Overlay::EditReflection
+            | Overlay::EditChainTitle
             | Overlay::CreateReward
             | Overlay::ReviewFailureVoidTitle => match key {
                 InputKey::Char(value) if !value.is_control() => {
@@ -637,6 +665,18 @@ impl App {
             .and_then(|snapshot| snapshot.tasks.get(self.selected_task))
     }
 
+    fn move_chain_cursor(&mut self, down: bool) {
+        let count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.recent_chain_links.len());
+        if down {
+            self.chain_cursor = (self.chain_cursor + 1).min(count.saturating_sub(1));
+        } else {
+            self.chain_cursor = self.chain_cursor.saturating_sub(1);
+        }
+    }
+
     fn select_current_task(&mut self) -> Option<Action> {
         let id = self.selected_task()?.id;
         if self
@@ -722,6 +762,11 @@ impl App {
                 id: self.edit_entry_id.take()?,
                 reflection: Some(title),
                 chain_entry_title: None,
+            },
+            Overlay::EditChainTitle => pomotui_protocol::Command::ChainEntryEdit {
+                id: self.edit_entry_id.take()?,
+                reflection: None,
+                chain_entry_title: Some(title),
             },
             Overlay::CreateReward => {
                 let Some((threshold, name)) = title.split_once(' ') else {
@@ -1102,7 +1147,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     header(frame, rows[0], app, colors);
     match app.view {
         View::Dashboard => dashboard(frame, rows[1], app, colors),
-        View::Chain => chain_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
+        View::Chain => chain_view(frame, rows[1], app, colors),
         View::ChainArchive => {
             chain_archive_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language);
         }
@@ -1265,13 +1310,9 @@ fn dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     }
 }
 
-fn chain_view(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    snapshot: Option<&Snapshot>,
-    colors: Colors,
-    language: Language,
-) {
+fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let language = app.language;
+    let snapshot = app.snapshot.as_ref();
     let Some(snapshot) = snapshot else {
         frame.render_widget(
             Paragraph::new(text(
@@ -1305,6 +1346,12 @@ fn chain_view(
             )
         }),
         Line::from(""),
+        Line::from(Span::styled(
+            format!("ROOT #{}", snapshot.action_chain.id),
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
     ];
     if let Some(reward) = &snapshot.next_reward {
         lines.push(Line::from(format!(
@@ -1325,14 +1372,46 @@ fn chain_view(
             "完成并复盘一次专注时段以添加第一个节点。",
         )));
     } else {
-        lines.extend(snapshot.recent_chain_links.iter().map(|link| {
-            Line::from(format!(
-                "{}  {}  {}",
-                link.task_title,
-                chain_duration(link.actual_seconds),
-                link.reflection.as_deref().unwrap_or("")
-            ))
-        }));
+        for (index, link) in snapshot.recent_chain_links.iter().enumerate() {
+            let selected = index == app.chain_cursor;
+            let connector = if index + 1 == snapshot.recent_chain_links.len() {
+                "└─"
+            } else {
+                "├─"
+            };
+            let title = link
+                .chain_entry_title
+                .as_deref()
+                .unwrap_or(&link.task_title);
+            let marker = if selected { "›" } else { " " };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{marker} {connector} #{}  {}  {}",
+                    link.id,
+                    title,
+                    chain_duration(link.actual_seconds)
+                ),
+                if selected {
+                    Style::default()
+                        .fg(colors.background)
+                        .bg(colors.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.text)
+                },
+            )));
+            lines.push(Line::from(format!(
+                "      {}: {}",
+                text(language, "Reflection", "复盘"),
+                link.reflection.as_deref().unwrap_or("—")
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(text(
+            language,
+            "j/k select · E edit Reflection · T edit Void title",
+            "j/k 选择 · E 编辑复盘 · T 编辑 Void 标题",
+        )));
     }
     frame.render_widget(
         Paragraph::new(lines).block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
@@ -2459,6 +2538,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::ReviewFailureReflection
         | Overlay::ConfirmReviewFailure
         | Overlay::EditReflection
+        | Overlay::EditChainTitle
         | Overlay::CreateReward
         | Overlay::ReviewFailureVoidTitle => 7.min(area.height.saturating_sub(2)),
         Overlay::None => return,
@@ -2479,6 +2559,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::ReviewVoidTitle
         | Overlay::ReviewFailureReflection
         | Overlay::EditReflection
+        | Overlay::EditChainTitle
         | Overlay::CreateReward
         | Overlay::ReviewFailureVoidTitle => {
             text_entry_overlay(frame, modal, app, colors);
@@ -2835,6 +2916,10 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         Overlay::EditReflection => (
             text(app.language, "EDIT REFLECTION", "编辑复盘"),
             text(app.language, "Reflection", "复盘"),
+        ),
+        Overlay::EditChainTitle => (
+            text(app.language, "EDIT CHAIN ENTRY TITLE", "编辑行动链条目标题"),
+            text(app.language, "Chain Entry Title", "行动链条目标题"),
         ),
         Overlay::CreateReward => (
             text(app.language, "CREATE REWARD", "新建奖励"),
@@ -3300,6 +3385,117 @@ mod tests {
         assert_eq!(chain_duration(3_000), "50m");
         assert_eq!(chain_duration(1_052), "17m 32s");
         assert_eq!(chain_duration(32), "32s");
+    }
+
+    #[test]
+    fn current_chain_is_connected_selectable_and_edits_the_selected_reflection() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.action_chain = pomotui_protocol::ActionChainSummary { id: 7, length: 2 };
+        state.recent_chain_links = vec![
+            pomotui_protocol::ChainLinkSummary {
+                id: 11,
+                task_title: "Ship Pomotui".into(),
+                actual_seconds: 3_000,
+                reflection: Some("First reflection".into()),
+                chain_entry_title: None,
+            },
+            pomotui_protocol::ChainLinkSummary {
+                id: 12,
+                task_title: "Void".into(),
+                actual_seconds: 1_052,
+                reflection: Some("Second reflection".into()),
+                chain_entry_title: Some("Investigate chain UI".into()),
+            },
+        ];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Chain;
+        let mut terminal = Terminal::new(TestBackend::new(76, 24)).expect("terminal");
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("ROOT #7"));
+        assert!(rendered.contains("└─"));
+        assert!(rendered.contains("#11"));
+        assert!(rendered.contains("Investigate chain UI"));
+        assert!(rendered.contains("17m 32s"));
+
+        app.language = Language::SimplifiedChinese;
+        let mut narrow = Terminal::new(TestBackend::new(48, 24)).expect("terminal");
+        narrow.draw(|frame| render(frame, &mut app)).expect("draw");
+        let rendered = narrow
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("ROOT #7"));
+        assert!(rendered.contains('复') && rendered.contains('盘'));
+
+        app.handle_key(InputKey::Char('j'));
+        app.handle_key(InputKey::Char('E'));
+        for character in "Revised second reflection".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ChainEntryEdit {
+                id: 12,
+                reflection: Some("Revised second reflection".into()),
+                chain_entry_title: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn only_a_selected_void_link_can_edit_its_chain_entry_title() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_chain_links = vec![
+            pomotui_protocol::ChainLinkSummary {
+                id: 11,
+                task_title: "Ship Pomotui".into(),
+                actual_seconds: 3_000,
+                reflection: None,
+                chain_entry_title: None,
+            },
+            pomotui_protocol::ChainLinkSummary {
+                id: 12,
+                task_title: "Void".into(),
+                actual_seconds: 900,
+                reflection: None,
+                chain_entry_title: Some("Old title".into()),
+            },
+        ];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Chain;
+
+        app.handle_key(InputKey::Char('T'));
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.handle_key(InputKey::Char('j'));
+        app.handle_key(InputKey::Char('T'));
+        assert_eq!(app.overlay, Overlay::EditChainTitle);
+        for character in "Corrected title".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ChainEntryEdit {
+                id: 12,
+                reflection: None,
+                chain_entry_title: Some("Corrected title".into()),
+            }))
+        );
     }
 
     #[test]

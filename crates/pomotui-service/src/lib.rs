@@ -429,8 +429,6 @@ impl Service {
             recent_chain_links: self
                 .chain_links
                 .iter()
-                .rev()
-                .take(5)
                 .map(|link| ChainLinkSummary {
                     id: link.id,
                     task_title: link.task_title.clone(),
@@ -2190,6 +2188,28 @@ mod tests {
                 error: ProtocolError::Rejected { .. }
             }
         ));
+    }
+
+    #[test]
+    fn snapshot_exposes_the_complete_current_chain_in_chain_order() {
+        let mut service = Service::new();
+        service.chain_links = (1..=6)
+            .map(|id| ChainLinkState {
+                id,
+                session_id: id,
+                task_id: 1,
+                task_title: format!("Step {id}"),
+                actual_seconds: id * 60,
+                reflection: None,
+                chain_entry_title: None,
+            })
+            .collect();
+        service.current_chain_length = 6;
+
+        let links = service.snapshot().recent_chain_links;
+        assert_eq!(links.len(), 6);
+        assert_eq!(links[0].id, 1);
+        assert_eq!(links[5].id, 6);
     }
 
     #[test]

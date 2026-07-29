@@ -6,14 +6,16 @@
 
 **Status:** ready-for-agent
 
-- [ ] The Timer Service snapshot exposes every current Chain Link in stable chain order instead of truncating it to five.
-- [ ] The Chain page visibly connects the root and Chain Links as one sequence.
-- [ ] Every Chain Link shows its stable ID, effective title, exact actual duration, and Reflection.
-- [ ] `j`/`k` (and arrow keys) move a visible Chain Link selection without changing Task selection.
-- [ ] `E` edits the selected Chain Link's Reflection rather than always editing the newest link.
-- [ ] A selected Void Chain Link offers an edit action for its Chain Entry Title; non-Void titles remain immutable.
-- [ ] Empty, populated, narrow, English, and Simplified Chinese Ratatui rendering is covered.
+- [x] The Timer Service snapshot exposes every current Chain Link in stable chain order instead of truncating it to five.
+- [x] The Chain page visibly connects the root and Chain Links as one sequence.
+- [x] Every Chain Link shows its stable ID, effective title, exact actual duration, and Reflection.
+- [x] `j`/`k` (and arrow keys) move a visible Chain Link selection without changing Task selection.
+- [x] `E` edits the selected Chain Link's Reflection rather than always editing the newest link.
+- [x] A selected Void Chain Link offers an edit action for its Chain Entry Title; non-Void titles remain immutable.
+- [x] Empty, populated, narrow, English, and Simplified Chinese Ratatui rendering is covered.
 
 ## Comments
 
 The current implementation displays at most five links as unconnected text and binds `E` to the newest link. That makes the durable chain and its existing edit capability effectively undiscoverable.
+
+Resolved with a complete root-to-tail snapshot and a connected, selectable Chain page. `E` edits the selected Reflection and `T` is available only for the selected Void link's Chain Entry Title.

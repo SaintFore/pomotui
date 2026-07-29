@@ -67,10 +67,13 @@ terminals. Its primary controls are:
 | `Enter` | Start Focus with the selected Task |
 | `Space` | Start, pause, or resume the Current Session |
 | `X` / `K` | Choose how to stop / skip the Current Session |
-| `Enter` on Chain | Review a Pending Review as successful |
-| `F` / `V` on Chain | Review as failed / review an unattributed success with Void |
+| `S` / `Enter` in Pending Review | Review as successful, using the existing or selected Task (`Void` asks for a Chain Entry Title) |
+| `F` in Pending Review | Review as failed |
 | `p` | Reopen the Pending Review dialog |
-| `E` on Chain or Chain Archive | Edit the latest Reflection |
+| `j` / `k` on Chain | Select a Chain Link |
+| `E` on Chain | Edit the selected Chain Link's Reflection |
+| `T` on Chain | Edit the selected Void Chain Link's Chain Entry Title |
+| `E` on Chain Archive | Edit the latest Chain Break Reflection |
 | `R` / `C` on Chain | Create / claim a Reward Milestone |
 | `n` / `r` | Create / rename a Task |
 | `c` / `D` | Complete or reopen / delete a Task |
