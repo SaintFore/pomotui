@@ -389,22 +389,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
             {
-                let unattributed = self
-                    .snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.pending_review.as_ref())
-                    .is_some_and(|review| review.task_id.is_none());
-                let command = if unattributed {
-                    pomotui_protocol::Command::ReviewSuccessAssign {
-                        task_id: Some(self.selected_task()?.id),
-                        use_void: false,
-                        chain_entry_title: None,
-                        reflection: None,
-                    }
-                } else {
-                    pomotui_protocol::Command::ReviewSuccess { reflection: None }
-                };
-                return Some(self.emit(command));
+                return self.submit_successful_review();
             }
             InputKey::Enter => return self.select_current_task(),
             _ => {}
@@ -437,26 +422,7 @@ impl App {
                 _ => None,
             },
             Overlay::PendingReview => match key {
-                InputKey::Char('s' | 'S') | InputKey::Enter => {
-                    let review = self
-                        .snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.pending_review.as_ref())?;
-                    let command = if review.task_id.is_some() {
-                        pomotui_protocol::Command::ReviewSuccess { reflection: None }
-                    } else if self.selected_task().is_some_and(|task| task.id == u64::MAX) {
-                        self.begin_text_entry(Overlay::ReviewVoidTitle);
-                        return None;
-                    } else {
-                        pomotui_protocol::Command::ReviewSuccessAssign {
-                            task_id: Some(self.selected_task()?.id),
-                            use_void: false,
-                            chain_entry_title: None,
-                            reflection: None,
-                        }
-                    };
-                    Some(self.emit(command))
-                }
+                InputKey::Char('s' | 'S') | InputKey::Enter => self.submit_successful_review(),
                 InputKey::Char('f' | 'F') => {
                     self.begin_text_entry(Overlay::ReviewFailureReflection);
                     None
@@ -729,6 +695,32 @@ impl App {
         self.snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.tasks.get(self.selected_task))
+    }
+
+    fn submit_successful_review(&mut self) -> Option<Action> {
+        let review = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.pending_review.as_ref())?;
+        let already_attributed = review.task_id.is_some();
+        let use_void = review.is_void
+            || (!already_attributed
+                && self.selected_task().is_some_and(|task| task.id == u64::MAX));
+        if use_void {
+            self.begin_text_entry(Overlay::ReviewVoidTitle);
+            return None;
+        }
+        let command = if already_attributed {
+            pomotui_protocol::Command::ReviewSuccess { reflection: None }
+        } else {
+            pomotui_protocol::Command::ReviewSuccessAssign {
+                task_id: Some(self.selected_task()?.id),
+                use_void: false,
+                chain_entry_title: None,
+                reflection: None,
+            }
+        };
+        Some(self.emit(command))
     }
 
     fn move_chain_cursor(&mut self, down: bool) {
@@ -3756,6 +3748,7 @@ mod tests {
             actual_seconds: 1_500,
             task_id: Some(1),
             task_title: Some("Ship Pomotui".into()),
+            is_void: false,
         });
         state.current_chain_rewards = vec![pomotui_protocol::RewardUnlockSummary {
             id: 4,
@@ -3901,6 +3894,7 @@ mod tests {
             actual_seconds: 1_052,
             task_id: Some(1),
             task_title: Some("Investigate review UX".into()),
+            is_void: false,
         });
         let mut app = App::new(Some(state), Theme::VermilionPaperDark);
         let mut terminal = Terminal::new(TestBackend::new(72, 20)).expect("terminal");
@@ -3932,6 +3926,7 @@ mod tests {
             actual_seconds: 300,
             task_id: None,
             task_title: None,
+            is_void: false,
         });
         state.tasks.push(pomotui_protocol::TaskSummary {
             id: u64::MAX,
@@ -3962,6 +3957,42 @@ mod tests {
     }
 
     #[test]
+    fn successful_review_prompts_for_title_when_session_is_already_attributed_to_void() {
+        let mut state = snapshot("pending", SessionKind::ShortBreak);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 43,
+            actual_seconds: 5,
+            task_id: Some(u64::MAX),
+            task_title: Some("Void".into()),
+            is_void: true,
+        });
+        state.tasks.push(pomotui_protocol::TaskSummary {
+            id: u64::MAX,
+            title: "Void".into(),
+            completed: false,
+            focus_seconds: 5,
+        });
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+
+        assert_eq!(app.handle_key(InputKey::Char('s')), None);
+        assert_eq!(app.overlay, Overlay::ReviewVoidTitle);
+        for character in "Investigate failed shortcut".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(
+                pomotui_protocol::Command::ReviewSuccessAssign {
+                    task_id: None,
+                    use_void: true,
+                    chain_entry_title: Some("Investigate failed shortcut".into()),
+                    reflection: None,
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn dismissed_review_stays_closed_until_reopened_or_replaced() {
         let mut state = snapshot("pending", SessionKind::ShortBreak);
         state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
@@ -3969,6 +4000,7 @@ mod tests {
             actual_seconds: 300,
             task_id: None,
             task_title: None,
+            is_void: false,
         });
         let mut app = App::new(Some(state.clone()), Theme::VermilionPaperDark);
 
@@ -3989,6 +4021,7 @@ mod tests {
             actual_seconds: 32,
             task_id: None,
             task_title: None,
+            is_void: false,
         });
         app.replace_snapshot(Some(state));
         assert_eq!(app.overlay, Overlay::PendingReview);

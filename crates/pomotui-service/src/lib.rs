@@ -425,6 +425,7 @@ impl Service {
                     actual_seconds: review.actual_seconds,
                     task_id: review.task_id,
                     task_title: review.task_title.clone(),
+                    is_void: review.task_id == self.void_task_id,
                 }),
             recent_chain_links: self
                 .chain_links
@@ -2202,6 +2203,42 @@ mod tests {
                 error: ProtocolError::Rejected { .. }
             }
         ));
+    }
+
+    #[test]
+    fn pending_review_identifies_an_existing_void_attribution() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("first-start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: None,
+            },
+        ));
+        service.handle(request(Some("first-stop"), Command::StopReview));
+        service.handle(request(
+            Some("first-review"),
+            Command::ReviewSuccessAssign {
+                task_id: None,
+                use_void: true,
+                chain_entry_title: Some("Create Void identity".into()),
+                reflection: None,
+            },
+        ));
+        let void_id = service.void_task_id.expect("Void identity");
+
+        service.handle(request(
+            Some("second-start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(void_id),
+            },
+        ));
+        service.handle(request(Some("second-stop"), Command::StopReview));
+
+        let review = service.snapshot().pending_review.expect("Pending Review");
+        assert_eq!(review.task_id, Some(void_id));
+        assert!(review.is_void);
     }
 
     #[test]

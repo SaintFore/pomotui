@@ -185,6 +185,8 @@ pub struct PendingReviewSummary {
     pub actual_seconds: u64,
     pub task_id: Option<u64>,
     pub task_title: Option<String>,
+    #[serde(default)]
+    pub is_void: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

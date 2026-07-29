@@ -344,6 +344,7 @@ mod tests {
             actual_seconds: 1_500,
             task_id: Some(1),
             task_title: Some("Write tests".into()),
+            is_void: false,
         });
 
         let rendered = render(&Response::Snapshot { snapshot }, false, false).expect("status");
