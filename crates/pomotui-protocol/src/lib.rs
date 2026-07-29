@@ -202,10 +202,16 @@ pub struct ChainLinkSummary {
 pub struct EndedChainSummary {
     pub id: u64,
     pub length: u64,
+    #[serde(default)]
+    pub links: Vec<ChainLinkSummary>,
     pub break_id: u64,
     pub break_task_title: String,
     pub break_actual_seconds: u64,
     pub break_reflection: String,
+    #[serde(default)]
+    pub break_chain_entry_title: Option<String>,
+    #[serde(default)]
+    pub rewards: Vec<RewardUnlockSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

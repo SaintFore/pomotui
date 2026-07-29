@@ -446,10 +446,34 @@ impl Service {
                 .map(|chain| EndedChainSummary {
                     id: chain.id,
                     length: u64::try_from(chain.links.len()).unwrap_or(u64::MAX),
+                    links: chain
+                        .links
+                        .iter()
+                        .map(|link| ChainLinkSummary {
+                            id: link.id,
+                            task_title: link.task_title.clone(),
+                            actual_seconds: link.actual_seconds,
+                            reflection: link.reflection.clone(),
+                            chain_entry_title: link.chain_entry_title.clone(),
+                        })
+                        .collect(),
                     break_id: chain.chain_break.id,
                     break_task_title: chain.chain_break.task_title.clone(),
                     break_actual_seconds: chain.chain_break.actual_seconds,
                     break_reflection: chain.chain_break.reflection.clone(),
+                    break_chain_entry_title: chain.chain_break.chain_entry_title.clone(),
+                    rewards: self
+                        .reward_unlocks
+                        .iter()
+                        .filter(|reward| reward.chain_id == chain.id)
+                        .map(|reward| RewardUnlockSummary {
+                            id: reward.id,
+                            name: reward.name.clone(),
+                            threshold: reward.threshold,
+                            budget: reward.budget,
+                            state: reward.state.clone(),
+                        })
+                        .collect(),
                 })
                 .collect(),
             next_reward: self
@@ -2517,6 +2541,70 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(states, ["claimed", "unavailable"]);
         assert!(service.snapshot().current_chain_rewards.is_empty());
+    }
+
+    #[test]
+    fn snapshot_exposes_complete_recent_ended_chain_details_for_frontends() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Build archive details".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start-success"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-success"), Command::StopReview));
+        service.handle(request(
+            Some("success"),
+            Command::ReviewSuccess {
+                reflection: Some("Completed the data projection".into()),
+            },
+        ));
+        service.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Fancy coffee".into(),
+                threshold: 1,
+                budget: Some(35),
+            },
+        ));
+        service.handle(request(
+            Some("start-failure"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-failure"), Command::StopReview));
+        service.handle(request(
+            Some("failure"),
+            Command::ReviewFailure {
+                reflection: "The next slice was unclear".into(),
+                task_id: None,
+                use_void: false,
+                chain_entry_title: None,
+            },
+        ));
+
+        let snapshot = service.snapshot();
+        let ended = &snapshot.recent_ended_chains[0];
+        assert_eq!(ended.links.len(), 1);
+        assert_eq!(ended.links[0].task_title, "Build archive details");
+        assert_eq!(
+            ended.links[0].reflection.as_deref(),
+            Some("Completed the data projection")
+        );
+        assert_eq!(ended.break_chain_entry_title, None);
+        assert_eq!(ended.rewards.len(), 1);
+        assert_eq!(ended.rewards[0].name, "Fancy coffee");
+        assert_eq!(ended.rewards[0].budget, Some(35));
+        assert_eq!(ended.rewards[0].state, "unavailable");
     }
 
     #[test]

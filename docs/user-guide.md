@@ -81,9 +81,13 @@ good = "#6591AD"
 border = "#564E43"
 ```
 
-Use arrows or `j/k` for Tasks and arrows or `h/l` for Dashboard, Today, Review,
-and History. Use `gg`/`G` for the first/last item, `u`/`d` to move by a page,
-and `v` for contiguous visual History selection. In History, `Space` or
+Use arrows or `h/l` to move through Dashboard, Chain, Chain Archive, Rewards,
+Today, Review, and History. On Chain Archive, `j/k` selects an Ended Chain and
+shows its complete links, Chain Break, and reward history. On Rewards, `j/k`
+selects a Reward Milestone, `n` creates one, `e` updates it, uppercase `D`
+deletes it after confirmation, and uppercase `C` claims the first unlocked
+reward. Use `gg`/`G` for the first/last item, `u`/`d` to move by a page, and `v`
+for contiguous visual History selection. In History, `Space` or
 `Alt+Space` toggles individual records so unrelated entries can be selected
 together, and `D` deletes the marked records after confirmation. On the
 Dashboard, press `Enter` to bind the selected Task to the Current Session and

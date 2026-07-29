@@ -74,6 +74,7 @@ pub enum View {
     Dashboard,
     Chain,
     ChainArchive,
+    Rewards,
     Today,
     Review,
     History,
@@ -132,6 +133,7 @@ pub struct App {
     pub overlay: Overlay,
     pub selected_task: usize,
     pub chain_cursor: usize,
+    pub archive_cursor: usize,
     pub reward_cursor: usize,
     pub history_cursor: usize,
     pub history_offset: usize,
@@ -177,6 +179,7 @@ impl App {
             overlay,
             selected_task: 0,
             chain_cursor: 0,
+            archive_cursor: 0,
             reward_cursor: 0,
             history_cursor: 0,
             history_offset: 0,
@@ -224,6 +227,11 @@ impl App {
             .as_ref()
             .map_or(0, |snapshot| snapshot.recent_chain_links.len());
         self.chain_cursor = self.chain_cursor.min(link_count.saturating_sub(1));
+        let archive_count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.recent_ended_chains.len());
+        self.archive_cursor = self.archive_cursor.min(archive_count.saturating_sub(1));
         let reward_count = self
             .snapshot
             .as_ref()
@@ -285,9 +293,9 @@ impl App {
                 self.begin_text_entry(Overlay::ReviewFailureReflection);
             }
             InputKey::Char('R') if self.view == View::Chain => {
-                self.overlay = Overlay::RewardManager;
+                self.view = View::Rewards;
             }
-            InputKey::Char('C') if self.view == View::Chain => {
+            InputKey::Char('C') if self.view == View::Rewards => {
                 let unlock_id = self.snapshot.as_ref().and_then(|snapshot| {
                     snapshot
                         .current_chain_rewards
@@ -297,6 +305,16 @@ impl App {
                 });
                 if let Some(unlock_id) = unlock_id {
                     return Some(self.emit(pomotui_protocol::Command::RewardClaim { unlock_id }));
+                }
+            }
+            InputKey::Char('e') if self.view == View::Rewards => {
+                self.edit_reward_id = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.reward_milestones.get(self.reward_cursor))
+                    .map(|reward| reward.id);
+                if self.edit_reward_id.is_some() {
+                    self.begin_text_entry(Overlay::UpdateReward);
                 }
             }
             InputKey::Char('E') if matches!(self.view, View::Chain | View::ChainArchive) => {
@@ -309,7 +327,7 @@ impl App {
                     } else {
                         snapshot
                             .recent_ended_chains
-                            .first()
+                            .get(self.archive_cursor)
                             .map(|chain| chain.break_id)
                     }
                 });
@@ -334,6 +352,18 @@ impl App {
                     self.scroll_history(true);
                 } else if self.view == View::Chain {
                     self.move_chain_cursor(true);
+                } else if self.view == View::ChainArchive {
+                    let count = self
+                        .snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.recent_ended_chains.len());
+                    self.archive_cursor = (self.archive_cursor + 1).min(count.saturating_sub(1));
+                } else if self.view == View::Rewards {
+                    let count = self
+                        .snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.reward_milestones.len());
+                    self.reward_cursor = (self.reward_cursor + 1).min(count.saturating_sub(1));
                 } else {
                     self.move_task(true);
                 }
@@ -343,6 +373,10 @@ impl App {
                     self.scroll_history(false);
                 } else if self.view == View::Chain {
                     self.move_chain_cursor(false);
+                } else if self.view == View::ChainArchive {
+                    self.archive_cursor = self.archive_cursor.saturating_sub(1);
+                } else if self.view == View::Rewards {
+                    self.reward_cursor = self.reward_cursor.saturating_sub(1);
                 } else {
                     self.move_task(false);
                 }
@@ -360,6 +394,9 @@ impl App {
                 self.overlay = Overlay::PendingReview;
             }
             InputKey::Char('s') => self.overlay = Overlay::Settings,
+            InputKey::Char('n') if self.view == View::Rewards => {
+                self.begin_text_entry(Overlay::CreateReward);
+            }
             InputKey::Char('n') => self.begin_text_entry(Overlay::CreateTask),
             InputKey::Char('r') if self.selected_task().is_some() => {
                 self.begin_text_entry(Overlay::RenameTask);
@@ -368,6 +405,12 @@ impl App {
             InputKey::Char('D') => {
                 if self.view == View::History && !self.history_ids_for_action().is_empty() {
                     self.overlay = Overlay::ConfirmHistoryDelete;
+                } else if self.view == View::Rewards
+                    && self.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.reward_milestones.get(self.reward_cursor).is_some()
+                    })
+                {
+                    self.overlay = Overlay::ConfirmRewardDelete;
                 } else if self.selected_task().is_some() {
                     self.overlay = Overlay::ConfirmDelete;
                 }
@@ -1165,7 +1208,8 @@ const fn next_view(view: View) -> View {
     match view {
         View::Dashboard => View::Chain,
         View::Chain => View::ChainArchive,
-        View::ChainArchive => View::Today,
+        View::ChainArchive => View::Rewards,
+        View::Rewards => View::Today,
         View::Today => View::Review,
         View::Review => View::History,
         View::History => View::Dashboard,
@@ -1177,12 +1221,14 @@ const fn previous_view(view: View) -> View {
         View::Dashboard => View::History,
         View::History => View::Review,
         View::Review => View::Today,
-        View::Today => View::ChainArchive,
+        View::Today => View::Rewards,
+        View::Rewards => View::ChainArchive,
         View::ChainArchive => View::Chain,
         View::Chain => View::Dashboard,
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     app.narrow = area.width < 74;
@@ -1225,7 +1271,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         View::Dashboard => dashboard(frame, rows[1], app, colors),
         View::Chain => chain_view(frame, rows[1], app, colors),
         View::ChainArchive => {
-            chain_archive_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language);
+            chain_archive_view(frame, rows[1], app, colors);
+        }
+        View::Rewards => {
+            rewards_view(frame, rows[1], app, colors);
         }
         View::Today => today_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
         View::Review => review_view(frame, rows[1], app.snapshot.as_ref(), colors, app.language),
@@ -1441,10 +1490,9 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         lines.push(Line::from(format!("{}  [{}]", reward.name, reward.state)));
     }
     lines.push(Line::from(format!(
-        "R {} ({}) · C {}",
-        text(language, "manage rewards", "管理奖励"),
+        "R {} ({})",
+        text(language, "open rewards", "打开奖励页"),
         snapshot.reward_milestones.len(),
-        text(language, "claim unlocked", "领取已解锁奖励")
     )));
     lines.push(Line::from(""));
     if snapshot.recent_chain_links.is_empty() {
@@ -1524,13 +1572,10 @@ fn chain_link_lines(
         .collect()
 }
 
-fn chain_archive_view(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    snapshot: Option<&Snapshot>,
-    colors: Colors,
-    language: Language,
-) {
+#[allow(clippy::too_many_lines)]
+fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let snapshot = app.snapshot.as_ref();
+    let language = app.language;
     let lines = snapshot.map_or_else(
         || {
             vec![Line::from(text(
@@ -1547,24 +1592,229 @@ fn chain_archive_view(
                     "暂无已结束行动链",
                 ))];
             }
-            snapshot
-                .recent_ended_chains
-                .iter()
-                .map(|chain| {
-                    Line::from(format!(
-                        "{} {}  ·  {}  ·  {}  ·  {}",
+            let mut lines = vec![Line::from(Span::styled(
+                text(language, "ENDED CHAINS", "已结束行动链"),
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+            for (index, chain) in snapshot.recent_ended_chains.iter().enumerate() {
+                let marker = if index == app.archive_cursor {
+                    "›"
+                } else {
+                    " "
+                };
+                let title = chain
+                    .break_chain_entry_title
+                    .as_deref()
+                    .unwrap_or(&chain.break_task_title);
+                let style = if index == app.archive_cursor {
+                    Style::default()
+                        .fg(colors.background)
+                        .bg(colors.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.text)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{marker} {} {} · {title} · {}",
                         text(language, "Length", "长度"),
                         chain.length,
-                        chain.break_task_title,
-                        chain_duration(chain.break_actual_seconds),
-                        chain.break_reflection
-                    ))
-                })
-                .collect()
+                        chain_duration(chain.break_actual_seconds)
+                    ),
+                    style,
+                )));
+            }
+            let Some(chain) = snapshot.recent_ended_chains.get(app.archive_cursor) else {
+                return lines;
+            };
+            lines.extend([
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!(
+                        "{} · {} {}",
+                        text(language, "SELECTED CHAIN", "所选行动链"),
+                        text(language, "Length", "长度"),
+                        chain.length
+                    ),
+                    Style::default()
+                        .fg(colors.gold)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            ]);
+            for link in &chain.links {
+                let title = link
+                    .chain_entry_title
+                    .as_deref()
+                    .unwrap_or(&link.task_title);
+                lines.push(Line::from(format!(
+                    "├─ {title} · {}",
+                    chain_duration(link.actual_seconds)
+                )));
+                lines.push(Line::from(format!(
+                    "│  {}: {}",
+                    text(language, "Reflection", "复盘"),
+                    link.reflection.as_deref().unwrap_or("—")
+                )));
+            }
+            let break_title = chain
+                .break_chain_entry_title
+                .as_deref()
+                .unwrap_or(&chain.break_task_title);
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "└─ {} · {break_title} · {}",
+                    text(language, "CHAIN BREAK", "行动链中断"),
+                    chain_duration(chain.break_actual_seconds)
+                ),
+                Style::default()
+                    .fg(colors.gold)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(format!(
+                "   {}: {}",
+                text(language, "Reflection", "复盘"),
+                chain.break_reflection
+            )));
+            lines.extend([
+                Line::from(""),
+                Line::from(Span::styled(
+                    text(language, "REWARD HISTORY", "奖励历史"),
+                    Style::default()
+                        .fg(colors.gold)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            ]);
+            if chain.rewards.is_empty() {
+                lines.push(Line::from(text(
+                    language,
+                    "No rewards unlocked.",
+                    "没有已解锁奖励。",
+                )));
+            } else {
+                for reward in &chain.rewards {
+                    let budget = reward.budget.map_or_else(
+                        || text(language, "no budget", "无预算").to_owned(),
+                        |budget| format!("¥{budget}"),
+                    );
+                    lines.push(Line::from(format!(
+                        "{} · {} {} · {budget} · {}",
+                        reward.name,
+                        text(language, "Length", "长度"),
+                        reward.threshold,
+                        reward.state,
+                    )));
+                }
+            }
+            lines
         },
     );
     frame.render_widget(
         Paragraph::new(lines).block(panel(text(language, "CHAIN ARCHIVE", "行动链归档"), colors)),
+        area,
+    );
+}
+
+fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let language = app.language;
+    let Some(snapshot) = app.snapshot.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(text(
+                language,
+                "Waiting for Timer Service",
+                "正在等待计时服务",
+            ))
+            .block(panel(text(language, "REWARDS", "奖励"), colors)),
+            area,
+        );
+        return;
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        text(language, "REWARD MILESTONES", "奖励里程碑"),
+        Style::default()
+            .fg(colors.gold)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if snapshot.reward_milestones.is_empty() {
+        lines.push(Line::from(text(
+            language,
+            "No Reward Milestones configured.",
+            "尚未设置奖励里程碑。",
+        )));
+    } else {
+        for (index, reward) in snapshot.reward_milestones.iter().enumerate() {
+            let marker = if index == app.reward_cursor {
+                "›"
+            } else {
+                " "
+            };
+            let budget = reward.budget.map_or_else(
+                || text(language, "no budget", "无预算").to_owned(),
+                |budget| format!("¥{budget}"),
+            );
+            let style = if index == app.reward_cursor {
+                Style::default()
+                    .fg(colors.background)
+                    .bg(colors.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors.text)
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{marker} {} {} · {} · {budget}",
+                    text(language, "Length", "长度"),
+                    reward.threshold,
+                    reward.name,
+                ),
+                style,
+            )));
+        }
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(text(
+            language,
+            "n create · e update · D delete",
+            "n 新建 · e 更新 · D 删除",
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "EARNED REWARDS", "已获得奖励"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    if snapshot.current_chain_rewards.is_empty() {
+        lines.push(Line::from(text(
+            language,
+            "No rewards earned in the current Action Chain.",
+            "当前行动链尚未获得奖励。",
+        )));
+    } else {
+        for reward in &snapshot.current_chain_rewards {
+            let budget = reward.budget.map_or_else(
+                || text(language, "no budget", "无预算").to_owned(),
+                |budget| format!("¥{budget}"),
+            );
+            lines.push(Line::from(format!(
+                "{} · {} {} · {budget} · {}",
+                reward.name,
+                text(language, "Length", "长度"),
+                reward.threshold,
+                reward.state,
+            )));
+        }
+        lines.push(Line::from(text(
+            language,
+            "C claim the first unlocked reward",
+            "C 领取第一个已解锁奖励",
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(text(language, "REWARDS", "奖励"), colors)),
         area,
     );
 }
@@ -2598,6 +2848,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         View::Dashboard => text(app.language, "DASHBOARD", "仪表盘"),
         View::Chain => text(app.language, "CHAIN", "行动链"),
         View::ChainArchive => text(app.language, "CHAIN ARCHIVE", "行动链归档"),
+        View::Rewards => text(app.language, "REWARDS", "奖励"),
         View::Today => text(app.language, "TODAY", "今日"),
         View::Review => text(app.language, "REVIEW", "复盘"),
         View::History => text(app.language, "HISTORY", "历史"),
@@ -3582,6 +3833,26 @@ mod tests {
         }
     }
 
+    fn ended_chain(id: u64, title: &str, break_id: u64) -> pomotui_protocol::EndedChainSummary {
+        pomotui_protocol::EndedChainSummary {
+            id,
+            length: 1,
+            links: vec![pomotui_protocol::ChainLinkSummary {
+                id: break_id - 1,
+                task_title: title.into(),
+                actual_seconds: 1_052,
+                reflection: Some("Useful progress".into()),
+                chain_entry_title: None,
+            }],
+            break_id,
+            break_task_title: title.into(),
+            break_actual_seconds: 32,
+            break_reflection: "Stopped on an unclear next step".into(),
+            break_chain_entry_title: None,
+            rewards: vec![],
+        }
+    }
+
     #[test]
     fn wide_and_narrow_dashboard_render_all_session_states_and_themes() {
         for (width, height) in [(100, 32), (60, 24)] {
@@ -3766,13 +4037,14 @@ mod tests {
                 reflection: None
             }))
         );
+        app.handle_key(InputKey::Char('R'));
+        assert_eq!(app.view, View::Rewards);
         assert_eq!(
             app.handle_key(InputKey::Char('C')),
             Some(Action::Command(pomotui_protocol::Command::RewardClaim {
                 unlock_id: 4
             }))
         );
-        app.handle_key(InputKey::Char('R'));
         app.handle_key(InputKey::Char('n'));
         for character in "10 KFC".chars() {
             app.handle_key(InputKey::Char(character));
@@ -3812,10 +4084,9 @@ mod tests {
         ];
         let mut app = App::new(Some(state), Theme::VermilionPaperDark);
         app.overlay = Overlay::None;
-        app.view = View::Chain;
+        app.view = View::Rewards;
 
-        app.handle_key(InputKey::Char('R'));
-        assert_eq!(app.overlay, Overlay::RewardManager);
+        assert_eq!(app.overlay, Overlay::None);
         let mut terminal = Terminal::new(TestBackend::new(64, 20)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut app))
@@ -3827,7 +4098,6 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("#2"));
         assert!(rendered.contains("10"));
         assert!(rendered.contains("KFC"));
         assert!(rendered.contains("80"));
@@ -3861,7 +4131,7 @@ mod tests {
             }))
         );
 
-        app.overlay = Overlay::RewardManager;
+        app.overlay = Overlay::None;
         app.handle_key(InputKey::Char('D'));
         assert_eq!(app.overlay, Overlay::ConfirmRewardDelete);
         assert_eq!(
@@ -3871,7 +4141,7 @@ mod tests {
             }))
         );
 
-        app.overlay = Overlay::RewardManager;
+        app.overlay = Overlay::None;
         app.handle_key(InputKey::Char('n'));
         for character in "100 | PS5 | 3500".chars() {
             app.handle_key(InputKey::Char(character));
@@ -4089,6 +4359,8 @@ mod tests {
         app.key('l');
         assert_eq!(app.view, View::ChainArchive);
         app.key('l');
+        assert_eq!(app.view, View::Rewards);
+        app.key('l');
         assert_eq!(app.view, View::Today);
         app.key('s');
         assert_eq!(app.overlay, Overlay::Settings);
@@ -4117,6 +4389,209 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("RECONNECTING"));
         assert!(text.contains("Timer Service unavailable"));
+    }
+
+    #[test]
+    fn rewards_is_a_dedicated_page_in_the_normal_view_cycle() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::VermilionPaperDark,
+        );
+
+        app.view = View::ChainArchive;
+        app.key('l');
+        assert_eq!(app.view, View::Rewards);
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.key('l');
+        assert_eq!(app.view, View::Today);
+        app.key('h');
+        assert_eq!(app.view, View::Rewards);
+        app.key('h');
+        assert_eq!(app.view, View::ChainArchive);
+    }
+
+    #[test]
+    fn rewards_page_owns_milestone_selection_and_actions() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.reward_milestones = vec![
+            pomotui_protocol::RewardMilestoneSummary {
+                id: 2,
+                name: "KFC".into(),
+                threshold: 10,
+                budget: Some(80),
+            },
+            pomotui_protocol::RewardMilestoneSummary {
+                id: 5,
+                name: "Day off".into(),
+                threshold: 50,
+                budget: None,
+            },
+        ];
+        state.current_chain_rewards = vec![pomotui_protocol::RewardUnlockSummary {
+            id: 8,
+            name: "Coffee".into(),
+            threshold: 5,
+            budget: Some(30),
+            state: "unlocked".into(),
+        }];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Rewards;
+
+        app.handle_key(InputKey::Char('j'));
+        assert_eq!(app.reward_cursor, 1);
+        app.handle_key(InputKey::Char('e'));
+        assert_eq!(app.overlay, Overlay::UpdateReward);
+
+        app.overlay = Overlay::None;
+        app.handle_key(InputKey::Char('D'));
+        assert_eq!(app.overlay, Overlay::ConfirmRewardDelete);
+
+        app.overlay = Overlay::None;
+        app.handle_key(InputKey::Char('n'));
+        assert_eq!(app.overlay, Overlay::CreateReward);
+
+        app.overlay = Overlay::None;
+        assert_eq!(
+            app.handle_key(InputKey::Char('C')),
+            Some(Action::Command(pomotui_protocol::Command::RewardClaim {
+                unlock_id: 8
+            }))
+        );
+    }
+
+    #[test]
+    fn rewards_page_renders_the_ladder_and_earned_rewards_without_internal_ids() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.reward_milestones = vec![pomotui_protocol::RewardMilestoneSummary {
+            id: 42,
+            name: "Mechanical keyboard".into(),
+            threshold: 25,
+            budget: Some(700),
+        }];
+        state.current_chain_rewards = vec![pomotui_protocol::RewardUnlockSummary {
+            id: 88,
+            name: "Fancy coffee".into(),
+            threshold: 5,
+            budget: Some(35),
+            state: "claimed".into(),
+        }];
+
+        for (width, language) in [(90, Language::English), (48, Language::SimplifiedChinese)] {
+            let mut app = App::new(Some(state.clone()), Theme::VermilionPaperDark);
+            app.overlay = Overlay::None;
+            app.view = View::Rewards;
+            app.language = language;
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+
+            if language == Language::English {
+                assert!(rendered.contains("REWARDS"));
+            } else {
+                assert!(rendered.contains('奖') && rendered.contains('励'));
+            }
+            assert!(rendered.contains("Mechanical keyboard"));
+            assert!(rendered.contains("25"));
+            assert!(rendered.contains("700"));
+            assert!(rendered.contains("Fancy coffee"));
+            assert!(rendered.contains("claimed"));
+            assert!(!rendered.contains("#42"));
+            assert!(!rendered.contains("#88"));
+        }
+    }
+
+    #[test]
+    fn chain_archive_selection_moves_between_ended_chains() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![
+            ended_chain(2, "Newest chain", 20),
+            ended_chain(1, "Older chain", 10),
+        ];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+
+        app.handle_key(InputKey::Char('j'));
+        assert_eq!(app.archive_cursor, 1);
+        app.handle_key(InputKey::Down);
+        assert_eq!(app.archive_cursor, 1);
+        app.handle_key(InputKey::Char('k'));
+        assert_eq!(app.archive_cursor, 0);
+        app.handle_key(InputKey::Up);
+        assert_eq!(app.archive_cursor, 0);
+    }
+
+    #[test]
+    fn chain_archive_renders_every_entry_and_reward_for_the_selected_chain() {
+        let mut archived = ended_chain(2, "Archived project", 20);
+        archived.links.push(pomotui_protocol::ChainLinkSummary {
+            id: 19,
+            task_title: "Void".into(),
+            actual_seconds: 900,
+            reflection: None,
+            chain_entry_title: Some("Research the next approach".into()),
+        });
+        archived.length = 2;
+        archived.rewards = vec![
+            pomotui_protocol::RewardUnlockSummary {
+                id: 7,
+                name: "Claimed coffee".into(),
+                threshold: 1,
+                budget: Some(35),
+                state: "claimed".into(),
+            },
+            pomotui_protocol::RewardUnlockSummary {
+                id: 8,
+                name: "Missed dinner".into(),
+                threshold: 2,
+                budget: None,
+                state: "unavailable".into(),
+            },
+        ];
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![archived];
+
+        for (width, language) in [(100, Language::English), (48, Language::SimplifiedChinese)] {
+            let mut app = App::new(Some(state.clone()), Theme::VermilionPaperDark);
+            app.overlay = Overlay::None;
+            app.view = View::ChainArchive;
+            app.language = language;
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+
+            assert!(rendered.contains("Archived project"));
+            assert!(rendered.contains("17m 32s"));
+            assert!(rendered.contains("Useful progress"));
+            assert!(rendered.contains("Research the next approach"));
+            assert!(rendered.contains("15m"));
+            assert!(rendered.contains("Stopped on an unclear next step"));
+            assert!(rendered.contains("Claimed coffee"));
+            assert!(rendered.contains("35"));
+            assert!(rendered.contains("claimed"));
+            assert!(rendered.contains("Missed dinner"));
+            assert!(rendered.contains("unavailable"));
+            assert!(!rendered.contains("#20"));
+            assert!(!rendered.contains("#19"));
+        }
     }
 
     #[test]
