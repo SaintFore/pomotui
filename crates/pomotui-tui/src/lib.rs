@@ -255,15 +255,6 @@ impl App {
                     .visual_anchor
                     .map_or(Some(self.history_cursor), |_| None);
             }
-            InputKey::Char('V')
-                if self.view == View::Chain
-                    && self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
-            {
-                self.begin_text_entry(Overlay::ReviewVoidTitle);
-            }
             InputKey::Char('F')
                 if self.view == View::Chain
                     && self
@@ -429,10 +420,6 @@ impl App {
                 }
                 InputKey::Char('f' | 'F') => {
                     self.begin_text_entry(Overlay::ReviewFailureReflection);
-                    None
-                }
-                InputKey::Char('v' | 'V') => {
-                    self.begin_text_entry(Overlay::ReviewVoidTitle);
                     None
                 }
                 InputKey::Char('j') | InputKey::Down => {
@@ -2544,8 +2531,8 @@ fn pending_review_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: 
     lines.extend([
         Line::from(text(
             app.language,
-            "S success    F failure    V success with Void",
-            "S 成功    F 失败    V 使用 Void 成功",
+            "S success (uses selected Task)    F failure",
+            "S 成功（使用所选任务）    F 失败",
         )),
         Line::from(text(
             app.language,
@@ -3395,6 +3382,43 @@ mod tests {
         assert!(rendered.contains("17m 32s"));
         assert!(rendered.contains("S success"));
         assert!(rendered.contains("F failure"));
+    }
+
+    #[test]
+    fn successful_review_infers_void_from_the_selected_task() {
+        let mut state = snapshot("pending", SessionKind::ShortBreak);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 42,
+            actual_seconds: 300,
+            task_id: None,
+            task_title: None,
+        });
+        state.tasks.push(pomotui_protocol::TaskSummary {
+            id: u64::MAX,
+            title: "Void".into(),
+            completed: false,
+            focus_seconds: 0,
+        });
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.selected_task = 1;
+
+        assert_eq!(app.handle_key(InputKey::Char('s')), None);
+        assert_eq!(app.overlay, Overlay::ReviewVoidTitle);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).expect("terminal");
+        app.overlay = Overlay::PendingReview;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("S success"));
+        assert!(!rendered.contains("V success"));
     }
 
     #[test]
