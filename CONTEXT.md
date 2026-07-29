@@ -49,7 +49,7 @@ One durable successful step in an Action Chain, created only after the user revi
 _Avoid_: Task, Action Node, Completed Round
 
 **Ended Chain**:
-An Action Chain that is no longer current because the user reviewed a Focus Session as failed. Its Chain Links, terminal Chain Break, and reward history remain durable for reflection and cannot be deleted, extended, reactivated, or merged. Only a Void entry's Chain Entry Title and any Reflection may be revised. An Ended Chain may have zero Chain Links when the first Session Review in a new chain is failed.
+An Action Chain that is no longer current because the user reviewed a Focus Session as failed. It retains its Chain Links, terminal Chain Break, and reward history until the user explicitly deletes the whole Ended Chain; its individual entries cannot be deleted, extended, reactivated, or merged, while a Void entry's Chain Entry Title and any Reflection may be revised. An Ended Chain may have zero Chain Links when the first Session Review in a new chain is failed.
 _Avoid_: Deleted chain, failed Task
 
 **Chain Break**:

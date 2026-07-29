@@ -81,13 +81,24 @@ good = "#6591AD"
 border = "#564E43"
 ```
 
-Use arrows or `h/l` to move through Dashboard, Chain, Chain Archive, Rewards,
-Today, Review, and History. On Chain Archive, `j/k` selects an Ended Chain and
-shows its complete links, Chain Break, and reward history. On Rewards, `j/k`
-selects a Reward Milestone, `n` creates one, `e` updates it, uppercase `D`
-deletes it after confirmation, and uppercase `C` claims the first unlocked
-reward. Use `gg`/`G` for the first/last item, `u`/`d` to move by a page, and `v`
-for contiguous visual History selection. In History, `Space` or
+The TUI has two top-level areas. The Timer area contains Dashboard, Today,
+Review, and History; the Work Chain area contains Chain, Chain Archive, and
+Rewards. Press `Tab` to switch areas—the TUI remembers the last page visited in
+each one. Use arrows or `h/l` to move only within the current area.
+
+On Chain Archive, `j/k` selects an Ended Chain and shows its complete links,
+Chain Break, and reward history. Press `Enter` to open the selected Ended Chain,
+then use `j/k` to browse every archived entry; `E` edits its Reflection, `T`
+edits a selected Void entry's Chain Entry Title, and `Esc` returns to the
+archive list. Individual archived entries cannot be deleted. On the archive
+list, uppercase `D` permanently deletes the whole selected Ended Chain after a
+confirmation that shows its length and reward-history impact; Session History
+and Tasks are preserved.
+
+On Rewards, `j/k` selects a Reward Milestone, `n` creates one, `e` updates it,
+uppercase `D` deletes it after confirmation, and uppercase `C` claims the first
+unlocked reward. Use `gg`/`G` for the first/last item, `u`/`d` to move by a
+page, and `v` for contiguous visual History selection. In History, `Space` or
 `Alt+Space` toggles individual records so unrelated entries can be selected
 together, and `D` deletes the marked records after confirmation. On the
 Dashboard, press `Enter` to bind the selected Task to the Current Session and

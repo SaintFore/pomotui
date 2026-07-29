@@ -1340,6 +1340,16 @@ impl Handler for Service {
                     }),
                 };
             }
+            Command::EndedChainDelete { id } => {
+                let before = self.ended_chains.len();
+                self.ended_chains.retain(|chain| chain.id != id);
+                if self.ended_chains.len() == before {
+                    Err(format!("Ended Chain {id} does not exist"))
+                } else {
+                    self.reward_unlocks.retain(|reward| reward.chain_id != id);
+                    Ok(())
+                }
+            }
             Command::ChainEntryEdit {
                 id,
                 reflection,
@@ -2605,6 +2615,141 @@ mod tests {
         assert_eq!(ended.rewards[0].name, "Fancy coffee");
         assert_eq!(ended.rewards[0].budget, Some(35));
         assert_eq!(ended.rewards[0].state, "unavailable");
+    }
+
+    #[test]
+    fn deleting_an_ended_chain_removes_its_reward_history_but_preserves_session_history() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Retained work".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start-success"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-success"), Command::StopReview));
+        service.handle(request(
+            Some("success"),
+            Command::ReviewSuccess { reflection: None },
+        ));
+        service.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Coffee".into(),
+                threshold: 1,
+                budget: Some(35),
+            },
+        ));
+        service.handle(request(
+            Some("start-failure"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop-failure"), Command::StopReview));
+        service.handle(request(
+            Some("failure"),
+            Command::ReviewFailure {
+                reflection: "Stopped here".into(),
+                task_id: None,
+                use_void: false,
+                chain_entry_title: None,
+            },
+        ));
+        let before = service.snapshot();
+        let ended_id = before.recent_ended_chains[0].id;
+        assert_eq!(before.recent_history.len(), 2);
+        assert_eq!(before.recent_ended_chains[0].rewards.len(), 1);
+
+        let response = service.handle(request(
+            Some("delete-ended"),
+            Command::EndedChainDelete { id: ended_id },
+        ));
+        let Response::Snapshot { snapshot } = response else {
+            panic!("delete should return the authoritative snapshot");
+        };
+        assert!(snapshot.recent_ended_chains.is_empty());
+        assert_eq!(snapshot.recent_history.len(), 2);
+        assert_eq!(
+            snapshot.tasks[0].focus_seconds,
+            before.tasks[0].focus_seconds
+        );
+        let Response::Snapshot { snapshot: replay } = service.handle(request(
+            Some("delete-ended"),
+            Command::EndedChainDelete { id: ended_id },
+        )) else {
+            panic!("idempotent retry should replay the authoritative snapshot");
+        };
+        assert!(replay.recent_ended_chains.is_empty());
+        assert_eq!(replay.recent_history.len(), 2);
+
+        assert!(matches!(
+            service.handle(request(
+                Some("delete-missing"),
+                Command::EndedChainDelete { id: ended_id },
+            )),
+            Response::Error {
+                error: ProtocolError::Rejected { message }
+            } if message == format!("Ended Chain {ended_id} does not exist")
+        ));
+    }
+
+    #[test]
+    fn ended_chain_deletion_remains_deleted_after_sqlite_restart() {
+        let path = database_path().with_extension("ended-delete.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut service = Service::open(&path).expect("first service");
+            service.handle(request(
+                Some("task"),
+                Command::TaskCreate {
+                    title: "Durable archive".into(),
+                },
+            ));
+            service.handle(request(
+                Some("start"),
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: Some(1),
+                },
+            ));
+            service.handle(request(Some("stop"), Command::StopReview));
+            service.handle(request(
+                Some("failure"),
+                Command::ReviewFailure {
+                    reflection: "Archive then delete".into(),
+                    task_id: None,
+                    use_void: false,
+                    chain_entry_title: None,
+                },
+            ));
+            let ended_id = service.snapshot().recent_ended_chains[0].id;
+            assert!(matches!(
+                service.handle(request(
+                    Some("delete"),
+                    Command::EndedChainDelete { id: ended_id },
+                )),
+                Response::Snapshot { .. }
+            ));
+        }
+        {
+            let service = Service::open(&path).expect("restarted service");
+            let snapshot = service.snapshot();
+            assert!(snapshot.recent_ended_chains.is_empty());
+            assert_eq!(snapshot.recent_history.len(), 1);
+            assert_eq!(
+                snapshot.recent_history[0].task_title.as_deref(),
+                Some("Durable archive")
+            );
+        }
+        std::fs::remove_file(path).expect("cleanup");
     }
 
     #[test]

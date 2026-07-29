@@ -20,3 +20,8 @@
 - [x] English uses `Reflection`, Simplified Chinese uses `复盘`, and `Void` remains untranslated.
 - [x] Service, protocol, CLI, Ratatui, localization, Task lifecycle, and archive immutability tests verify observable behavior.
 
+## Comments
+
+Issue 17 and ADR-0007 later permit deletion of a whole Ended Chain. Individual
+Chain Links and the Chain Break remain non-deletable and retain the limited edit
+rules established here.

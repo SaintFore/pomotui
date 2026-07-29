@@ -12,7 +12,7 @@ The user needs this mechanism to remain subordinate to the Focus Session rather 
 
 Pomotui will maintain exactly one current Action Chain, initially empty. Every Focus Session that reaches its deadline, or that the user explicitly stops for review, creates a durable Pending Review. Break Sessions remain available while a review is pending, but another Focus Session cannot start until the user submits a successful or failed Session Review.
 
-A successful Session Review appends one Chain Link to the current Action Chain. A failed Session Review requires a Reflection and an explicit destructive confirmation; it appends a non-counting Chain Break, turns the current chain into an immutable Ended Chain, makes its unclaimed rewards unavailable, and immediately creates a new empty current chain. The Session Review records the actual duration and Task snapshot. If the Session had no Current Task, the user assigns a regular Task or the system-owned Void Task during review; Void entries also require a Chain Entry Title.
+A successful Session Review appends one Chain Link to the current Action Chain. A failed Session Review requires a Reflection and an explicit destructive confirmation; it appends a non-counting Chain Break, turns the current chain into an Ended Chain, makes its unclaimed rewards unavailable, and immediately creates a new empty current chain. The Session Review records the actual duration and Task snapshot. If the Session had no Current Task, the user assigns a regular Task or the system-owned Void Task during review; Void entries also require a Chain Entry Title. An Ended Chain remains structurally immutable while retained, but the user may explicitly delete the whole chain and its reward history without deleting its independent Session History.
 
 The Ratatui interface will show a compact Action Chain summary on the Dashboard, a dedicated Chain page for the current chain and rewards, and a dedicated Chain Archive page for Ended Chains. The CLI and versioned service protocol will expose equivalent review and query operations. Reward Milestones will be configurable, unlock once per active chain at their threshold, and be claimed manually.
 
@@ -61,7 +61,7 @@ The Ratatui interface will show a compact Action Chain summary on the Dashboard,
 41. As a user, I want a Chain Break to retain Task snapshot, actual duration, Reflection, and any required Void title, so that failure can be reviewed in context.
 42. As a user, I want failure on a zero-length current chain to produce a valid zero-link Ended Chain, so that even the first failed attempt is not erased.
 43. As a user, I want a new empty current Action Chain created immediately after failure, so that recovery can begin without manual reset.
-44. As a user, I want Ended Chains to be immutable and undeletable, so that I cannot conceal past failures impulsively.
+44. As a user, I want Ended Chain entries to remain structurally immutable, so that a retained chain cannot be selectively rewritten.
 45. As a user, I want Ended Chains to be impossible to extend, reactivate, or merge, so that chain meaning stays unambiguous.
 46. As a user, I want Task deletion or rename not to erase or rewrite Chain Links and Chain Breaks, so that archived snapshots remain durable.
 47. As a user, I want midnight, inactivity, shutdown, and elapsed days not to break my chain, so that only my explicit review judgment matters.
@@ -102,7 +102,7 @@ The Ratatui interface will show a compact Action Chain summary on the Dashboard,
 - The command that submits a failed review is the service-side confirmation boundary. The TUI must present chain length and rewards at risk immediately before issuing it; canceling that presentation sends no mutation.
 - Session Review judgment, source Session identity, Action Chain identity, Task attribution after submission, entry kind, actual duration, and Task title snapshot are immutable. Only Reflection and a Void entry's Chain Entry Title can be edited later.
 - Chain Links and Chain Breaks retain enough snapshots to survive Task rename or deletion. Deleting Session History after review must not cascade into or alter Action Chain history; a Pending Review cannot be deleted through Session History.
-- Ended Chains, their entries, reward snapshots, and claims cannot be deleted, extended, reactivated, or merged through any interface.
+- An Ended Chain can be permanently deleted only as a whole after explicit confirmation; the same mutation deletes its Chain Links, Chain Break, reward snapshots, and claims while leaving Session History unchanged. Individual archived entries cannot be deleted, extended, reactivated, or merged.
 - Reward Milestones are configurable domain entities with a positive chain-length threshold, a user-visible name, and optional budget. Configuration identity is separate from per-chain unlock snapshots.
 - Reaching a milestone, adding one at or below current length, or lowering its threshold to or below current length unlocks it once for the current chain. These operations never recalculate Ended Chains.
 - Unlock records snapshot milestone name, threshold, and budget. Configuration deletion affects only configuration not already represented by an unlock; unlocked and claimed historical records remain.
@@ -131,10 +131,11 @@ The Ratatui interface will show a compact Action Chain summary on the Dashboard,
 - Service integration tests will cover failure at chain length zero and nonzero, terminal Chain Break data, immediate creation of one empty current chain, preservation of claimed rewards, and invalidation of unlocked unclaimed rewards.
 - Reward integration tests will cover threshold crossing, exactly-once unlock, restart safety, retroactive unlock on add or threshold decrease for the active chain only, immutable unlock snapshots, configuration deletion, idempotent claim, and refusal to claim unavailable rewards.
 - Restart tests will verify that Pending Review, current chain, Ended Chains, Void Task identity, unlocks, and claims survive Timer Service restart without duplication.
+- Ended Chain deletion tests will verify whole-chain and reward-history removal, preserved Session History and Task totals, idempotent retries, stable missing-chain errors, and persistence across restart.
 - Migration tests will upgrade representative existing schema data, create exactly one system Void Task and one empty current Action Chain, preserve user Tasks including any ordinary Task titled `Void`, and remain safe when migration is retried.
 - Protocol request/response tests will cover the version bump, all new commands and bounded queries, compact snapshot data, exact-second values, stable IDs, stable validation errors, and idempotent retry behavior.
 - CLI parsing tests will cover `stop --review`, `stop --no-review`, legacy stop, review inputs, entry edits, reward management, human duration output, and JSON output containing stable IDs and exact values.
-- Ratatui `TestBackend` tests will cover the Dashboard chain card, retained Task list, current Chain page, Chain Archive page, Pending Review flow, three-way Stop choice, failed-review warning, cancellation, reward claim, and navigation.
+- Ratatui `TestBackend` tests will cover the Dashboard chain card, retained Task list, current Chain page, Chain Archive list and scrollable detail mode, whole-chain deletion confirmation, Pending Review flow, three-way Stop choice, failed-review warning, cancellation, reward claim, and navigation.
 - TUI tests will exercise both wide and narrow terminal sizes and English and Simplified Chinese labels, including invariant `Void` and localized `Reflection`/`复盘`.
 - Formatting tests will prove a single duration value is shown as `50m` for exact minutes and `17m 32s` when seconds remain, including an early stopped Session.
 - End-to-end tests across a real Timer Service process will cover a completed Focus Session through review, service restart with Pending Review, Focus rejection and Break allowance, successful chain growth, and failed review producing an Ended Chain plus a new current chain.
@@ -151,7 +152,7 @@ The Ratatui interface will show a compact Action Chain summary on the Dashboard,
 - Automatically ending a chain because of elapsed time, date boundaries, shutdown, inactivity, missed days, Break Sessions, or reward behavior.
 - Purchasing, paying for, scheduling, enforcing, or externally fulfilling rewards.
 - Displaying internal database IDs in normal TUI views.
-- Deleting, restoring, merging, or reactivating Ended Chains.
+- Restoring, merging, or reactivating Ended Chains, and deleting individual archived entries.
 - Reassigning an already attributed reviewed Session or changing a submitted review judgment.
 - Changing the existing Focus Cycle definition or making stopped Sessions count as Completed Rounds.
 

@@ -89,6 +89,7 @@ fn run(
                     KeyCode::Esc => Some(InputKey::Escape),
                     KeyCode::Enter => Some(InputKey::Enter),
                     KeyCode::Backspace => Some(InputKey::Backspace),
+                    KeyCode::Tab => Some(InputKey::Tab),
                     KeyCode::Up => Some(InputKey::Up),
                     KeyCode::Down => Some(InputKey::Down),
                     KeyCode::Left => Some(InputKey::Left),

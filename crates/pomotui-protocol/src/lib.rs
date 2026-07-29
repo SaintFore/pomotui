@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
@@ -79,6 +79,9 @@ pub enum Command {
         chain_entry_title: Option<String>,
     },
     ActionChainArchive,
+    EndedChainDelete {
+        id: u64,
+    },
     ChainEntryEdit {
         id: u64,
         reflection: Option<String>,

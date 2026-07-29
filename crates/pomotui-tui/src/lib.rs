@@ -92,6 +92,7 @@ pub enum Overlay {
     ConfirmDelete,
     ConfirmTaskSwitch,
     ConfirmHistoryDelete,
+    ConfirmEndedChainDelete,
     StopChoice,
     ReviewVoidTitle,
     ReviewFailureReflection,
@@ -108,6 +109,7 @@ pub enum Overlay {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputKey {
     Char(char),
+    Tab,
     Escape,
     Enter,
     Backspace,
@@ -134,6 +136,8 @@ pub struct App {
     pub selected_task: usize,
     pub chain_cursor: usize,
     pub archive_cursor: usize,
+    pub archive_entry_cursor: usize,
+    pub archive_detail_open: bool,
     pub reward_cursor: usize,
     pub history_cursor: usize,
     pub history_offset: usize,
@@ -149,6 +153,8 @@ pub struct App {
     pending_failure_reflection: Option<String>,
     edit_entry_id: Option<u64>,
     edit_reward_id: Option<u64>,
+    last_timer_view: View,
+    last_work_chain_view: View,
     pending_failure_void_title: Option<String>,
     last_prompted_review_id: Option<u64>,
     completion: Option<CompletionPlayback>,
@@ -180,6 +186,8 @@ impl App {
             selected_task: 0,
             chain_cursor: 0,
             archive_cursor: 0,
+            archive_entry_cursor: 0,
+            archive_detail_open: false,
             reward_cursor: 0,
             history_cursor: 0,
             history_offset: 0,
@@ -204,6 +212,8 @@ impl App {
             pending_failure_reflection: None,
             edit_entry_id: None,
             edit_reward_id: None,
+            last_timer_view: View::Dashboard,
+            last_work_chain_view: View::Chain,
             pending_failure_void_title: None,
             last_prompted_review_id,
             completion: None,
@@ -232,6 +242,14 @@ impl App {
             .as_ref()
             .map_or(0, |snapshot| snapshot.recent_ended_chains.len());
         self.archive_cursor = self.archive_cursor.min(archive_count.saturating_sub(1));
+        let archive_entry_count = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.recent_ended_chains.get(self.archive_cursor))
+            .map_or(0, |chain| chain.links.len().saturating_add(1));
+        self.archive_entry_cursor = self
+            .archive_entry_cursor
+            .min(archive_entry_count.saturating_sub(1));
         let reward_count = self
             .snapshot
             .as_ref()
@@ -242,6 +260,7 @@ impl App {
     pub fn key(&mut self, key: char) -> Option<Action> {
         let key = match key {
             '\u{1b}' => InputKey::Escape,
+            '\t' => InputKey::Tab,
             '\n' | '\r' => InputKey::Enter,
             '\u{8}' | '\u{7f}' => InputKey::Backspace,
             '↑' => InputKey::Up,
@@ -258,6 +277,15 @@ impl App {
         }
         match key {
             InputKey::Char('q') => return Some(Action::Quit),
+            InputKey::Tab => {
+                if is_work_chain_view(self.view) {
+                    self.last_work_chain_view = self.view;
+                    self.view = self.last_timer_view;
+                } else {
+                    self.last_timer_view = self.view;
+                    self.view = self.last_work_chain_view;
+                }
+            }
             InputKey::Char('g') => {
                 if self.pending_g {
                     self.jump_first();
@@ -324,24 +352,52 @@ impl App {
                             .recent_chain_links
                             .get(self.chain_cursor)
                             .map(|link| link.id)
-                    } else {
+                    } else if self.archive_detail_open {
                         snapshot
                             .recent_ended_chains
                             .get(self.archive_cursor)
-                            .map(|chain| chain.break_id)
+                            .and_then(|chain| {
+                                chain
+                                    .links
+                                    .get(self.archive_entry_cursor)
+                                    .map_or(Some(chain.break_id), |link| Some(link.id))
+                            })
+                    } else {
+                        None
                     }
                 });
                 if self.edit_entry_id.is_some() {
                     self.begin_text_entry(Overlay::EditReflection);
                 }
             }
-            InputKey::Char('T') if self.view == View::Chain => {
+            InputKey::Char('T')
+                if self.view == View::Chain
+                    || (self.view == View::ChainArchive && self.archive_detail_open) =>
+            {
                 self.edit_entry_id = self.snapshot.as_ref().and_then(|snapshot| {
-                    snapshot
-                        .recent_chain_links
-                        .get(self.chain_cursor)
-                        .filter(|link| link.chain_entry_title.is_some())
-                        .map(|link| link.id)
+                    if self.view == View::Chain {
+                        snapshot
+                            .recent_chain_links
+                            .get(self.chain_cursor)
+                            .filter(|link| link.chain_entry_title.is_some())
+                            .map(|link| link.id)
+                    } else {
+                        snapshot
+                            .recent_ended_chains
+                            .get(self.archive_cursor)
+                            .and_then(|chain| {
+                                chain
+                                    .links
+                                    .get(self.archive_entry_cursor)
+                                    .filter(|link| link.chain_entry_title.is_some())
+                                    .map(|link| link.id)
+                                    .or_else(|| {
+                                        (self.archive_entry_cursor == chain.links.len()
+                                            && chain.break_chain_entry_title.is_some())
+                                        .then_some(chain.break_id)
+                                    })
+                            })
+                    }
                 });
                 if self.edit_entry_id.is_some() {
                     self.begin_text_entry(Overlay::EditChainTitle);
@@ -353,11 +409,24 @@ impl App {
                 } else if self.view == View::Chain {
                     self.move_chain_cursor(true);
                 } else if self.view == View::ChainArchive {
-                    let count = self
-                        .snapshot
-                        .as_ref()
-                        .map_or(0, |snapshot| snapshot.recent_ended_chains.len());
-                    self.archive_cursor = (self.archive_cursor + 1).min(count.saturating_sub(1));
+                    if self.archive_detail_open {
+                        let count = self
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| {
+                                snapshot.recent_ended_chains.get(self.archive_cursor)
+                            })
+                            .map_or(0, |chain| chain.links.len().saturating_add(1));
+                        self.archive_entry_cursor =
+                            (self.archive_entry_cursor + 1).min(count.saturating_sub(1));
+                    } else {
+                        let count = self
+                            .snapshot
+                            .as_ref()
+                            .map_or(0, |snapshot| snapshot.recent_ended_chains.len());
+                        self.archive_cursor =
+                            (self.archive_cursor + 1).min(count.saturating_sub(1));
+                    }
                 } else if self.view == View::Rewards {
                     let count = self
                         .snapshot
@@ -374,13 +443,19 @@ impl App {
                 } else if self.view == View::Chain {
                     self.move_chain_cursor(false);
                 } else if self.view == View::ChainArchive {
-                    self.archive_cursor = self.archive_cursor.saturating_sub(1);
+                    if self.archive_detail_open {
+                        self.archive_entry_cursor = self.archive_entry_cursor.saturating_sub(1);
+                    } else {
+                        self.archive_cursor = self.archive_cursor.saturating_sub(1);
+                    }
                 } else if self.view == View::Rewards {
                     self.reward_cursor = self.reward_cursor.saturating_sub(1);
                 } else {
                     self.move_task(false);
                 }
             }
+            InputKey::Char('h' | 'l') | InputKey::Left | InputKey::Right
+                if self.view == View::ChainArchive && self.archive_detail_open => {}
             InputKey::Char('h') | InputKey::Left => self.view = previous_view(self.view),
             InputKey::Char('l') | InputKey::Right => self.view = next_view(self.view),
             InputKey::Char(':') => self.overlay = Overlay::Palette,
@@ -403,8 +478,20 @@ impl App {
             }
             InputKey::Char('c') => return self.complete_or_reopen_selected(),
             InputKey::Char('D') => {
-                if self.view == View::History && !self.history_ids_for_action().is_empty() {
+                if self.view == View::ChainArchive && self.archive_detail_open {
+                    // Individual archived entries are not deletable.
+                } else if self.view == View::History && !self.history_ids_for_action().is_empty() {
                     self.overlay = Overlay::ConfirmHistoryDelete;
+                } else if self.view == View::ChainArchive
+                    && !self.archive_detail_open
+                    && self.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot
+                            .recent_ended_chains
+                            .get(self.archive_cursor)
+                            .is_some()
+                    })
+                {
+                    self.overlay = Overlay::ConfirmEndedChainDelete;
                 } else if self.view == View::Rewards
                     && self.snapshot.as_ref().is_some_and(|snapshot| {
                         snapshot.reward_milestones.get(self.reward_cursor).is_some()
@@ -425,6 +512,22 @@ impl App {
                 self.toggle_history_mark();
             }
             InputKey::Char(' ') => return self.toggle_session(),
+            InputKey::Escape if self.view == View::ChainArchive && self.archive_detail_open => {
+                self.archive_detail_open = false;
+            }
+            InputKey::Enter
+                if self.view == View::ChainArchive
+                    && !self.archive_detail_open
+                    && self.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot
+                            .recent_ended_chains
+                            .get(self.archive_cursor)
+                            .is_some()
+                    }) =>
+            {
+                self.archive_entry_cursor = 0;
+                self.archive_detail_open = true;
+            }
             InputKey::Enter
                 if self.view == View::Chain
                     && self
@@ -605,6 +708,21 @@ impl App {
                     self.visual_anchor = None;
                     self.marked_history.clear();
                     Some(self.emit(pomotui_protocol::Command::HistoryDelete { ids }))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::None;
+                    None
+                }
+                _ => None,
+            },
+            Overlay::ConfirmEndedChainDelete => match key {
+                InputKey::Char('y' | 'Y') | InputKey::Enter => {
+                    let id = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.recent_ended_chains.get(self.archive_cursor))
+                        .map(|chain| chain.id)?;
+                    Some(self.emit(pomotui_protocol::Command::EndedChainDelete { id }))
                 }
                 InputKey::Char('n' | 'N') => {
                     self.overlay = Overlay::None;
@@ -1204,15 +1322,19 @@ fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
     }
 }
 
+const fn is_work_chain_view(view: View) -> bool {
+    matches!(view, View::Chain | View::ChainArchive | View::Rewards)
+}
+
 const fn next_view(view: View) -> View {
     match view {
-        View::Dashboard => View::Chain,
-        View::Chain => View::ChainArchive,
-        View::ChainArchive => View::Rewards,
-        View::Rewards => View::Today,
+        View::Dashboard => View::Today,
         View::Today => View::Review,
         View::Review => View::History,
         View::History => View::Dashboard,
+        View::Chain => View::ChainArchive,
+        View::ChainArchive => View::Rewards,
+        View::Rewards => View::Chain,
     }
 }
 
@@ -1221,10 +1343,10 @@ const fn previous_view(view: View) -> View {
         View::Dashboard => View::History,
         View::History => View::Review,
         View::Review => View::Today,
-        View::Today => View::Rewards,
+        View::Today => View::Dashboard,
         View::Rewards => View::ChainArchive,
         View::ChainArchive => View::Chain,
-        View::Chain => View::Dashboard,
+        View::Chain => View::Rewards,
     }
 }
 
@@ -1574,6 +1696,10 @@ fn chain_link_lines(
 
 #[allow(clippy::too_many_lines)]
 fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    if app.archive_detail_open {
+        chain_archive_detail_view(frame, area, app, colors);
+        return;
+    }
     let snapshot = app.snapshot.as_ref();
     let language = app.language;
     let lines = snapshot.map_or_else(
@@ -1626,92 +1752,146 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                     style,
                 )));
             }
-            let Some(chain) = snapshot.recent_ended_chains.get(app.archive_cursor) else {
-                return lines;
-            };
-            lines.extend([
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!(
-                        "{} · {} {}",
-                        text(language, "SELECTED CHAIN", "所选行动链"),
-                        text(language, "Length", "长度"),
-                        chain.length
-                    ),
-                    Style::default()
-                        .fg(colors.gold)
-                        .add_modifier(Modifier::BOLD),
-                )),
-            ]);
-            for link in &chain.links {
-                let title = link
-                    .chain_entry_title
-                    .as_deref()
-                    .unwrap_or(&link.task_title);
-                lines.push(Line::from(format!(
-                    "├─ {title} · {}",
+            lines.push(Line::from(""));
+            lines.push(Line::from(text(
+                language,
+                "Enter open · D delete whole chain",
+                "Enter 打开 · D 删除整条链",
+            )));
+            lines
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(text(language, "CHAIN ARCHIVE", "行动链归档"), colors)),
+        area,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let language = app.language;
+    let Some(chain) = app
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.recent_ended_chains.get(app.archive_cursor))
+    else {
+        frame.render_widget(
+            Paragraph::new(text(
+                language,
+                "Ended Chain unavailable",
+                "已结束行动链不可用",
+            ))
+            .block(panel(text(language, "ARCHIVE DETAIL", "归档详情"), colors)),
+            area,
+        );
+        return;
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "{} · {} {}",
+            text(language, "ARCHIVE DETAIL", "归档详情"),
+            text(language, "Length", "长度"),
+            chain.length
+        ),
+        Style::default()
+            .fg(colors.gold)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    let entry_count = chain.links.len().saturating_add(1);
+    let cursor = app.archive_entry_cursor.min(entry_count.saturating_sub(1));
+    lines.push(Line::from(format!(
+        "{} {} / {entry_count}",
+        text(language, "Entry", "条目"),
+        cursor.saturating_add(1)
+    )));
+    let start = cursor.saturating_sub(2);
+    let end = cursor.saturating_add(3).min(entry_count);
+    for index in start..end {
+        let selected = index == cursor;
+        let style = if selected {
+            Style::default()
+                .fg(colors.background)
+                .bg(colors.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(colors.text)
+        };
+        if let Some(link) = chain.links.get(index) {
+            let title = link
+                .chain_entry_title
+                .as_deref()
+                .unwrap_or(&link.task_title);
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} ├─ {title} · {}",
+                    if selected { "›" } else { " " },
                     chain_duration(link.actual_seconds)
-                )));
-                lines.push(Line::from(format!(
-                    "│  {}: {}",
-                    text(language, "Reflection", "复盘"),
-                    link.reflection.as_deref().unwrap_or("—")
-                )));
-            }
+                ),
+                style,
+            )));
+            lines.push(Line::from(format!(
+                "    {}: {}",
+                text(language, "Reflection", "复盘"),
+                link.reflection.as_deref().unwrap_or("—")
+            )));
+        } else {
             let break_title = chain
                 .break_chain_entry_title
                 .as_deref()
                 .unwrap_or(&chain.break_task_title);
             lines.push(Line::from(Span::styled(
                 format!(
-                    "└─ {} · {break_title} · {}",
+                    "{} └─ {} · {break_title} · {}",
+                    if selected { "›" } else { " " },
                     text(language, "CHAIN BREAK", "行动链中断"),
                     chain_duration(chain.break_actual_seconds)
                 ),
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
+                style,
             )));
             lines.push(Line::from(format!(
-                "   {}: {}",
+                "    {}: {}",
                 text(language, "Reflection", "复盘"),
                 chain.break_reflection
             )));
-            lines.extend([
-                Line::from(""),
-                Line::from(Span::styled(
-                    text(language, "REWARD HISTORY", "奖励历史"),
-                    Style::default()
-                        .fg(colors.gold)
-                        .add_modifier(Modifier::BOLD),
-                )),
-            ]);
-            if chain.rewards.is_empty() {
-                lines.push(Line::from(text(
-                    language,
-                    "No rewards unlocked.",
-                    "没有已解锁奖励。",
-                )));
-            } else {
-                for reward in &chain.rewards {
-                    let budget = reward.budget.map_or_else(
-                        || text(language, "no budget", "无预算").to_owned(),
-                        |budget| format!("¥{budget}"),
-                    );
-                    lines.push(Line::from(format!(
-                        "{} · {} {} · {budget} · {}",
-                        reward.name,
-                        text(language, "Length", "长度"),
-                        reward.threshold,
-                        reward.state,
-                    )));
-                }
-            }
-            lines
-        },
-    );
+        }
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            text(language, "REWARD HISTORY", "奖励历史"),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    if chain.rewards.is_empty() {
+        lines.push(Line::from(text(
+            language,
+            "No rewards unlocked.",
+            "没有已解锁奖励。",
+        )));
+    } else {
+        for reward in &chain.rewards {
+            let budget = reward.budget.map_or_else(
+                || text(language, "no budget", "无预算").to_owned(),
+                |budget| format!("¥{budget}"),
+            );
+            lines.push(Line::from(format!(
+                "{} · {} {} · {budget} · {}",
+                reward.name,
+                text(language, "Length", "长度"),
+                reward.threshold,
+                reward.state,
+            )));
+        }
+    }
+    lines.push(Line::from(text(
+        language,
+        "j/k select · E edit Reflection · Esc back",
+        "j/k 选择 · E 编辑复盘 · Esc 返回",
+    )));
     frame.render_widget(
-        Paragraph::new(lines).block(panel(text(language, "CHAIN ARCHIVE", "行动链归档"), colors)),
+        Paragraph::new(lines).block(panel(text(language, "ARCHIVE DETAIL", "归档详情"), colors)),
         area,
     );
 }
@@ -2844,6 +3024,11 @@ fn timer_progress(
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let navigation_area = if is_work_chain_view(app.view) {
+        text(app.language, "WORK CHAIN", "工作链")
+    } else {
+        text(app.language, "TIMER", "番茄钟")
+    };
     let view = match app.view {
         View::Dashboard => text(app.language, "DASHBOARD", "仪表盘"),
         View::Chain => text(app.language, "CHAIN", "行动链"),
@@ -2856,24 +3041,24 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let keys = if app.view == View::History {
         text(
             app.language,
-            "j/k move · Space mark · v range · gg/G ends · u/d page · D delete",
-            "j/k 移动 · Space 勾选 · v 连选 · gg/G 首尾 · u/d 翻页 · D 删除",
+            "Tab area · h/l pages · j/k move · Space mark · v range · D delete",
+            "Tab 区域 · h/l 页面 · j/k 移动 · Space 勾选 · v 连选 · D 删除",
         )
     } else if app.narrow {
         text(
             app.language,
-            "h/l views · j/k Tasks · Space toggle · : commands · ? help",
-            "h/l 视图 · j/k 任务 · Space 切换 · : 命令 · ? 帮助",
+            "Tab area · h/l pages · j/k move · ? help",
+            "Tab 区域 · h/l 页面 · j/k 移动 · ? 帮助",
         )
     } else {
         text(
             app.language,
-            "h/l or ←/→ views  j/k Tasks  Enter select  Space start/toggle  n new  : commands  ? help  q quit",
-            "h/l 或 ←/→ 切换视图  j/k 任务  Enter 选择  Space 开始/切换  n 新建  : 命令  ? 帮助  q 退出",
+            "Tab switch area  h/l or ←/→ pages  j/k move  Enter select  Space start/toggle  : commands  ? help",
+            "Tab 切换区域  h/l 或 ←/→ 页面  j/k 移动  Enter 选择  Space 开始/切换  : 命令  ? 帮助",
         )
     };
     let mut lines = vec![Line::from(Span::styled(
-        format!("  ◀  {view}  ▶  "),
+        format!("  ◀  {navigation_area} · {view}  ▶  "),
         Style::default()
             .fg(colors.background)
             .bg(colors.gold)
@@ -2906,7 +3091,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
     let height = match app.overlay {
         Overlay::PendingReview => 11.min(area.height.saturating_sub(2)),
         Overlay::Palette => area.height.saturating_sub(4).min(21),
-        Overlay::Help => area.height.saturating_sub(4).min(20),
+        Overlay::Help => area.height.saturating_sub(2).min(22),
         Overlay::Settings => 17.min(area.height.saturating_sub(2)),
         Overlay::RewardManager => 16.min(area.height.saturating_sub(2)),
         Overlay::CreateTask
@@ -2914,6 +3099,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::ConfirmDelete
         | Overlay::ConfirmTaskSwitch
         | Overlay::ConfirmHistoryDelete
+        | Overlay::ConfirmEndedChainDelete
         | Overlay::StopChoice
         | Overlay::ReviewVoidTitle
         | Overlay::ReviewFailureReflection
@@ -2952,6 +3138,9 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
         Overlay::ConfirmTaskSwitch => confirm_task_switch_overlay(frame, modal, app, colors),
         Overlay::ConfirmHistoryDelete => confirm_history_delete_overlay(frame, modal, app, colors),
+        Overlay::ConfirmEndedChainDelete => {
+            confirm_ended_chain_delete_overlay(frame, modal, app, colors);
+        }
         Overlay::StopChoice => stop_choice_overlay(frame, modal, app, colors),
         Overlay::ConfirmReviewFailure => confirm_review_failure_overlay(frame, modal, app, colors),
         Overlay::ConfirmRewardDelete => {
@@ -3138,7 +3327,9 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .fg(colors.gold)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  h/l 或 ←/→  切换仪表盘、今日、历史"),
+            Line::from("  Tab  番茄钟区域 ↔ 工作链区域"),
+            Line::from("  h/l 或 ←/→  切换当前区域内的页面"),
+            Line::from("  归档：Enter 详情 · D 删除整链 · Esc 返回列表"),
             Line::from("  j/k 或 ↑/↓  选择任务                    q  退出"),
             Line::from(""),
             Line::from(Span::styled(
@@ -3175,7 +3366,9 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .fg(colors.gold)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  h/l or ←/→  switch Dashboard, Today, Review, History"),
+            Line::from("  Tab  Timer area ↔ Work Chain area"),
+            Line::from("  h/l or ←/→  switch pages within the current area"),
+            Line::from("  Archive: Enter detail · D delete whole chain · Esc back"),
             Line::from("  j/k move  gg/G ends  u/d page  Space mark  v range  q quit"),
             Line::from(""),
             Line::from(Span::styled(
@@ -3204,7 +3397,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("  :  executable command palette            s  settings"),
-            Line::from("  Esc closes any overlay · Mouse mirrors visible primary targets"),
+            Line::from("  Esc closes any overlay"),
         ]
     };
     frame.render_widget(
@@ -3552,6 +3745,58 @@ fn confirm_history_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, 
         .block(
             panel(text(app.language, "DELETE HISTORY", "删除历史"), colors)
                 .border_style(Style::default().fg(colors.accent)),
+        ),
+        area,
+    );
+}
+
+fn confirm_ended_chain_delete_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    colors: Colors,
+) {
+    let chain = app
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.recent_ended_chains.get(app.archive_cursor));
+    let length = chain.map_or(0, |chain| chain.length);
+    let rewards = chain.map_or(0, |chain| chain.rewards.len());
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!(
+                "{} · {} {length}",
+                text(
+                    app.language,
+                    "Permanently delete this Ended Chain?",
+                    "永久删除这条已结束行动链？"
+                ),
+                text(app.language, "Length", "长度")
+            )),
+            Line::from(format!(
+                "{} {rewards}. {}",
+                text(app.language, "Reward history entries:", "奖励历史条目："),
+                text(
+                    app.language,
+                    "Session History and Tasks are preserved.",
+                    "时段历史和任务会保留。"
+                )
+            )),
+            Line::from(Span::styled(
+                text(
+                    app.language,
+                    "y / Enter delete permanently · n / Esc cancel",
+                    "y / Enter 永久删除 · n / Esc 取消",
+                ),
+                Style::default().fg(colors.muted),
+            )),
+        ])
+        .block(
+            panel(
+                text(app.language, "DELETE ENDED CHAIN", "删除已结束行动链"),
+                colors,
+            )
+            .border_style(Style::default().fg(colors.accent)),
         ),
         area,
     );
@@ -4355,13 +4600,11 @@ mod tests {
             Some(Action::Command(pomotui_protocol::Command::Skip))
         );
         app.key('l');
-        assert_eq!(app.view, View::Chain);
-        app.key('l');
-        assert_eq!(app.view, View::ChainArchive);
-        app.key('l');
-        assert_eq!(app.view, View::Rewards);
-        app.key('l');
         assert_eq!(app.view, View::Today);
+        app.key('l');
+        assert_eq!(app.view, View::Review);
+        app.key('\t');
+        assert_eq!(app.view, View::Chain);
         app.key('s');
         assert_eq!(app.overlay, Overlay::Settings);
         let original_theme = app.theme;
@@ -4404,11 +4647,144 @@ mod tests {
         assert_eq!(app.overlay, Overlay::None);
 
         app.key('l');
-        assert_eq!(app.view, View::Today);
+        assert_eq!(app.view, View::Chain);
         app.key('h');
         assert_eq!(app.view, View::Rewards);
         app.key('h');
         assert_eq!(app.view, View::ChainArchive);
+    }
+
+    #[test]
+    fn tab_switches_areas_and_returns_to_each_last_visited_page() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::VermilionPaperDark,
+        );
+        app.overlay = Overlay::None;
+        app.view = View::History;
+
+        app.handle_key(InputKey::Tab);
+        assert_eq!(app.view, View::Chain);
+
+        app.view = View::Rewards;
+        app.handle_key(InputKey::Tab);
+        assert_eq!(app.view, View::History);
+
+        app.handle_key(InputKey::Tab);
+        assert_eq!(app.view, View::Rewards);
+
+        app.overlay = Overlay::Help;
+        app.handle_key(InputKey::Tab);
+        assert_eq!(app.view, View::Rewards);
+        assert_eq!(app.overlay, Overlay::Help);
+    }
+
+    #[test]
+    fn horizontal_navigation_wraps_only_within_the_active_area() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::VermilionPaperDark,
+        );
+        app.overlay = Overlay::None;
+
+        app.view = View::Dashboard;
+        app.handle_key(InputKey::Char('l'));
+        assert_eq!(app.view, View::Today);
+        app.view = View::History;
+        app.handle_key(InputKey::Right);
+        assert_eq!(app.view, View::Dashboard);
+        app.handle_key(InputKey::Left);
+        assert_eq!(app.view, View::History);
+
+        app.view = View::Chain;
+        app.handle_key(InputKey::Char('h'));
+        assert_eq!(app.view, View::Rewards);
+        app.handle_key(InputKey::Char('l'));
+        assert_eq!(app.view, View::Chain);
+        app.view = View::Rewards;
+        app.handle_key(InputKey::Right);
+        assert_eq!(app.view, View::Chain);
+    }
+
+    #[test]
+    fn footer_identifies_the_active_area_and_explains_tab_navigation() {
+        for (width, language, view) in [
+            (100, Language::English, View::History),
+            (48, Language::English, View::Rewards),
+            (100, Language::SimplifiedChinese, View::Dashboard),
+            (48, Language::SimplifiedChinese, View::ChainArchive),
+        ] {
+            let mut app = App::new(
+                Some(snapshot("pending", SessionKind::Focus)),
+                Theme::VermilionPaperDark,
+            );
+            app.overlay = Overlay::None;
+            app.view = view;
+            app.language = language;
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+
+            assert!(rendered.contains("Tab"));
+            if language == Language::English {
+                let area = if is_work_chain_view(view) {
+                    "WORK CHAIN"
+                } else {
+                    "TIMER"
+                };
+                assert!(rendered.contains(area));
+            } else if is_work_chain_view(view) {
+                assert!(
+                    rendered.contains('工') && rendered.contains('作') && rendered.contains('链')
+                );
+            } else {
+                assert!(
+                    rendered.contains('番') && rendered.contains('茄') && rendered.contains('钟')
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn help_explains_the_timer_and_work_chain_areas() {
+        for language in [Language::English, Language::SimplifiedChinese] {
+            let mut app = App::new(
+                Some(snapshot("pending", SessionKind::Focus)),
+                Theme::VermilionPaperDark,
+            );
+            app.overlay = Overlay::Help;
+            app.language = language;
+            let mut terminal = Terminal::new(TestBackend::new(76, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+
+            assert!(rendered.contains("Tab"));
+            if language == Language::English {
+                assert!(rendered.contains("Timer area"));
+                assert!(rendered.contains("Work Chain area"));
+            } else {
+                assert!(rendered.contains('番') && rendered.contains('茄'));
+                assert!(
+                    rendered.contains('工') && rendered.contains('作') && rendered.contains('链')
+                );
+            }
+        }
     }
 
     #[test]
@@ -4532,6 +4908,186 @@ mod tests {
     }
 
     #[test]
+    fn chain_archive_delete_targets_the_selected_ended_chain_not_a_task() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![
+            ended_chain(2, "Newest chain", 20),
+            ended_chain(1, "Older chain", 10),
+        ];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+        app.handle_key(InputKey::Char('j'));
+
+        assert_eq!(app.handle_key(InputKey::Char('D')), None);
+        assert_eq!(app.overlay, Overlay::ConfirmEndedChainDelete);
+        let mut terminal = Terminal::new(TestBackend::new(72, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw confirmation");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("DELETE ENDED CHAIN"));
+        assert!(rendered.contains("Length 1"));
+        assert!(rendered.contains("Session History and Tasks are preserved"));
+        assert_eq!(app.handle_key(InputKey::Char('n')), None);
+        assert_eq!(app.overlay, Overlay::None);
+
+        assert_eq!(app.handle_key(InputKey::Char('D')), None);
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(
+                pomotui_protocol::Command::EndedChainDelete { id: 1 }
+            ))
+        );
+    }
+
+    #[test]
+    fn enter_opens_archive_detail_and_escape_returns_to_the_list() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![ended_chain(1, "Archived work", 10)];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+        app.handle_key(InputKey::Enter);
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw detail");
+        let detail = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(detail.contains("ARCHIVE DETAIL"));
+        app.handle_key(InputKey::Char('D'));
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.handle_key(InputKey::Escape);
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw list");
+        let list = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(list.contains("ENDED CHAINS"));
+        assert!(!list.contains("ARCHIVE DETAIL"));
+    }
+
+    #[test]
+    fn archive_detail_can_browse_to_the_end_of_a_hundred_link_chain() {
+        let mut archived = ended_chain(1, "Initial link", 101);
+        archived.links = (1..=100)
+            .map(|id| pomotui_protocol::ChainLinkSummary {
+                id,
+                task_title: format!("Archived step {id}"),
+                actual_seconds: id * 60,
+                reflection: Some(format!("Reflection {id}")),
+                chain_entry_title: None,
+            })
+            .collect();
+        archived.length = 100;
+        archived.break_reflection = "Terminal reflection".into();
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![archived];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+        app.handle_key(InputKey::Enter);
+        for _ in 0..100 {
+            app.handle_key(InputKey::Down);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(48, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw last entry");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("CHAIN BREAK"));
+        assert!(rendered.contains("Terminal reflection"));
+        assert!(!rendered.contains("Archived step 1 "));
+    }
+
+    #[test]
+    fn archive_detail_edits_the_selected_entry_reflection() {
+        let mut archived = ended_chain(1, "First archived link", 3);
+        archived.links.push(pomotui_protocol::ChainLinkSummary {
+            id: 2,
+            task_title: "Second archived link".into(),
+            actual_seconds: 600,
+            reflection: None,
+            chain_entry_title: None,
+        });
+        archived.length = 2;
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![archived];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+        app.handle_key(InputKey::Enter);
+        app.handle_key(InputKey::Down);
+        app.handle_key(InputKey::Char('E'));
+        app.input.clear();
+        for character in "Revised second reflection".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ChainEntryEdit {
+                id: 2,
+                reflection: Some("Revised second reflection".into()),
+                chain_entry_title: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn archive_detail_edits_only_a_selected_void_entry_title() {
+        let mut archived = ended_chain(1, "Void", 2);
+        archived.links[0].chain_entry_title = Some("Original archived title".into());
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![archived];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+        app.handle_key(InputKey::Enter);
+        app.handle_key(InputKey::Char('T'));
+        assert_eq!(app.overlay, Overlay::EditChainTitle);
+        app.input.clear();
+        for character in "Corrected archived title".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ChainEntryEdit {
+                id: 1,
+                reflection: None,
+                chain_entry_title: Some("Corrected archived title".into()),
+            }))
+        );
+    }
+
+    #[test]
     fn chain_archive_renders_every_entry_and_reward_for_the_selected_chain() {
         let mut archived = ended_chain(2, "Archived project", 20);
         archived.links.push(pomotui_protocol::ChainLinkSummary {
@@ -4566,6 +5122,7 @@ mod tests {
             app.overlay = Overlay::None;
             app.view = View::ChainArchive;
             app.language = language;
+            app.handle_key(InputKey::Enter);
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
             terminal
                 .draw(|frame| render(frame, &mut app))

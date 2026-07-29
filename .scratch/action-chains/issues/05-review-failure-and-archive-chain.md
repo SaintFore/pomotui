@@ -21,3 +21,8 @@
 - [x] Retrying failure cannot create duplicate Chain Breaks, Ended Chains, or current chains.
 - [x] Domain scenarios, real-SQLite rollback tests, protocol tests, CLI tests, Ratatui confirmation tests, zero-length tests, and restart tests verify the complete path.
 
+## Comments
+
+The original whole-chain deletion prohibition was superseded by issue 17 and
+ADR-0007. Retained Ended Chain entries remain structurally immutable, but the
+user may explicitly delete the entire Ended Chain.
