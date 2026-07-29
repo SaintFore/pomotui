@@ -19,3 +19,7 @@
 The current implementation displays at most five links as unconnected text and binds `E` to the newest link. That makes the durable chain and its existing edit capability effectively undiscoverable.
 
 Resolved with a complete root-to-tail snapshot and a connected, selectable Chain page. `E` edits the selected Reflection and `T` is available only for the selected Void link's Chain Entry Title.
+
+Issue 18 later removes the stable IDs from normal Chain rendering to align with
+the product-wide rule that internal identities remain available only through
+detailed or JSON interfaces.

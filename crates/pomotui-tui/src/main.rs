@@ -1,7 +1,7 @@
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -79,23 +79,7 @@ fn run(
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let input = match key.code {
-                    KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::ALT) => {
-                        Some(InputKey::AltSpace)
-                    }
-                    KeyCode::Char(value) => {
-                        Some(InputKey::Char(canonical_key(value, &config.keybindings)))
-                    }
-                    KeyCode::Esc => Some(InputKey::Escape),
-                    KeyCode::Enter => Some(InputKey::Enter),
-                    KeyCode::Backspace => Some(InputKey::Backspace),
-                    KeyCode::Tab => Some(InputKey::Tab),
-                    KeyCode::Up => Some(InputKey::Up),
-                    KeyCode::Down => Some(InputKey::Down),
-                    KeyCode::Left => Some(InputKey::Left),
-                    KeyCode::Right => Some(InputKey::Right),
-                    _ => None,
-                };
+                let input = map_key(key, &config.keybindings);
                 if let Some(action) = input.and_then(|value| app.handle_key(value)) {
                     if action == Action::Quit {
                         break;
@@ -112,6 +96,41 @@ fn run(
         }
     }
     Ok(())
+}
+
+fn map_key(key: KeyEvent, keys: &pomotui_tui::config::Keybindings) -> Option<InputKey> {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char('a') if control => Some(InputKey::Home),
+        KeyCode::Char('e') if control => Some(InputKey::End),
+        KeyCode::Char('b') if control => Some(InputKey::Left),
+        KeyCode::Char('f') if control => Some(InputKey::Right),
+        KeyCode::Char('h') if control => Some(InputKey::Backspace),
+        KeyCode::Char('d') if control => Some(InputKey::Delete),
+        KeyCode::Char('w') if control => Some(InputKey::DeleteWordBackward),
+        KeyCode::Char('k') if control => Some(InputKey::KillToEnd),
+        KeyCode::Char('u') if control => Some(InputKey::KillToStart),
+        KeyCode::Char('y') if control => Some(InputKey::Yank),
+        KeyCode::Char('b') if alt => Some(InputKey::WordLeft),
+        KeyCode::Char('f') if alt => Some(InputKey::WordRight),
+        KeyCode::Char('d') if alt => Some(InputKey::DeleteWordForward),
+        KeyCode::Char(' ') if alt => Some(InputKey::AltSpace),
+        KeyCode::Char(value) => Some(InputKey::Char(canonical_key(value, keys))),
+        KeyCode::Esc => Some(InputKey::Escape),
+        KeyCode::Enter => Some(InputKey::Enter),
+        KeyCode::Backspace if alt => Some(InputKey::DeleteWordBackward),
+        KeyCode::Backspace => Some(InputKey::Backspace),
+        KeyCode::Delete => Some(InputKey::Delete),
+        KeyCode::Home => Some(InputKey::Home),
+        KeyCode::End => Some(InputKey::End),
+        KeyCode::Tab => Some(InputKey::Tab),
+        KeyCode::Up => Some(InputKey::Up),
+        KeyCode::Down => Some(InputKey::Down),
+        KeyCode::Left => Some(InputKey::Left),
+        KeyCode::Right => Some(InputKey::Right),
+        _ => None,
+    }
 }
 
 fn canonical_key(value: char, keys: &pomotui_tui::config::Keybindings) -> char {
@@ -248,5 +267,30 @@ fn pomotui_cli_request(command: Command) -> pomotui_protocol::Request {
         version: pomotui_protocol::PROTOCOL_VERSION,
         idempotency_key,
         command,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_adapter_preserves_emacs_text_editing_chords() {
+        let keys = pomotui_tui::config::Keybindings::default();
+        assert_eq!(
+            map_key(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                &keys
+            ),
+            Some(InputKey::Home)
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT), &keys),
+            Some(InputKey::DeleteWordForward)
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), &keys),
+            Some(InputKey::Delete)
+        );
     }
 }

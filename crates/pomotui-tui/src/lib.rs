@@ -113,6 +113,16 @@ pub enum InputKey {
     Escape,
     Enter,
     Backspace,
+    Delete,
+    Home,
+    End,
+    WordLeft,
+    WordRight,
+    DeleteWordBackward,
+    DeleteWordForward,
+    KillToEnd,
+    KillToStart,
+    Yank,
     Up,
     Down,
     Left,
@@ -147,12 +157,14 @@ pub struct App {
     pub pending_g: bool,
     pub palette_index: usize,
     pub input: String,
+    pub input_cursor: usize,
     pub narrow: bool,
     pub warning: Option<String>,
     pub message: Option<String>,
     pending_failure_reflection: Option<String>,
     edit_entry_id: Option<u64>,
     edit_reward_id: Option<u64>,
+    input_kill_buffer: String,
     last_timer_view: View,
     last_work_chain_view: View,
     pending_failure_void_title: Option<String>,
@@ -206,12 +218,14 @@ impl App {
             pending_g: false,
             palette_index: 0,
             input: String::new(),
+            input_cursor: 0,
             narrow: false,
             warning: None,
             message: None,
             pending_failure_reflection: None,
             edit_entry_id: None,
             edit_reward_id: None,
+            input_kill_buffer: String::new(),
             last_timer_view: View::Dashboard,
             last_work_chain_view: View::Chain,
             pending_failure_void_title: None,
@@ -548,6 +562,7 @@ impl App {
         if key == InputKey::Escape {
             self.overlay = Overlay::None;
             self.input.clear();
+            self.input_cursor = 0;
             return None;
         }
         match self.overlay {
@@ -645,11 +660,85 @@ impl App {
             | Overlay::UpdateReward
             | Overlay::ReviewFailureVoidTitle => match key {
                 InputKey::Char(value) if !value.is_control() => {
-                    self.input.push(value);
+                    self.clamp_input_cursor();
+                    self.input.insert(self.input_cursor, value);
+                    self.input_cursor += value.len_utf8();
                     None
                 }
                 InputKey::Backspace => {
-                    self.input.pop();
+                    self.clamp_input_cursor();
+                    let start = previous_char_boundary(&self.input, self.input_cursor);
+                    self.input.drain(start..self.input_cursor);
+                    self.input_cursor = start;
+                    None
+                }
+                InputKey::Delete => {
+                    self.clamp_input_cursor();
+                    let end = next_char_boundary(&self.input, self.input_cursor);
+                    self.input.drain(self.input_cursor..end);
+                    None
+                }
+                InputKey::Left => {
+                    self.clamp_input_cursor();
+                    self.input_cursor = previous_char_boundary(&self.input, self.input_cursor);
+                    None
+                }
+                InputKey::Right => {
+                    self.clamp_input_cursor();
+                    self.input_cursor = next_char_boundary(&self.input, self.input_cursor);
+                    None
+                }
+                InputKey::Home => {
+                    self.input_cursor = 0;
+                    None
+                }
+                InputKey::End => {
+                    self.input_cursor = self.input.len();
+                    None
+                }
+                InputKey::WordLeft => {
+                    self.clamp_input_cursor();
+                    self.input_cursor = word_left_boundary(&self.input, self.input_cursor);
+                    None
+                }
+                InputKey::WordRight => {
+                    self.clamp_input_cursor();
+                    self.input_cursor = word_right_boundary(&self.input, self.input_cursor);
+                    None
+                }
+                InputKey::DeleteWordBackward => {
+                    self.clamp_input_cursor();
+                    let start = word_left_boundary(&self.input, self.input_cursor);
+                    self.input_kill_buffer = self.input[start..self.input_cursor].to_owned();
+                    self.input.drain(start..self.input_cursor);
+                    self.input_cursor = start;
+                    None
+                }
+                InputKey::DeleteWordForward => {
+                    self.clamp_input_cursor();
+                    let end = word_right_boundary(&self.input, self.input_cursor);
+                    self.input_kill_buffer = self.input[self.input_cursor..end].to_owned();
+                    self.input.drain(self.input_cursor..end);
+                    None
+                }
+                InputKey::KillToEnd => {
+                    self.clamp_input_cursor();
+                    self.input_kill_buffer = self.input[self.input_cursor..].to_owned();
+                    self.input.truncate(self.input_cursor);
+                    None
+                }
+                InputKey::KillToStart => {
+                    self.clamp_input_cursor();
+                    self.input_kill_buffer = self.input[..self.input_cursor].to_owned();
+                    self.input.drain(..self.input_cursor);
+                    self.input_cursor = 0;
+                    None
+                }
+                InputKey::Yank => {
+                    self.clamp_input_cursor();
+                    self.input
+                        .insert_str(self.input_cursor, &self.input_kill_buffer);
+                    self.input_cursor += self.input_kill_buffer.len();
                     None
                 }
                 InputKey::Enter => self.submit_text_entry(),
@@ -938,10 +1027,51 @@ impl App {
                             .map_or_else(String::new, |value| value.to_string())
                     )
                 })
+        } else if matches!(overlay, Overlay::EditReflection | Overlay::EditChainTitle) {
+            self.edit_entry_text(overlay).unwrap_or_default()
         } else {
             String::new()
         };
+        self.input_cursor = self.input.len();
         self.overlay = overlay;
+    }
+
+    fn edit_entry_text(&self, overlay: Overlay) -> Option<String> {
+        let id = self.edit_entry_id?;
+        let snapshot = self.snapshot.as_ref()?;
+        let link = snapshot
+            .recent_chain_links
+            .iter()
+            .chain(
+                snapshot
+                    .recent_ended_chains
+                    .iter()
+                    .flat_map(|chain| &chain.links),
+            )
+            .find(|link| link.id == id);
+        if let Some(link) = link {
+            return match overlay {
+                Overlay::EditReflection => Some(link.reflection.clone().unwrap_or_default()),
+                Overlay::EditChainTitle => Some(link.chain_entry_title.clone().unwrap_or_default()),
+                _ => None,
+            };
+        }
+        snapshot
+            .recent_ended_chains
+            .iter()
+            .find(|chain| chain.break_id == id)
+            .and_then(|chain| match overlay {
+                Overlay::EditReflection => Some(chain.break_reflection.clone()),
+                Overlay::EditChainTitle => chain.break_chain_entry_title.clone(),
+                _ => None,
+            })
+    }
+
+    fn clamp_input_cursor(&mut self) {
+        self.input_cursor = self.input_cursor.min(self.input.len());
+        while !self.input.is_char_boundary(self.input_cursor) {
+            self.input_cursor -= 1;
+        }
     }
 
     fn submit_text_entry(&mut self) -> Option<Action> {
@@ -1032,6 +1162,7 @@ impl App {
         };
         self.overlay = Overlay::None;
         self.input.clear();
+        self.input_cursor = 0;
         Some(self.emit(command))
     }
 
@@ -1594,7 +1725,7 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         }),
         Line::from(""),
         Line::from(Span::styled(
-            format!("ROOT #{}", snapshot.action_chain.id),
+            "ROOT",
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1677,9 +1808,7 @@ fn chain_link_lines(
             [
                 Line::from(Span::styled(
                     format!(
-                        "{marker} {connector} #{}  {}  {}",
-                        link.id,
-                        title,
+                        "{marker} {connector}  {title}  {}",
                         chain_duration(link.actual_seconds)
                     ),
                     style,
@@ -3619,7 +3748,11 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
             text(app.language, "Task title", "任务标题"),
         ),
     };
-    let cursor = format!("{}█", app.input);
+    let cursor = input_viewport(
+        &app.input,
+        app.input_cursor,
+        usize::from(area.width.saturating_sub(2)),
+    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(label),
@@ -3633,8 +3766,8 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
             Line::from(Span::styled(
                 text(
                     app.language,
-                    "Enter save · Esc cancel",
-                    "Enter 保存 · Esc 取消",
+                    "Enter save · Esc cancel · C-a/e start/end · C-k/u/y kill/yank",
+                    "Enter 保存 · Esc 取消 · C-a/e 首/尾 · C-k/u/y 剪切/粘回",
                 ),
                 Style::default().fg(colors.muted),
             )),
@@ -3642,6 +3775,96 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         .block(panel(title, colors).border_style(Style::default().fg(colors.accent))),
         area,
     );
+}
+
+fn input_viewport(value: &str, cursor: usize, width: usize) -> String {
+    let cursor = cursor.min(value.len());
+    if width <= 1 || !value.is_char_boundary(cursor) {
+        return "█".into();
+    }
+    let mut start = cursor;
+    let mut used = 1;
+    while start > 0 {
+        let previous = previous_char_boundary(value, start);
+        let character_width = value[previous..start].width();
+        if used + character_width > width / 2 + 1 {
+            break;
+        }
+        used += character_width;
+        start = previous;
+    }
+    let mut end = cursor;
+    while end < value.len() {
+        let next = next_char_boundary(value, end);
+        let character_width = value[end..next].width();
+        if used + character_width > width {
+            break;
+        }
+        used += character_width;
+        end = next;
+    }
+    while start > 0 && used < width {
+        let previous = previous_char_boundary(value, start);
+        let character_width = value[previous..start].width();
+        if used + character_width > width {
+            break;
+        }
+        used += character_width;
+        start = previous;
+    }
+    format!("{}█{}", &value[start..cursor], &value[cursor..end])
+}
+
+fn previous_char_boundary(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_char_boundary(value: &str, cursor: usize) -> usize {
+    value[cursor..]
+        .chars()
+        .next()
+        .map_or(cursor, |character| cursor + character.len_utf8())
+}
+
+fn word_left_boundary(value: &str, cursor: usize) -> usize {
+    let mut position = cursor;
+    while position > 0 {
+        let previous = previous_char_boundary(value, position);
+        if !value[previous..position].chars().all(char::is_whitespace) {
+            break;
+        }
+        position = previous;
+    }
+    while position > 0 {
+        let previous = previous_char_boundary(value, position);
+        if value[previous..position].chars().all(char::is_whitespace) {
+            break;
+        }
+        position = previous;
+    }
+    position
+}
+
+fn word_right_boundary(value: &str, cursor: usize) -> usize {
+    let mut position = cursor;
+    while position < value.len() {
+        let next = next_char_boundary(value, position);
+        if !value[position..next].chars().all(char::is_whitespace) {
+            break;
+        }
+        position = next;
+    }
+    while position < value.len() {
+        let next = next_char_boundary(value, position);
+        if value[position..next].chars().all(char::is_whitespace) {
+            break;
+        }
+        position = next;
+    }
+    position
 }
 
 fn confirm_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
@@ -4180,9 +4403,9 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("ROOT #7"));
+        assert!(rendered.contains("ROOT"));
         assert!(rendered.contains("└─"));
-        assert!(rendered.contains("#11"));
+        assert!(!rendered.contains("#11"));
         assert!(rendered.contains("Investigate chain UI"));
         assert!(rendered.contains("17m 32s"));
 
@@ -4196,11 +4419,12 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("ROOT #7"));
+        assert!(rendered.contains("ROOT"));
         assert!(rendered.contains('复') && rendered.contains('盘'));
 
         app.handle_key(InputKey::Char('j'));
         app.handle_key(InputKey::Char('E'));
+        app.handle_key(InputKey::KillToStart);
         for character in "Revised second reflection".chars() {
             app.handle_key(InputKey::Char(character));
         }
@@ -4212,6 +4436,39 @@ mod tests {
                 chain_entry_title: None,
             }))
         );
+    }
+
+    #[test]
+    fn current_chain_hides_internal_chain_and_entry_ids() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.action_chain = pomotui_protocol::ActionChainSummary { id: 77, length: 1 };
+        state.recent_chain_links = vec![pomotui_protocol::ChainLinkSummary {
+            id: 88,
+            task_title: "Visible work".into(),
+            actual_seconds: 1_052,
+            reflection: Some("Visible reflection".into()),
+            chain_entry_title: None,
+        }];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Chain;
+        let mut terminal = Terminal::new(TestBackend::new(76, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("ROOT"));
+        assert!(rendered.contains("Visible work"));
+        assert!(rendered.contains("17m 32s"));
+        assert!(!rendered.contains("#77"));
+        assert!(!rendered.contains("#88"));
     }
 
     #[test]
@@ -4243,6 +4500,7 @@ mod tests {
         app.handle_key(InputKey::Char('j'));
         app.handle_key(InputKey::Char('T'));
         assert_eq!(app.overlay, Overlay::EditChainTitle);
+        app.handle_key(InputKey::KillToStart);
         for character in "Corrected title".chars() {
             app.handle_key(InputKey::Char(character));
         }
@@ -5058,6 +5316,78 @@ mod tests {
                 chain_entry_title: None,
             }))
         );
+    }
+
+    #[test]
+    fn editing_prefills_existing_reflection_and_inserts_at_a_unicode_cursor() {
+        let mut archived = ended_chain(1, "First archived link", 3);
+        archived.links[0].reflection = Some("复盘很好".into());
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_ended_chains = vec![archived];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::ChainArchive;
+        app.handle_key(InputKey::Enter);
+        app.handle_key(InputKey::Char('E'));
+
+        assert_eq!(app.input, "复盘很好");
+        assert_eq!(app.input_cursor, app.input.len());
+        app.handle_key(InputKey::Home);
+        app.handle_key(InputKey::Right);
+        app.handle_key(InputKey::Char('新'));
+        assert_eq!(app.input, "复新盘很好");
+    }
+
+    #[test]
+    fn text_entry_supports_emacs_word_kill_and_yank() {
+        let mut app = App::new(None, Theme::VermilionPaperDark);
+        app.begin_text_entry(Overlay::CreateTask);
+        for character in "alpha beta".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        app.handle_key(InputKey::WordLeft);
+        app.handle_key(InputKey::DeleteWordForward);
+        assert_eq!(app.input, "alpha ");
+        app.handle_key(InputKey::Yank);
+        assert_eq!(app.input, "alpha beta");
+        app.handle_key(InputKey::WordLeft);
+        app.handle_key(InputKey::KillToStart);
+        assert_eq!(app.input, "beta");
+        app.handle_key(InputKey::Yank);
+        assert_eq!(app.input, "alpha beta");
+    }
+
+    #[test]
+    fn long_text_overlay_keeps_the_logical_cursor_visible() {
+        let mut app = App::new(None, Theme::VermilionPaperDark);
+        app.overlay = Overlay::CreateTask;
+        app.input = "start alpha beta gamma delta epsilon finish".into();
+        app.input_cursor = 0;
+        let mut terminal = Terminal::new(TestBackend::new(36, 14)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw start");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("█start"));
+
+        app.input_cursor = app.input.len();
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw end");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("finish█"));
     }
 
     #[test]

@@ -104,6 +104,11 @@ together, and `D` deletes the marked records after confirmation. On the
 Dashboard, press `Enter` to bind the selected Task to the Current Session and
 `Space` to start/pause/resume; `X` stops and `K` skips.
 
+Text editors open with the existing value and the cursor at its end. They are
+single-line editors (not full Emacs), with arrows, Home/End, Backspace/Delete,
+`C-a/e/b/f` and `M-b/f` for movement, `C-h/d/w` and `M-d` for deletion, plus
+`C-k/u/y` for kill-to-end, kill-to-start, and yank.
+
 Task management is available without leaving the TUI: `n` creates, `r` renames,
 `c` completes or reopens, and uppercase `D` deletes after confirmation. `:`
 opens the executable command palette, `?` opens the complete key reference, `s`

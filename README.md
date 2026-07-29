@@ -84,6 +84,9 @@ terminals. Its primary controls are:
 | `q` | Close the TUI without stopping the Timer Service |
 
 Task deletion requires confirmation and never deletes existing Session History.
+Single-line text editors prefill the existing value and support arrows,
+Home/End, Delete, and a compact Emacs/Readline subset: `C-a/e/b/f`,
+`M-b/f`, `C-h/d/w`, `M-d`, and `C-k/u/y`.
 In Settings, press `g` to switch between English and Simplified Chinese; the
 selection is saved to the user configuration.
 
