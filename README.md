@@ -72,7 +72,7 @@ terminals. Its primary controls are:
 | `p` | Reopen the Pending Review dialog |
 | `j` / `k` on Chain | Select a Chain Link |
 | `E` on Chain | Edit the selected Chain Link's Reflection |
-| `T` on Chain | Edit the selected Void Chain Link's Chain Entry Title |
+| `T` on Chain or open Chain Archive | Edit the selected Chain Entry's display title |
 | `E` on Chain Archive | Edit the latest Chain Break Reflection |
 | `R` on Chain | Open Reward Milestone manager (`n` create, `e` edit, `D` delete) |
 | `C` on Chain | Claim the first unlocked reward |

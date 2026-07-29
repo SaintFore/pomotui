@@ -89,7 +89,7 @@ each one. Use arrows or `h/l` to move only within the current area.
 On Chain Archive, `j/k` selects an Ended Chain and shows its complete links,
 Chain Break, and reward history. Press `Enter` to open the selected Ended Chain,
 then use `j/k` to browse every archived entry; `E` edits its Reflection, `T`
-edits a selected Void entry's Chain Entry Title, and `Esc` returns to the
+edits any selected entry's display title, and `Esc` returns to the
 archive list. Individual archived entries cannot be deleted. On the archive
 list, uppercase `D` permanently deletes the whole selected Ended Chain after a
 confirmation that shows its length and reward-history impact; Session History

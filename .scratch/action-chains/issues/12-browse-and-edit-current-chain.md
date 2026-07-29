@@ -23,3 +23,6 @@ Resolved with a complete root-to-tail snapshot and a connected, selectable Chain
 Issue 18 later removes the stable IDs from normal Chain rendering to align with
 the product-wide rule that internal identities remain available only through
 detailed or JSON interfaces.
+
+Issue 19 later broadens `T` to every selected Chain Entry and uses the Task
+title snapshot as the initial editable display title when no override exists.

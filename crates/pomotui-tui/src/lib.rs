@@ -393,7 +393,6 @@ impl App {
                         snapshot
                             .recent_chain_links
                             .get(self.chain_cursor)
-                            .filter(|link| link.chain_entry_title.is_some())
                             .map(|link| link.id)
                     } else {
                         snapshot
@@ -403,12 +402,10 @@ impl App {
                                 chain
                                     .links
                                     .get(self.archive_entry_cursor)
-                                    .filter(|link| link.chain_entry_title.is_some())
                                     .map(|link| link.id)
                                     .or_else(|| {
-                                        (self.archive_entry_cursor == chain.links.len()
-                                            && chain.break_chain_entry_title.is_some())
-                                        .then_some(chain.break_id)
+                                        (self.archive_entry_cursor == chain.links.len())
+                                            .then_some(chain.break_id)
                                     })
                             })
                     }
@@ -492,8 +489,10 @@ impl App {
             }
             InputKey::Char('c') => return self.complete_or_reopen_selected(),
             InputKey::Char('D') => {
-                if self.view == View::ChainArchive && self.archive_detail_open {
-                    // Individual archived entries are not deletable.
+                if self.view == View::Chain
+                    || (self.view == View::ChainArchive && self.archive_detail_open)
+                {
+                    // Individual current or archived Chain Entries are not deletable.
                 } else if self.view == View::History && !self.history_ids_for_action().is_empty() {
                     self.overlay = Overlay::ConfirmHistoryDelete;
                 } else if self.view == View::ChainArchive
@@ -1052,7 +1051,11 @@ impl App {
         if let Some(link) = link {
             return match overlay {
                 Overlay::EditReflection => Some(link.reflection.clone().unwrap_or_default()),
-                Overlay::EditChainTitle => Some(link.chain_entry_title.clone().unwrap_or_default()),
+                Overlay::EditChainTitle => Some(
+                    link.chain_entry_title
+                        .clone()
+                        .unwrap_or_else(|| link.task_title.clone()),
+                ),
                 _ => None,
             };
         }
@@ -1062,7 +1065,12 @@ impl App {
             .find(|chain| chain.break_id == id)
             .and_then(|chain| match overlay {
                 Overlay::EditReflection => Some(chain.break_reflection.clone()),
-                Overlay::EditChainTitle => chain.break_chain_entry_title.clone(),
+                Overlay::EditChainTitle => Some(
+                    chain
+                        .break_chain_entry_title
+                        .clone()
+                        .unwrap_or_else(|| chain.break_task_title.clone()),
+                ),
                 _ => None,
             })
     }
@@ -1106,8 +1114,11 @@ impl App {
                     .snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.pending_review.as_ref())
-                    .is_some_and(|review| review.task_id.is_none())
-                    && self.selected_task().is_some_and(|task| task.id == u64::MAX);
+                    .is_some_and(|review| {
+                        review.is_void
+                            || (review.task_id.is_none()
+                                && self.selected_task().is_some_and(|task| task.id == u64::MAX))
+                    });
                 self.overlay = if needs_void_title {
                     Overlay::ReviewFailureVoidTitle
                 } else {
@@ -1764,8 +1775,8 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         lines.push(Line::from(""));
         lines.push(Line::from(text(
             language,
-            "j/k select · E edit Reflection · T edit Void title",
-            "j/k 选择 · E 编辑复盘 · T 编辑 Void 标题",
+            "j/k select · E edit Reflection · T edit title",
+            "j/k 选择 · E 编辑复盘 · T 编辑标题",
         )));
     }
     frame.render_widget(
@@ -1808,7 +1819,8 @@ fn chain_link_lines(
             [
                 Line::from(Span::styled(
                     format!(
-                        "{marker} {connector}  {title}  {}",
+                        "{marker} {connector} {}.  {title}  {}",
+                        index + 1,
                         chain_duration(link.actual_seconds)
                     ),
                     style,
@@ -1952,8 +1964,9 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
                 .unwrap_or(&link.task_title);
             lines.push(Line::from(Span::styled(
                 format!(
-                    "{} ├─ {title} · {}",
+                    "{} ├─ {}. {title} · {}",
                     if selected { "›" } else { " " },
+                    index + 1,
                     chain_duration(link.actual_seconds)
                 ),
                 style,
@@ -1970,8 +1983,9 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
                 .unwrap_or(&chain.break_task_title);
             lines.push(Line::from(Span::styled(
                 format!(
-                    "{} └─ {} · {break_title} · {}",
+                    "{} └─ {}. {} · {break_title} · {}",
                     if selected { "›" } else { " " },
+                    index + 1,
                     text(language, "CHAIN BREAK", "行动链中断"),
                     chain_duration(chain.break_actual_seconds)
                 ),
@@ -3459,6 +3473,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             Line::from("  Tab  番茄钟区域 ↔ 工作链区域"),
             Line::from("  h/l 或 ←/→  切换当前区域内的页面"),
             Line::from("  归档：Enter 详情 · D 删除整链 · Esc 返回列表"),
+            Line::from("  行动链：E 编辑复盘 · T 编辑任意条目标题"),
             Line::from("  j/k 或 ↑/↓  选择任务                    q  退出"),
             Line::from(""),
             Line::from(Span::styled(
@@ -3498,6 +3513,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             Line::from("  Tab  Timer area ↔ Work Chain area"),
             Line::from("  h/l or ←/→  switch pages within the current area"),
             Line::from("  Archive: Enter detail · D delete whole chain · Esc back"),
+            Line::from("  Chain: E edit Reflection · T edit any entry title"),
             Line::from("  j/k move  gg/G ends  u/d page  Space mark  v range  q quit"),
             Line::from(""),
             Line::from(Span::styled(
@@ -4405,6 +4421,8 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("ROOT"));
         assert!(rendered.contains("└─"));
+        assert!(rendered.contains("1.  Ship Pomotui"));
+        assert!(rendered.contains("2.  Investigate chain UI"));
         assert!(!rendered.contains("#11"));
         assert!(rendered.contains("Investigate chain UI"));
         assert!(rendered.contains("17m 32s"));
@@ -4472,7 +4490,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_selected_void_link_can_edit_its_chain_entry_title() {
+    fn any_selected_link_can_edit_its_effective_chain_entry_title() {
         let mut state = snapshot("pending", SessionKind::Focus);
         state.recent_chain_links = vec![
             pomotui_protocol::ChainLinkSummary {
@@ -4495,8 +4513,22 @@ mod tests {
         app.view = View::Chain;
 
         app.handle_key(InputKey::Char('T'));
-        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.overlay, Overlay::EditChainTitle);
+        assert_eq!(app.input, "Ship Pomotui");
+        app.handle_key(InputKey::KillToStart);
+        for character in "Ship the release".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ChainEntryEdit {
+                id: 11,
+                reflection: None,
+                chain_entry_title: Some("Ship the release".into()),
+            }))
+        );
 
+        app.overlay = Overlay::None;
         app.handle_key(InputKey::Char('j'));
         app.handle_key(InputKey::Char('T'));
         assert_eq!(app.overlay, Overlay::EditChainTitle);
@@ -4763,6 +4795,61 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn failed_review_prompts_for_title_when_session_is_already_attributed_to_void() {
+        let mut state = snapshot("pending", SessionKind::ShortBreak);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 44,
+            actual_seconds: 5,
+            task_id: Some(u64::MAX),
+            task_title: Some("Void".into()),
+            is_void: true,
+        });
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Chain;
+
+        app.handle_key(InputKey::Char('F'));
+        for character in "The chain stopped".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        app.handle_key(InputKey::Enter);
+
+        assert_eq!(app.overlay, Overlay::ReviewFailureVoidTitle);
+        for character in "Investigate the break".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        app.handle_key(InputKey::Enter);
+        assert_eq!(app.overlay, Overlay::ConfirmReviewFailure);
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::ReviewFailure {
+                reflection: "The chain stopped".into(),
+                task_id: None,
+                use_void: false,
+                chain_entry_title: Some("Investigate the break".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn current_chain_entries_do_not_offer_task_deletion() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_chain_links = vec![pomotui_protocol::ChainLinkSummary {
+            id: 91,
+            task_title: "Void".into(),
+            actual_seconds: 4,
+            reflection: None,
+            chain_entry_title: Some("A chain entry".into()),
+        }];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.overlay = Overlay::None;
+        app.view = View::Chain;
+
+        assert_eq!(app.handle_key(InputKey::Char('D')), None);
+        assert_eq!(app.overlay, Overlay::None);
     }
 
     #[test]
@@ -5391,9 +5478,8 @@ mod tests {
     }
 
     #[test]
-    fn archive_detail_edits_only_a_selected_void_entry_title() {
-        let mut archived = ended_chain(1, "Void", 2);
-        archived.links[0].chain_entry_title = Some("Original archived title".into());
+    fn archive_detail_edits_a_task_backed_entry_title() {
+        let archived = ended_chain(1, "Archived Task", 2);
         let mut state = snapshot("pending", SessionKind::Focus);
         state.recent_ended_chains = vec![archived];
         let mut app = App::new(Some(state), Theme::VermilionPaperDark);
@@ -5402,6 +5488,7 @@ mod tests {
         app.handle_key(InputKey::Enter);
         app.handle_key(InputKey::Char('T'));
         assert_eq!(app.overlay, Overlay::EditChainTitle);
+        assert_eq!(app.input, "Archived Task");
         app.input.clear();
         for character in "Corrected archived title".chars() {
             app.handle_key(InputKey::Char(character));
@@ -5466,11 +5553,14 @@ mod tests {
                 .collect::<String>();
 
             assert!(rendered.contains("Archived project"));
+            assert!(rendered.contains("1. Archived project"));
             assert!(rendered.contains("17m 32s"));
             assert!(rendered.contains("Useful progress"));
             assert!(rendered.contains("Research the next approach"));
+            assert!(rendered.contains("2. Research the next approach"));
             assert!(rendered.contains("15m"));
             assert!(rendered.contains("Stopped on an unclear next step"));
+            assert!(rendered.contains("3."));
             assert!(rendered.contains("Claimed coffee"));
             assert!(rendered.contains("35"));
             assert!(rendered.contains("claimed"));

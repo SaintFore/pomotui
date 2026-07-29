@@ -818,40 +818,31 @@ impl Service {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         if let Some(link) = self.chain_links.iter_mut().find(|link| link.id == id) {
-            if link.task_id == self.void_task_id.unwrap_or(u64::MAX) {
-                if let Some(title) = chain_entry_title {
-                    link.chain_entry_title = Some(title);
-                }
-            } else if chain_entry_title.is_some() {
-                return Err("Only Void entries can have a Chain Entry Title".into());
+            if let Some(title) = chain_entry_title {
+                link.chain_entry_title = Some(title);
             }
-            link.reflection = reflection;
+            if reflection.is_some() {
+                link.reflection = reflection;
+            }
             return Ok(());
         }
         for chain in &mut self.ended_chains {
             if let Some(link) = chain.links.iter_mut().find(|link| link.id == id) {
-                if link.task_id == self.void_task_id.unwrap_or(u64::MAX) {
-                    if let Some(title) = chain_entry_title {
-                        link.chain_entry_title = Some(title);
-                    }
-                } else if chain_entry_title.is_some() {
-                    return Err("Only Void entries can have a Chain Entry Title".into());
+                if let Some(title) = chain_entry_title {
+                    link.chain_entry_title = Some(title);
                 }
-                link.reflection = reflection;
+                if reflection.is_some() {
+                    link.reflection = reflection;
+                }
                 return Ok(());
             }
             if chain.chain_break.id == id {
-                let Some(reflection) = reflection else {
-                    return Err("Chain Break requires a Reflection".into());
-                };
-                if chain.chain_break.task_id == self.void_task_id.unwrap_or(u64::MAX) {
-                    if let Some(title) = chain_entry_title {
-                        chain.chain_break.chain_entry_title = Some(title);
-                    }
-                } else if chain_entry_title.is_some() {
-                    return Err("Only Void entries can have a Chain Entry Title".into());
+                if let Some(title) = chain_entry_title {
+                    chain.chain_break.chain_entry_title = Some(title);
                 }
-                chain.chain_break.reflection = reflection;
+                if let Some(reflection) = reflection {
+                    chain.chain_break.reflection = reflection;
+                }
                 return Ok(());
             }
         }
@@ -2403,6 +2394,58 @@ mod tests {
         );
         assert_eq!(service.chain_links[0].session_id, session_id);
         assert_eq!(service.chain_links[0].task_title, "Stable identity");
+    }
+
+    #[test]
+    fn task_backed_chain_entry_can_have_an_independent_display_title() {
+        let mut service = Service::new();
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Stable task name".into(),
+            },
+        ));
+        service.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        service.handle(request(Some("stop"), Command::StopReview));
+        service.handle(request(
+            Some("review"),
+            Command::ReviewSuccess {
+                reflection: Some("Keep this reflection".into()),
+            },
+        ));
+        let link_id = service.chain_links[0].id;
+
+        let response = service.handle(request(
+            Some("edit-title"),
+            Command::ChainEntryEdit {
+                id: link_id,
+                reflection: None,
+                chain_entry_title: Some("A clearer chain step".into()),
+            },
+        ));
+
+        let Response::Snapshot { snapshot } = response else {
+            panic!("task-backed title edit should succeed");
+        };
+        assert_eq!(
+            snapshot.recent_chain_links[0].chain_entry_title.as_deref(),
+            Some("A clearer chain step")
+        );
+        assert_eq!(
+            snapshot.recent_chain_links[0].reflection.as_deref(),
+            Some("Keep this reflection")
+        );
+        assert_eq!(
+            snapshot.recent_chain_links[0].task_title,
+            "Stable task name"
+        );
+        assert_eq!(snapshot.tasks[0].title, "Stable task name");
     }
 
     #[test]

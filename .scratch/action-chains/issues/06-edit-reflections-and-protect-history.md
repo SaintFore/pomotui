@@ -25,3 +25,7 @@
 Issue 17 and ADR-0007 later permit deletion of a whole Ended Chain. Individual
 Chain Links and the Chain Break remain non-deletable and retain the limited edit
 rules established here.
+
+Issue 19 supersedes the non-Void title restriction for post-review editing:
+every Chain Entry may have an independent display title, while Void alone still
+requires one during Session Review.

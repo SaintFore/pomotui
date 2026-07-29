@@ -49,7 +49,7 @@ One durable successful step in an Action Chain, created only after the user revi
 _Avoid_: Task, Action Node, Completed Round
 
 **Ended Chain**:
-An Action Chain that is no longer current because the user reviewed a Focus Session as failed. It retains its Chain Links, terminal Chain Break, and reward history until the user explicitly deletes the whole Ended Chain; its individual entries cannot be deleted, extended, reactivated, or merged, while a Void entry's Chain Entry Title and any Reflection may be revised. An Ended Chain may have zero Chain Links when the first Session Review in a new chain is failed.
+An Action Chain that is no longer current because the user reviewed a Focus Session as failed. It retains its Chain Links, terminal Chain Break, and reward history until the user explicitly deletes the whole Ended Chain; its individual entries cannot be deleted, extended, reactivated, or merged, while any Chain Entry Title or Reflection may be revised. An Ended Chain may have zero Chain Links when the first Session Review in a new chain is failed.
 _Avoid_: Deleted chain, failed Task
 
 **Chain Break**:
@@ -57,7 +57,7 @@ The non-counting terminal record appended when the user reviews a Focus Session 
 _Avoid_: Failed Chain Link, deleted Session, automatic failure
 
 **Chain Entry Title**:
-A required description of the attempted work when a Chain Link or Chain Break uses the Void Task. Non-Void entries use their Task title snapshot and do not need a separate title. It may be corrected after Session Review without changing the Session, chain membership, or review judgment.
+The user-controlled display title of a Chain Link or Chain Break. It initially falls back to the Task title snapshot for a regular Task, while an entry using the Void Task requires an explicit title during Session Review. Any entry's title may later be created or corrected independently without renaming its Task or changing the Session, chain membership, or review judgment.
 _Avoid_: Task title, comment, Action Node title
 
 **Reflection**:
