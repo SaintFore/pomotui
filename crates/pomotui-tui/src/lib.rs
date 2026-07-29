@@ -82,6 +82,7 @@ pub enum View {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Overlay {
     None,
+    PendingReview,
     Palette,
     Settings,
     Help,
@@ -140,6 +141,7 @@ pub struct App {
     pending_failure_reflection: Option<String>,
     edit_entry_id: Option<u64>,
     pending_failure_void_title: Option<String>,
+    last_prompted_review_id: Option<u64>,
     completion: Option<CompletionPlayback>,
 }
 
@@ -150,13 +152,22 @@ struct CompletionPlayback {
 
 impl App {
     #[must_use]
-    pub const fn new(snapshot: Option<Snapshot>, theme: Theme) -> Self {
+    pub fn new(snapshot: Option<Snapshot>, theme: Theme) -> Self {
+        let last_prompted_review_id = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.pending_review.as_ref())
+            .map(|review| review.session_id);
+        let overlay = if last_prompted_review_id.is_some() {
+            Overlay::PendingReview
+        } else {
+            Overlay::None
+        };
         Self {
             snapshot,
             theme,
             language: Language::English,
             view: View::Dashboard,
-            overlay: Overlay::None,
+            overlay,
             selected_task: 0,
             history_cursor: 0,
             history_offset: 0,
@@ -181,8 +192,23 @@ impl App {
             pending_failure_reflection: None,
             edit_entry_id: None,
             pending_failure_void_title: None,
+            last_prompted_review_id,
             completion: None,
         }
+    }
+
+    pub fn replace_snapshot(&mut self, snapshot: Option<Snapshot>) {
+        let pending_review_id = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.pending_review.as_ref())
+            .map(|review| review.session_id);
+        if pending_review_id.is_some() && pending_review_id != self.last_prompted_review_id {
+            self.overlay = Overlay::PendingReview;
+            self.last_prompted_review_id = pending_review_id;
+        } else if pending_review_id.is_none() && self.overlay == Overlay::PendingReview {
+            self.overlay = Overlay::None;
+        }
+        self.snapshot = snapshot;
     }
 
     pub fn key(&mut self, key: char) -> Option<Action> {
@@ -295,6 +321,14 @@ impl App {
             InputKey::Char('l') | InputKey::Right => self.view = next_view(self.view),
             InputKey::Char(':') => self.overlay = Overlay::Palette,
             InputKey::Char('?') => self.overlay = Overlay::Help,
+            InputKey::Char('p')
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.pending_review.is_some()) =>
+            {
+                self.overlay = Overlay::PendingReview;
+            }
             InputKey::Char('s') => self.overlay = Overlay::Settings,
             InputKey::Char('n') => self.begin_text_entry(Overlay::CreateTask),
             InputKey::Char('r') if self.selected_task().is_some() => {
@@ -368,6 +402,45 @@ impl App {
                 InputKey::Enter => self.run_palette_item(),
                 InputKey::Char('?') => {
                     self.overlay = Overlay::Help;
+                    None
+                }
+                _ => None,
+            },
+            Overlay::PendingReview => match key {
+                InputKey::Char('s' | 'S') | InputKey::Enter => {
+                    let review = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.pending_review.as_ref())?;
+                    let command = if review.task_id.is_some() {
+                        pomotui_protocol::Command::ReviewSuccess { reflection: None }
+                    } else if self.selected_task().is_some_and(|task| task.id == u64::MAX) {
+                        self.begin_text_entry(Overlay::ReviewVoidTitle);
+                        return None;
+                    } else {
+                        pomotui_protocol::Command::ReviewSuccessAssign {
+                            task_id: Some(self.selected_task()?.id),
+                            use_void: false,
+                            chain_entry_title: None,
+                            reflection: None,
+                        }
+                    };
+                    Some(self.emit(command))
+                }
+                InputKey::Char('f' | 'F') => {
+                    self.begin_text_entry(Overlay::ReviewFailureReflection);
+                    None
+                }
+                InputKey::Char('v' | 'V') => {
+                    self.begin_text_entry(Overlay::ReviewVoidTitle);
+                    None
+                }
+                InputKey::Char('j') | InputKey::Down => {
+                    self.move_task(true);
+                    None
+                }
+                InputKey::Char('k') | InputKey::Up => {
+                    self.move_task(false);
                     None
                 }
                 _ => None,
@@ -2385,6 +2458,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
     }
     let width = area.width.saturating_sub(4).min(76);
     let height = match app.overlay {
+        Overlay::PendingReview => 11.min(area.height.saturating_sub(2)),
         Overlay::Palette => area.height.saturating_sub(4).min(21),
         Overlay::Help => area.height.saturating_sub(4).min(20),
         Overlay::Settings => 17.min(area.height.saturating_sub(2)),
@@ -2409,6 +2483,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
     };
     frame.render_widget(Clear, modal);
     match app.overlay {
+        Overlay::PendingReview => pending_review_overlay(frame, modal, app, colors),
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
         Overlay::Help => help_overlay(frame, modal, app, colors),
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
@@ -2428,6 +2503,65 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         Overlay::ConfirmReviewFailure => confirm_review_failure_overlay(frame, modal, app, colors),
         Overlay::None => {}
     }
+}
+
+fn pending_review_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let Some(review) = app
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.pending_review.as_ref())
+    else {
+        return;
+    };
+    let task = review.task_title.as_deref().unwrap_or(text(
+        app.language,
+        "No Task — choose with ↑/↓ or use Void",
+        "无任务 — 用 ↑/↓ 选择或使用 Void",
+    ));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            task.to_owned(),
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "{}  {}",
+            text(app.language, "Actual duration", "实际时长"),
+            chain_duration(review.actual_seconds)
+        )),
+        Line::from(""),
+    ];
+    if review.task_id.is_none()
+        && let Some(selected) = app.selected_task()
+    {
+        lines.push(Line::from(format!(
+            "{}: {}",
+            text(app.language, "Selected Task", "所选任务"),
+            selected.title
+        )));
+    }
+    lines.extend([
+        Line::from(text(
+            app.language,
+            "S success    F failure    V success with Void",
+            "S 成功    F 失败    V 使用 Void 成功",
+        )),
+        Line::from(text(
+            app.language,
+            "Esc dismiss    p reopen",
+            "Esc 暂时关闭    p 重新打开",
+        )),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                panel(text(app.language, "SESSION REVIEW", "时段复盘"), colors)
+                    .border_style(Style::default().fg(colors.accent)),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn confirm_review_failure_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
@@ -2559,6 +2693,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             )),
             Line::from("  Enter  确认所选任务          Space  开始/暂停/继续"),
             Line::from("  X      停止当前时段          K      跳过当前时段"),
+            Line::from("  p      重新打开待复盘窗口"),
             Line::from(""),
             Line::from(Span::styled(
                 "任务",
@@ -2595,6 +2730,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             )),
             Line::from("  Enter  confirm selected Task             Space  start/pause/resume"),
             Line::from("  X      stop Current Session              K      skip Current Session"),
+            Line::from("  p      reopen Pending Review dialog"),
             Line::from(""),
             Line::from(Span::styled(
                 "TASKS",
@@ -3228,6 +3364,85 @@ mod tests {
             app.handle_key(InputKey::Char('R')),
             Some(Action::Command(pomotui_protocol::Command::StopReview))
         );
+    }
+
+    #[test]
+    fn pending_review_opens_a_discoverable_dialog() {
+        let mut state = snapshot("pending", SessionKind::ShortBreak);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 42,
+            actual_seconds: 1_052,
+            task_id: Some(1),
+            task_title: Some("Investigate review UX".into()),
+        });
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        let mut terminal = Terminal::new(TestBackend::new(72, 20)).expect("terminal");
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert_eq!(app.overlay, Overlay::PendingReview);
+        assert!(rendered.contains("SESSION REVIEW"));
+        assert!(rendered.contains("Investigate review UX"));
+        assert!(rendered.contains("17m 32s"));
+        assert!(rendered.contains("S success"));
+        assert!(rendered.contains("F failure"));
+    }
+
+    #[test]
+    fn dismissed_review_stays_closed_until_reopened_or_replaced() {
+        let mut state = snapshot("pending", SessionKind::ShortBreak);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 42,
+            actual_seconds: 300,
+            task_id: None,
+            task_title: None,
+        });
+        let mut app = App::new(Some(state.clone()), Theme::VermilionPaperDark);
+
+        app.handle_key(InputKey::Escape);
+        assert_eq!(app.overlay, Overlay::None);
+        app.replace_snapshot(Some(state.clone()));
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.handle_key(InputKey::Char('p'));
+        assert_eq!(app.overlay, Overlay::PendingReview);
+
+        state.pending_review = None;
+        app.replace_snapshot(Some(state.clone()));
+        assert_eq!(app.overlay, Overlay::None);
+
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 43,
+            actual_seconds: 32,
+            task_id: None,
+            task_title: None,
+        });
+        app.replace_snapshot(Some(state));
+        assert_eq!(app.overlay, Overlay::PendingReview);
+        app.language = Language::SimplifiedChinese;
+        let mut terminal = Terminal::new(TestBackend::new(48, 16)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains('复') && rendered.contains('盘'));
+        assert!(rendered.contains('实') && rendered.contains('际'));
+        assert!(rendered.contains("32s"));
     }
 
     #[test]

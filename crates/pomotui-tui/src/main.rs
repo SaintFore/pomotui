@@ -62,7 +62,7 @@ fn run(
         terminal.draw(|frame| render(frame, &mut app))?;
         if !event::poll(Duration::from_millis(250))? {
             let previous = app.snapshot.as_ref().map(|snapshot| snapshot.state.clone());
-            app.snapshot = read_snapshot(client.as_mut());
+            app.replace_snapshot(read_snapshot(client.as_mut()));
             if previous.as_deref() == Some("running")
                 && app
                     .snapshot
@@ -219,10 +219,10 @@ fn send_action(client: &mut Option<Client>, app: &mut App, action: Action) {
     match connection.request(&pomotui_cli_request(command)) {
         Ok(pomotui_protocol::Response::Accepted) => {
             app.message = Some("Command accepted".into());
-            app.snapshot = read_snapshot(Some(connection));
+            app.replace_snapshot(read_snapshot(Some(connection)));
         }
         Ok(pomotui_protocol::Response::Snapshot { snapshot }) => {
-            app.snapshot = Some(snapshot);
+            app.replace_snapshot(Some(snapshot));
             app.message = Some("State refreshed".into());
         }
         Ok(pomotui_protocol::Response::Error { error }) => {
@@ -230,7 +230,7 @@ fn send_action(client: &mut Option<Client>, app: &mut App, action: Action) {
         }
         Ok(pomotui_protocol::Response::Data { .. }) => {
             app.message = Some("Command completed".into());
-            app.snapshot = read_snapshot(Some(connection));
+            app.replace_snapshot(read_snapshot(Some(connection)));
         }
         Err(error) => {
             app.message = Some(format!("Timer Service unavailable: {error}"));

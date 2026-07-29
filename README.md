@@ -69,6 +69,7 @@ terminals. Its primary controls are:
 | `X` / `K` | Choose how to stop / skip the Current Session |
 | `Enter` on Chain | Review a Pending Review as successful |
 | `F` / `V` on Chain | Review as failed / review an unattributed success with Void |
+| `p` | Reopen the Pending Review dialog |
 | `E` on Chain or Chain Archive | Edit the latest Reflection |
 | `R` / `C` on Chain | Create / claim a Reward Milestone |
 | `n` / `r` | Create / rename a Task |
