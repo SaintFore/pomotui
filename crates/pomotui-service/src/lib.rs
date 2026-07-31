@@ -4,7 +4,7 @@ use pomotui_domain::{
     Transition,
 };
 use pomotui_platform::{
-    Clock, DesktopReminder, LinuxClock, PendingReminderEffect, RecoveryObservation,
+    Clock, DesktopReminder, PendingReminderEffect, PlatformClock, RecoveryObservation,
     ReminderDeliveryCounts, ReminderEffectKind, ReminderPort, SqliteRepository,
     elapsed_during_recovery,
 };
@@ -206,7 +206,7 @@ impl Service {
     /// Only panics if compile-time default durations become invalid.
     #[must_use]
     pub fn new() -> Self {
-        let clock = LinuxClock;
+        let clock = PlatformClock::default();
         Self {
             timer: Timer::new(
                 SessionDurations::new(25 * 60, 5 * 60, 15 * 60)
@@ -548,7 +548,7 @@ impl Service {
         if self.durable_health == DurableHealthState::Degraded {
             return;
         }
-        let clock = LinuxClock;
+        let clock = PlatformClock::default();
         let now = clock.monotonic_seconds().unwrap_or(self.now);
         let wall = clock.wall_seconds().unwrap_or(self.wall);
         self.apply_observation(now, wall);
@@ -1636,7 +1636,7 @@ impl PersistedService {
                 task_id: task_id.map(TaskId::get),
             },
         };
-        let clock = LinuxClock;
+        let clock = PlatformClock::default();
         let persisted = Self {
             timer: PersistedTimer {
                 session,
@@ -1706,7 +1706,7 @@ impl PersistedService {
             persisted.timer.long_break_seconds,
         )
         .map_err(|error| error.to_string())?;
-        let clock = LinuxClock;
+        let clock = PlatformClock::default();
         let current_observation = RecoveryObservation {
             boot_id: clock
                 .boot_id()
@@ -1875,6 +1875,7 @@ fn parse_outcome(value: &str) -> Result<SessionOutcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pomotui_platform::LinuxClock;
     use pomotui_protocol::{PROTOCOL_VERSION, TaskTitleRule};
 
     fn request(key: Option<&str>, command: Command) -> Request {
