@@ -1,5 +1,8 @@
 # Pomotui
 
+[![中文](https://img.shields.io/badge/中文-README-red?style=flat&logo=readthedocs&logoColor=white)](README_zh-CN.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 Pomotui is a terminal Pomodoro timer with three frontends:
 
 - a keyboard-first Ratatui dashboard;
