@@ -33,7 +33,7 @@ mod tray {
         menu.append(&stop_item)?;
         menu.append(&sep2)?;
         menu.append(&quit_item)?;
-        tray.set_menu(Some(menu));
+        tray.set_menu(Some(Box::new(menu)));
 
         let mut last_text = String::new();
 
@@ -56,7 +56,7 @@ mod tray {
             }
 
             // Handle menu events
-            if let Ok(event) = muda::menu_event_receiver().try_recv() {
+            if let Ok(event) = muda::MenuEvent::receiver().try_recv() {
                 match event.id {
                     id if id == start_item.id() => {
                         let _ = send_command(&socket, Command::Start {
@@ -127,6 +127,7 @@ mod tray {
             pomotui_protocol::Response::Error { error } => {
                 Err(format!("{error:?}").into())
             }
+            _ => Err("unexpected response".into()),
         }
     }
 
