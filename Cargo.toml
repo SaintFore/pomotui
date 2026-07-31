@@ -6,6 +6,7 @@ members = [
     "crates/pomotui-platform",
     "crates/pomotui-protocol",
     "crates/pomotui-service",
+    "crates/pomotui-tray",
     "crates/pomotui-tui",
 ]
 

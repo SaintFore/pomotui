@@ -39,6 +39,7 @@ paru -S pomotui-git
 ```sh
 brew install --HEAD pomotui
 brew services start pomotui
+pomotui-tray   # optional: menu bar timer
 ```
 
 ### Linux (from source)

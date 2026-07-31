@@ -33,8 +33,9 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.archive }}.tar.gz \
-            pomotui pomotui-tui pomotui-service
+          bins="pomotui pomotui-tui pomotui-service"
+          if [ -f pomotui-tray ]; then bins="$bins pomotui-tray"; fi
+          tar czf ../../../${{ matrix.archive }}.tar.gz $bins
       - name: Checksum
         run: sha256sum ${{ matrix.archive }}.tar.gz > ${{ matrix.archive }}.sha256
       - name: Upload artifact

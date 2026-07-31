@@ -10,6 +10,7 @@ class Pomotui < Formula
     system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/pomotui-cli"
     system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/pomotui-tui"
     system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/pomotui-service"
+    system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/pomotui-tray"
 
     # Config example and animation
     (pkgshare/"config.example.toml").install "packaging/defaults/config.toml"
