@@ -38,15 +38,7 @@ paru -S pomotui-git
 
 ```sh
 brew install --HEAD pomotui
-```
-
-Then enable the service:
-
-```sh
-cp $(brew --prefix pomotui)/launchd/com.pomotui.socket.plist ~/Library/LaunchAgents/
-cp $(brew --prefix pomotui)/launchd/com.pomotui.service.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.pomotui.socket.plist
-launchctl load ~/Library/LaunchAgents/com.pomotui.service.plist
+brew services start pomotui
 ```
 
 ### Linux (from source)

@@ -11,15 +11,6 @@ class Pomotui < Formula
     system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/pomotui-tui"
     system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/pomotui-service"
 
-    # launchd plists
-    (prefix/"launchd").install "packaging/launchd/com.pomotui.socket.plist"
-    (prefix/"launchd").install "packaging/launchd/com.pomotui.service.plist"
-
-    # Patch binary path in service plist
-    inreplace prefix/"launchd/com.pomotui.service.plist",
-              "/usr/local/bin/pomotui-service",
-              "#{bin}/pomotui-service"
-
     # Config example and animation
     (pkgshare/"config.example.toml").install "packaging/defaults/config.toml"
     (pkgshare/"building-collapse.animation").install "packaging/defaults/building-collapse.animation"
@@ -27,14 +18,18 @@ class Pomotui < Formula
 
   def caveats
     <<~EOS
-      To start the Pomotui Timer Service with launchd:
-        cp #{prefix}/launchd/com.pomotui.socket.plist ~/Library/LaunchAgents/
-        cp #{prefix}/launchd/com.pomotui.service.plist ~/Library/LaunchAgents/
-        launchctl load ~/Library/LaunchAgents/com.pomotui.socket.plist
-        launchctl load ~/Library/LaunchAgents/com.pomotui.service.plist
+      To start the Pomotui Timer Service:
+        brew services start pomotui
 
       Then run: pomotui-tui
     EOS
+  end
+
+  service do
+    run [opt_bin/"pomotui-service"]
+    keep_alive true
+    log_path var/"log/pomotui/service.log"
+    error_path var/"log/pomotui/service.log"
   end
 
   test do
