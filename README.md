@@ -37,6 +37,7 @@ paru -S pomotui-git
 ### macOS (Homebrew)
 
 ```sh
+brew tap SaintFore/tap
 brew install --HEAD pomotui
 brew services start pomotui
 pomotui-tray   # optional: menu bar timer
