@@ -17,6 +17,7 @@ optdepends=(
 )
 source=('pomotui::git+https://github.com/SaintFore/pomotui.git')
 sha256sums=('SKIP')
+install=pomotui.install
 
 pkgver() {
     cd pomotui
