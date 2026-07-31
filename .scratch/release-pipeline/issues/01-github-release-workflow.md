@@ -4,9 +4,9 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Workflow builds `pomotui`, `pomotui-tui`, `pomotui-service` on `ubuntu-latest` and `macos-latest`
-- [ ] macOS universal binary (or separate aarch64/x86_64) included
-- [ ] GitHub Release auto-created with `tar.gz` archives per platform and SHA256 checksums
-- [ ] Existing `ci.yml` still runs on push/PR
+- [x] Workflow builds `pomotui`, `pomotui-tui`, `pomotui-service` on `ubuntu-latest` and `macos-latest`
+- [x] macOS aarch64 + x86_64 separate builds included
+- [x] GitHub Release auto-created with `tar.gz` archives per platform and SHA256 checksums
+- [x] Existing `ci.yml` still runs on push/PR

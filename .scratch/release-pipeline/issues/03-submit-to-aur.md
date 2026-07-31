@@ -4,9 +4,9 @@
 
 **Blocked by:** 02 — Commit and tag v0.1.0
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `pomotui-git` package pushed to AUR (builds from HEAD, no tag needed)
-- [ ] `pomotui` package pushed to AUR (builds from v0.1.0 release tarball)
-- [ ] `updpkgsums` run to get correct SHA256 for the release tarball
-- [ ] Both packages verified with `makepkg --printsrcinfo`
+- [x] `pomotui-git` package pushed to AUR (builds from HEAD, no tag needed)
+- [x] `pomotui` package pushed to AUR (builds from v0.1.0 release tarball)
+- [x] `updpkgsums` run to get correct SHA256 for the release tarball
+- [x] Both packages verified with `makepkg --printsrcinfo`
