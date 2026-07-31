@@ -163,55 +163,56 @@ impl Clock for LinuxClock {
 
 #[cfg(target_os = "macos")]
 mod darwin {
-    use std::ffi::c_int;
-
-    #[repr(C)]
-    struct MachTimebaseInfo {
-        numer: u32,
-        denom: u32,
-    }
-
-    extern "C" {
-        fn mach_absolute_time() -> u64;
-        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> u32;
-    }
-
-    /// Returns elapsed nanoseconds since boot using `mach_absolute_time`.
-    pub fn monotonic_ns() -> u64 {
-        unsafe {
-            let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-            mach_timebase_info(&mut info);
-            let ticks = mach_absolute_time();
-            ticks * u64::from(info.numer) / u64::from(info.denom)
+    /// Reads boot time via `sysctl -n kern.boottime` (returns `{ sec, usec }`).
+    fn boot_epoch_secs() -> Result<i64, std::io::Error> {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other("sysctl kern.boottime failed"));
         }
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Output looks like: { sec = 1234567890, usec = 123456 }
+        let sec_str = text
+            .split("sec = ")
+            .nth(1)
+            .and_then(|s| s.split(',').next())
+            .ok_or_else(|| std::io::Error::other("unexpected kern.boottime format"))?;
+        sec_str
+            .trim()
+            .parse::<i64>()
+            .map_err(|e| std::io::Error::other(format!("invalid kern.boottime: {e}")))
     }
 
-    /// Reads the kernel boot session UUID via `kern.bootsid` sysctl.
-    pub fn boot_uuid() -> Result<String, std::io::Error> {
-        const KERN_BOOTSID: [c_int; 2] = [1, 97]; // CTL_KERN = 1, KERN_BOOTSID = 97
-        let mut buf = [0u8; 16];
-        let mut len = buf.len();
-        let ret = unsafe {
-            libc::sysctl(
-                KERN_BOOTSID.as_ptr().cast_mut(),
-                2,
-                buf.as_mut_ptr().cast(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error());
+    /// Returns suspend-aware uptime in whole seconds.
+    pub fn uptime_seconds() -> Result<u64, std::io::Error> {
+        let boot = boot_epoch_secs()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_secs();
+        let now_i64 = i64::try_from(now).map_err(std::io::Error::other)?;
+        Ok(u64::try_from(now_i64.saturating_sub(boot)).unwrap_or(0))
+    }
+
+    /// Reads the platform UUID via `ioreg`.
+    pub fn platform_uuid() -> Result<String, std::io::Error> {
+        let output = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other("ioreg failed"));
         }
-        Ok(format!(
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]),
-            u16::from_be_bytes([buf[4], buf[5]]),
-            u16::from_be_bytes([buf[6], buf[7]]),
-            u16::from_be_bytes([buf[8], buf[9]]),
-            u64::from_be_bytes([0, 0, buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]]),
-        ))
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if line.contains("IOPlatformUUID") {
+                // Line looks like: "IOPlatformUUID" = "XXXXXXXX-XXXX-..."
+                if let Some(uuid) = line.split('"').nth(3) {
+                    return Ok(uuid.to_owned());
+                }
+            }
+        }
+        Err(std::io::Error::other("IOPlatformUUID not found"))
     }
 }
 
@@ -224,7 +225,7 @@ impl Clock for DarwinClock {
     type Error = std::io::Error;
 
     fn monotonic_seconds(&self) -> Result<u64, Self::Error> {
-        Ok(darwin::monotonic_ns() / 1_000_000_000)
+        darwin::uptime_seconds()
     }
 
     fn wall_seconds(&self) -> Result<i64, Self::Error> {
@@ -236,7 +237,7 @@ impl Clock for DarwinClock {
     }
 
     fn boot_id(&self) -> Result<String, Self::Error> {
-        darwin::boot_uuid()
+        darwin::platform_uuid()
     }
 }
 

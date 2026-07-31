@@ -1,6 +1,6 @@
 # Pomotui
 
-Pomotui is a Linux Pomodoro timer with three frontends:
+Pomotui is a terminal Pomodoro timer with three frontends:
 
 - a keyboard-first Ratatui dashboard;
 - a scriptable CLI;
@@ -11,13 +11,45 @@ restarting Waybar does not stop time progression. Tasks, Session History, daily
 statistics, recovery after restart, desktop reminders, and completion sounds
 are stored and coordinated centrally.
 
+![Pomotui TUI Dashboard](https://tree-1327913400.cos.ap-nanjing.myqcloud.com/world/20260731122427701.webp)
+
 ## Requirements
 
-- Linux with systemd user services
+**Linux:**
+- systemd user services
 - A Rust toolchain supporting edition 2024
 - Optional: Waybar, `notify-send`, and `paplay`
 
+**macOS:**
+- A Rust toolchain supporting edition 2024
+- Optional: `afplay` (built-in), `osascript` (built-in), Waybar (via Homebrew)
+
 ## Install
+
+### Arch Linux (AUR)
+
+```sh
+paru -S pomotui
+# or for latest git:
+paru -S pomotui-git
+```
+
+### macOS (Homebrew)
+
+```sh
+brew install --HEAD pomotui
+```
+
+Then enable the service:
+
+```sh
+cp $(brew --prefix pomotui)/launchd/com.pomotui.socket.plist ~/Library/LaunchAgents/
+cp $(brew --prefix pomotui)/launchd/com.pomotui.service.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.pomotui.socket.plist
+launchctl load ~/Library/LaunchAgents/com.pomotui.service.plist
+```
+
+### Linux (from source)
 
 Build and install for the current user; `sudo` is not required:
 

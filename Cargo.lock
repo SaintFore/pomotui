@@ -1021,7 +1021,6 @@ dependencies = [
 name = "pomotui-platform"
 version = "0.1.0"
 dependencies = [
- "libc",
  "pomotui-domain",
  "rusqlite",
 ]

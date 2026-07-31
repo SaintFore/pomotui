@@ -9,8 +9,5 @@ rust-version.workspace = true
 pomotui-domain = { path = "../pomotui-domain" }
 rusqlite = { version = "0.38", features = ["bundled"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-
 [lints]
 workspace = true
