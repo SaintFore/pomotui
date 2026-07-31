@@ -59,10 +59,13 @@ mod tray {
             if let Ok(event) = muda::MenuEvent::receiver().try_recv() {
                 match event.id {
                     id if id == start_item.id() => {
-                        let _ = send_command(&socket, Command::Start {
-                            kind: SessionKind::Focus,
-                            task_id: None,
-                        });
+                        let _ = send_command(
+                            &socket,
+                            Command::Start {
+                                kind: SessionKind::Focus,
+                                task_id: None,
+                            },
+                        );
                     }
                     id if id == pause_item.id() => {
                         let _ = send_command(&socket, Command::Pause);
@@ -84,18 +87,14 @@ mod tray {
     }
 
     fn socket_path() -> PathBuf {
-        std::env::var_os("POMOTUI_SOCKET")
-            .map_or_else(
-                || {
-                    std::env::var_os("XDG_RUNTIME_DIR")
-                        .map_or_else(
-                            || PathBuf::from("/tmp/pomotui-runtime"),
-                            PathBuf::from,
-                        )
-                        .join("pomotui/pomotui.sock")
-                },
-                PathBuf::from,
-            )
+        std::env::var_os("POMOTUI_SOCKET").map_or_else(
+            || {
+                std::env::var_os("XDG_RUNTIME_DIR")
+                    .map_or_else(|| PathBuf::from("/tmp/pomotui-runtime"), PathBuf::from)
+                    .join("pomotui/pomotui.sock")
+            },
+            PathBuf::from,
+        )
     }
 
     fn create_icon() -> Icon {
@@ -124,17 +123,12 @@ mod tray {
         };
         match client.request(&request)? {
             pomotui_protocol::Response::Snapshot { snapshot } => Ok(snapshot),
-            pomotui_protocol::Response::Error { error } => {
-                Err(format!("{error:?}").into())
-            }
+            pomotui_protocol::Response::Error { error } => Err(format!("{error:?}").into()),
             _ => Err("unexpected response".into()),
         }
     }
 
-    fn send_command(
-        socket: &PathBuf,
-        command: Command,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_command(socket: &PathBuf, command: Command) -> Result<(), Box<dyn std::error::Error>> {
         let mut client = Client::connect(socket)?;
         let request = Request {
             version: pomotui_protocol::PROTOCOL_VERSION,

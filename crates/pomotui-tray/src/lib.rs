@@ -30,11 +30,11 @@ pub fn format_status_line(snapshot: &Snapshot) -> String {
         SessionKind::ShortBreak => "Short Break",
         SessionKind::LongBreak => "Long Break",
     };
-    let round = format!("{}/{}", snapshot.completed_rounds, snapshot.rounds_per_cycle);
-    let task = snapshot
-        .current_task
-        .as_deref()
-        .unwrap_or("No task");
+    let round = format!(
+        "{}/{}",
+        snapshot.completed_rounds, snapshot.rounds_per_cycle
+    );
+    let task = snapshot.current_task.as_deref().unwrap_or("No task");
     format!("{state_label} {kind_label} · round {round} · {task}")
 }
 
