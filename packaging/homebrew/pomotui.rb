@@ -1,8 +1,8 @@
 class Pomotui < Formula
   desc "Terminal Pomodoro timer with TUI, CLI, and Waybar frontends"
-  homepage "https://github.com/pomotui/pomotui"
+  homepage "https://github.com/SaintFore/pomotui"
   license "MIT"
-  head "https://github.com/pomotui/pomotui.git", branch: "main"
+  head "https://github.com/SaintFore/pomotui.git", branch: "main"
 
   depends_on "rust" => :build
 

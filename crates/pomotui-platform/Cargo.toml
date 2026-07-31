@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 pomotui-domain = { path = "../pomotui-domain" }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = "0.38"
 
 [lints]
 workspace = true
