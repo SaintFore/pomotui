@@ -68,7 +68,7 @@ mod tray {
                         let _ = send_command(&socket, Command::Pause);
                     }
                     id if id == stop_item.id() => {
-                        let _ = send_command(&socket, Command::Stop { review: false });
+                        let _ = send_command(&socket, Command::Stop);
                     }
                     id if id == quit_item.id() => {
                         break;
@@ -123,7 +123,7 @@ mod tray {
             command: Command::Status,
         };
         match client.request(&request)? {
-            pomotui_protocol::Response::Status { snapshot, .. } => Ok(snapshot),
+            pomotui_protocol::Response::Snapshot { snapshot } => Ok(snapshot),
             pomotui_protocol::Response::Error { error } => {
                 Err(format!("{error:?}").into())
             }
