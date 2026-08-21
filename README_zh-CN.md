@@ -32,7 +32,11 @@ Pomotui 是一个终端番茄钟计时器，提供三种前端：
 paru -S pomotui
 # 或安装最新 git 版：
 paru -S pomotui-git
+systemctl --user enable --now pomotui.socket
 ```
+
+AUR 软件包会将可执行文件安装到 `/usr/bin`。上述命令会启用 systemd 用户
+socket，并立即启动 Pomotui。
 
 ### macOS（Homebrew）
 
@@ -141,11 +145,11 @@ pomotui reward claim 1
 
 ```jsonc
 "custom/pomotui": {
-  "exec": "$HOME/.local/bin/pomotui waybar",
+  "exec": "/usr/bin/pomotui waybar",
   "interval": 1,
   "return-type": "json",
   "tooltip": true,
-  "on-click": "foot $HOME/.local/bin/pomotui-tui"
+  "on-click": "foot /usr/bin/pomotui-tui"
 }
 ```
 

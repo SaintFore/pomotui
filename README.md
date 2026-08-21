@@ -35,7 +35,11 @@ are stored and coordinated centrally.
 paru -S pomotui
 # or for latest git:
 paru -S pomotui-git
+systemctl --user enable --now pomotui.socket
 ```
+
+The AUR packages install the executables in `/usr/bin`. The command above
+enables the systemd user socket and starts Pomotui immediately.
 
 ### macOS (Homebrew)
 
@@ -160,11 +164,11 @@ Add `"custom/pomotui"` to one of Waybar's `modules-left`, `modules-center`, or
 
 ```jsonc
 "custom/pomotui": {
-  "exec": "$HOME/.local/bin/pomotui waybar",
+  "exec": "/usr/bin/pomotui waybar",
   "interval": 1,
   "return-type": "json",
   "tooltip": true,
-  "on-click": "foot $HOME/.local/bin/pomotui-tui"
+  "on-click": "foot /usr/bin/pomotui-tui"
 }
 ```
 
