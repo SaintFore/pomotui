@@ -117,6 +117,9 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["reward", "claim", id] => Command::RewardClaim {
             unlock_id: parse_id(id)?,
         },
+        ["sync", "enable", path] => Command::SyncEnable { path: (*path).into() },
+        ["sync", "now"] => Command::SyncNow,
+        ["sync", "status"] => Command::SyncStatus,
         _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
@@ -171,6 +174,17 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
                 ""
             },
             reminder_delivery_label(&snapshot.reminder_delivery)
+        )),
+        Response::Data { value }
+            if value.get("format_version").is_some()
+                && value.get("local_record_count").is_some() => Ok(format!(
+            "sync {} · path {} · format v{} · local records {} · file records {}{}",
+            if value["enabled"].as_bool().unwrap_or(false) { "enabled" } else { "disabled" },
+            value["path"].as_str().unwrap_or("not configured"),
+            value["format_version"],
+            value["local_record_count"],
+            value["file_record_count"].as_u64().map_or_else(|| "unknown".into(), |count| count.to_string()),
+            value["last_error"].as_str().map_or_else(String::new, |error| format!(" · error: {error}")),
         )),
         Response::Data { value } => Ok(value.to_string()),
         Response::Accepted => Ok("accepted".into()),
@@ -263,6 +277,24 @@ mod tests {
     fn mutation_request_has_identity_but_status_does_not() {
         assert!(request(Command::Pause).idempotency_key.is_some());
         assert!(request(Command::Status).idempotency_key.is_none());
+        assert!(request(Command::SyncStatus).idempotency_key.is_none());
+    }
+
+    #[test]
+    fn sync_commands_are_available_to_human_and_json_frontends() {
+        let (command, json, _) =
+            parse(&["sync".into(), "enable".into(), "/tmp/pomotui.sync".into()])
+                .expect("sync enable");
+        assert_eq!(
+            command,
+            Command::SyncEnable {
+                path: "/tmp/pomotui.sync".into()
+            }
+        );
+        assert!(!json);
+        let (_, json, _) =
+            parse(&["--json".into(), "sync".into(), "status".into()]).expect("JSON sync status");
+        assert!(json);
     }
 
     #[test]

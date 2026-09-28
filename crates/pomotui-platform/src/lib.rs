@@ -5,6 +5,7 @@
 
 mod recovery;
 mod repository;
+mod sync_file;
 
 pub use recovery::{
     Clock, DesktopReminder, LinuxClock, RecoveryElapsed, RecoveryObservation, RecoverySource,
@@ -34,6 +35,7 @@ pub use repository::{
     PendingReminderEffect, ReminderDeliveryCounts, ReminderEffectKind, RepositoryError,
     SqliteRepository,
 };
+pub use sync_file::{read_sync_file, replace_sync_file};
 
 /// Returns the domain model version targeted by these adapters.
 #[must_use]

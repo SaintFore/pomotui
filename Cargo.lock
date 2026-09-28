@@ -1752,6 +1752,7 @@ version = "0.1.0"
 dependencies = [
  "pomotui-domain",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
@@ -1769,12 +1770,15 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "listenfd",
+ "pomotui-cli",
  "pomotui-domain",
  "pomotui-platform",
  "pomotui-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "toml 0.9.12+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]

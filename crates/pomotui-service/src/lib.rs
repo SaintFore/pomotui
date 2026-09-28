@@ -6,19 +6,26 @@ use pomotui_domain::{
 use pomotui_platform::{
     Clock, DesktopReminder, PendingReminderEffect, PlatformClock, RecoveryObservation,
     ReminderDeliveryCounts, ReminderEffectKind, ReminderPort, SqliteRepository,
-    elapsed_during_recovery,
+    elapsed_during_recovery, read_sync_file, replace_sync_file,
 };
 use pomotui_protocol::{
     ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState,
     EndedChainSummary, Handler, PendingReviewSummary, ProtocolError, RecentSessionSummary,
-    ReminderDelivery, Request, Response, RewardMilestoneSummary, RewardUnlockSummary, SessionKind,
-    Snapshot, TaskFocusSummary, TaskSummary, TodaySummary,
+    ReminderDelivery, Request, Response, RewardMilestoneSummary, RewardUnlockSummary,
+    SYNC_FORMAT_VERSION, SessionKind, Snapshot, SyncDocument, SyncIntegrity, SyncRecord,
+    SyncRecordKind, SyncStatus, SyncTaskStatus, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const MAX_REMINDER_ATTEMPTS: u32 = 3;
 const MAX_REMINDER_AGE_SECONDS: i64 = 60 * 60;
+
+fn records_checksum(records: &[SyncRecord]) -> Result<String, String> {
+    let canonical = serde_json::to_vec(records).map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
 
 trait ServiceRepository: Send {
     fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String>;
@@ -139,6 +146,17 @@ pub struct Service {
     reward_unlocks: Vec<RewardUnlockState>,
     next_reward_milestone_id: u64,
     next_reward_unlock_id: u64,
+    sync: SyncState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct SyncState {
+    path: Option<std::path::PathBuf>,
+    records: Vec<SyncRecord>,
+    last_attempt: Option<i64>,
+    last_success: Option<i64>,
+    last_error: Option<String>,
+    file_record_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -241,6 +259,7 @@ impl Service {
             reward_unlocks: Vec::new(),
             next_reward_milestone_id: 1,
             next_reward_unlock_id: 1,
+            sync: SyncState::default(),
         }
     }
 
@@ -878,6 +897,129 @@ impl Service {
         }
     }
 
+    fn record_task_creation(&mut self, title: &str) {
+        self.sync.records.push(SyncRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            entity_id: uuid::Uuid::new_v4().to_string(),
+            kind: SyncRecordKind::TaskCreated,
+            title: title.into(),
+            status: SyncTaskStatus::Open,
+        });
+        self.sync.records.sort();
+    }
+
+    fn merge_sync_file(&mut self) -> Result<usize, String> {
+        let path = self
+            .sync
+            .path
+            .clone()
+            .ok_or_else(|| "synchronization is not enabled".to_owned())?;
+        self.sync.last_attempt = Some(self.wall);
+        let incoming = match read_sync_file(&path)? {
+            Some(source) => {
+                let document: SyncDocument = serde_json::from_str(&source)
+                    .map_err(|error| format!("invalid sync document: {error}"))?;
+                if document.format != "pomotui.sync" {
+                    return Err("unsupported sync document format".into());
+                }
+                if document.version != SYNC_FORMAT_VERSION {
+                    return Err(format!(
+                        "unsupported sync document version {}",
+                        document.version
+                    ));
+                }
+                if document.integrity.record_count != document.records.len() {
+                    return Err("sync document integrity check failed".into());
+                }
+                let checksum = records_checksum(&document.records)?;
+                if document.integrity.records_sha256 != checksum {
+                    return Err("sync document checksum does not match its records".into());
+                }
+                document.records
+            }
+            None => Vec::new(),
+        };
+        self.sync.file_record_count = Some(incoming.len());
+        let mut document_ids = std::collections::HashSet::new();
+        let mut validation_store = TaskStore::new();
+        for record in &incoming {
+            if !document_ids.insert(&record.id) {
+                return Err(format!("duplicate synchronization record {}", record.id));
+            }
+            uuid::Uuid::parse_str(&record.id)
+                .map_err(|_| format!("invalid synchronization record identity {}", record.id))?;
+            uuid::Uuid::parse_str(&record.entity_id)
+                .map_err(|_| format!("invalid synchronized Task identity {}", record.entity_id))?;
+            validation_store
+                .create(record.title.clone())
+                .map_err(|error| format!("invalid synchronized Task: {error}"))?;
+        }
+        let known: std::collections::HashSet<_> = self
+            .sync
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect();
+        for record in incoming {
+            if known.contains(&record.id) {
+                continue;
+            }
+            self.tasks
+                .create(record.title.clone())
+                .map_err(|error| error.to_string())?;
+            self.sync.records.push(record);
+        }
+        self.sync.records.sort();
+        self.sync
+            .records
+            .dedup_by(|left, right| left.id == right.id);
+        self.persist(None)?;
+        let document = SyncDocument {
+            format: "pomotui.sync".into(),
+            version: SYNC_FORMAT_VERSION,
+            integrity: SyncIntegrity {
+                record_count: self.sync.records.len(),
+                records_sha256: records_checksum(&self.sync.records)?,
+            },
+            records: self.sync.records.clone(),
+        };
+        let mut serialized = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+        serialized.push('\n');
+        replace_sync_file(&path, &serialized)?;
+        self.sync.file_record_count = Some(self.sync.records.len());
+        self.sync.last_success = Some(self.wall);
+        self.sync.last_error = None;
+        self.persist(None)?;
+        Ok(self.sync.records.len())
+    }
+
+    fn sync_status(&self) -> serde_json::Value {
+        serde_json::to_value(SyncStatus {
+            enabled: self.sync.path.is_some(),
+            path: self.sync.path.clone(),
+            format_version: SYNC_FORMAT_VERSION,
+            last_attempt: self.sync.last_attempt,
+            last_success: self.sync.last_success,
+            last_error: self.sync.last_error.clone(),
+            local_record_count: self.sync.records.len(),
+            file_record_count: self.sync.file_record_count,
+        })
+        .expect("SyncStatus is serializable")
+    }
+
+    fn merge_sync_response(&mut self) -> Response {
+        match self.merge_sync_file() {
+            Ok(_) => Response::Data {
+                value: self.sync_status(),
+            },
+            Err(error) => {
+                self.sync.last_error = Some(error.clone());
+                let _ = self.persist(None);
+                Self::rejected(error)
+            }
+        }
+    }
+
     fn persist_completion(
         &mut self,
         reminder_key: &str,
@@ -1140,13 +1282,24 @@ impl Handler for Service {
                 self.apply_transition(transition, planned)
             }
             Command::TaskCreate { title } => {
-                return match self.tasks.create(title) {
-                    Ok(id) => match self.persist(mutation_key.as_deref()) {
-                        Ok(()) => Response::Data {
-                            value: serde_json::json!({ "id": id.get() }),
-                        },
-                        Err(error) => self.durable_rejected(error),
-                    },
+                return match self.tasks.create(title.clone()) {
+                    Ok(id) => {
+                        self.record_task_creation(&title);
+                        match self.persist(mutation_key.as_deref()) {
+                            Ok(()) => {
+                                if self.sync.path.is_some()
+                                    && let Err(error) = self.merge_sync_file()
+                                {
+                                    self.sync.last_error = Some(error);
+                                    let _ = self.persist(None);
+                                }
+                                Response::Data {
+                                    value: serde_json::json!({ "id": id.get() }),
+                                }
+                            }
+                            Err(error) => self.durable_rejected(error),
+                        }
+                    }
                     Err(error) => Self::task_rejected(error),
                 };
             }
@@ -1165,6 +1318,21 @@ impl Handler for Service {
                             })
                             .collect(),
                     ),
+                };
+            }
+            Command::SyncEnable { path } => {
+                self.sync.path = Some(path);
+                if let Err(error) = self.persist(mutation_key.as_deref()) {
+                    return self.durable_rejected(error);
+                }
+                return self.merge_sync_response();
+            }
+            Command::SyncNow => {
+                return self.merge_sync_response();
+            }
+            Command::SyncStatus => {
+                return Response::Data {
+                    value: self.sync_status(),
                 };
             }
             Command::TaskRename { id, title } => {
@@ -1541,6 +1709,8 @@ struct PersistedService {
     next_reward_milestone_id: u64,
     #[serde(default = "default_next_identity")]
     next_reward_unlock_id: u64,
+    #[serde(default)]
+    sync: SyncState,
 }
 
 const fn default_chain_id() -> u64 {
@@ -1692,6 +1862,7 @@ impl PersistedService {
             reward_unlocks: service.reward_unlocks.clone(),
             next_reward_milestone_id: service.next_reward_milestone_id,
             next_reward_unlock_id: service.next_reward_unlock_id,
+            sync: service.sync.clone(),
         };
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
@@ -1834,6 +2005,7 @@ impl PersistedService {
             reward_unlocks: persisted.reward_unlocks,
             next_reward_milestone_id: persisted.next_reward_milestone_id,
             next_reward_unlock_id: persisted.next_reward_unlock_id,
+            sync: persisted.sync,
         })
     }
 }
@@ -1875,6 +2047,7 @@ fn parse_outcome(value: &str) -> Result<SessionOutcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pomotui_cli::{parse as parse_cli, render as render_cli};
     use pomotui_platform::LinuxClock;
     use pomotui_protocol::{PROTOCOL_VERSION, TaskTitleRule};
 
@@ -1892,6 +2065,101 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    #[test]
+    fn one_task_converges_between_two_fresh_services_through_one_file() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-sync-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+
+        let (enable_first, _, _) = parse_cli(&[
+            "sync".into(),
+            "enable".into(),
+            sync_path.display().to_string(),
+        ])
+        .expect("CLI enable command");
+        first.handle(request(Some("enable-first"), enable_first));
+        let (create_task, _, _) =
+            parse_cli(&["task".into(), "create".into(), "Cross-device task".into()])
+                .expect("CLI create command");
+        first.handle(request(Some("create-task"), create_task));
+        let first_task_id = match first.handle(request(None, Command::TaskList)) {
+            Response::Data { value } => value
+                .as_array()
+                .expect("tasks")
+                .iter()
+                .find(|task| task["title"] == "Cross-device task")
+                .and_then(|task| task["id"].as_u64())
+                .expect("local Task ID"),
+            response => panic!("unexpected Task list response: {response:?}"),
+        };
+
+        let (enable_second, _, _) = parse_cli(&[
+            "sync".into(),
+            "enable".into(),
+            sync_path.display().to_string(),
+        ])
+        .expect("CLI enable command");
+        second.handle(request(Some("enable-second"), enable_second));
+        let (sync_now, _, _) = parse_cli(&["sync".into(), "now".into()]).expect("CLI sync now");
+        let sync_response = second.handle(request(Some("sync-second"), sync_now));
+        assert!(
+            render_cli(&sync_response, false, false)
+                .expect("human sync status")
+                .starts_with("sync enabled")
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(
+                &render_cli(&sync_response, true, false).expect("JSON sync status")
+            )
+            .is_ok()
+        );
+        second.handle(request(Some("sync-second-again"), Command::SyncNow));
+
+        let Response::Data { value: tasks } = second.handle(request(None, Command::TaskList))
+        else {
+            panic!("Task list response");
+        };
+        let imported = tasks
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .filter(|task| task["title"] == "Cross-device task")
+            .collect::<Vec<_>>();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(
+            first_task_id, 1,
+            "sync must not replace the local Task identity"
+        );
+
+        let document = std::fs::read_to_string(&sync_path).expect("sync document");
+        assert!(document.ends_with('\n'));
+        assert_eq!(
+            document,
+            std::fs::read_to_string(&sync_path).expect("stable document")
+        );
+        let json: serde_json::Value = serde_json::from_str(&document).expect("valid JSON");
+        assert_eq!(json["format"], "pomotui.sync");
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["integrity"]["record_count"], 1);
+        assert_eq!(
+            json["integrity"]["records_sha256"]
+                .as_str()
+                .expect("checksum")
+                .len(),
+            64
+        );
+        assert_eq!(json["records"].as_array().expect("records").len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

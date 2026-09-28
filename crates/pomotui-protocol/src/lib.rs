@@ -8,6 +8,7 @@ use std::time::Duration;
 
 pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
+pub const SYNC_FORMAT_VERSION: u16 = 1;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
 const PENDING_CONNECTIONS: usize = 16;
@@ -105,6 +106,59 @@ pub enum Command {
         unlock_id: u64,
     },
     Rewards,
+    SyncEnable {
+        path: std::path::PathBuf,
+    },
+    SyncNow,
+    SyncStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct SyncRecord {
+    pub id: String,
+    pub entity_id: String,
+    #[serde(rename = "type")]
+    pub kind: SyncRecordKind,
+    pub title: String,
+    pub status: SyncTaskStatus,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncRecordKind {
+    TaskCreated,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncTaskStatus {
+    Open,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SyncDocument {
+    pub format: String,
+    pub version: u16,
+    pub integrity: SyncIntegrity,
+    pub records: Vec<SyncRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SyncIntegrity {
+    pub record_count: usize,
+    pub records_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SyncStatus {
+    pub enabled: bool,
+    pub path: Option<std::path::PathBuf>,
+    pub format_version: u16,
+    pub last_attempt: Option<i64>,
+    pub last_success: Option<i64>,
+    pub last_error: Option<String>,
+    pub local_record_count: usize,
+    pub file_record_count: Option<usize>,
 }
 
 impl Command {
@@ -119,6 +173,7 @@ impl Command {
                 | Self::ActionChainCurrent
                 | Self::ActionChainArchive
                 | Self::Rewards
+                | Self::SyncStatus
         )
     }
 }

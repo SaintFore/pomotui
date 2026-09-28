@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 pomotui-domain = { path = "../pomotui-domain" }
 rusqlite = "0.38"
+serde_json = "1"
 
 [lints]
 workspace = true
