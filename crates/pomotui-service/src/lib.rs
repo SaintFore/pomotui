@@ -1415,6 +1415,7 @@ impl Handler for Service {
                         .timer
                         .start(self.now, task_id.map(pomotui_domain::TaskId::new));
                     self.apply_transition(transition, planned)
+                        .and_then(|()| self.apply_deferred_task_deletions())
                 }
             }
             Command::StartTitle { title } => {
@@ -1433,6 +1434,7 @@ impl Handler for Service {
                         let planned = self.timer.planned_seconds();
                         let transition = self.timer.start(self.now, Some(task_id));
                         self.apply_transition(transition, planned)
+                            .and_then(|()| self.apply_deferred_task_deletions())
                     }
                     Err(error) => return Self::task_rejected(error),
                 }
@@ -2529,10 +2531,10 @@ mod tests {
         };
         assert_eq!(snapshot.current_task_id, Some(1));
         second.handle(request(
-            Some("select-replacement"),
-            Command::TaskSelect {
-                id: 2,
-                stop_current: false,
+            Some("start-replacement"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(2),
             },
         ));
         let Response::Data { value: tasks } = second.handle(request(None, Command::TaskList))
