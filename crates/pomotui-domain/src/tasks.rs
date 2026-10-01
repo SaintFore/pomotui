@@ -174,6 +174,9 @@ impl TaskStore {
 
     pub fn create(&mut self, title: impl Into<String>) -> Result<TaskId, TaskError> {
         let title = TaskTitle::parse(&title.into())?;
+        if title.as_str() == "Void" {
+            return Err(TaskError::ReservedTitle);
+        }
         let id = TaskId::new(self.next_id);
         self.next_id = self.next_id.checked_add(1).ok_or(TaskError::IdExhausted)?;
         self.tasks.push(Task {
@@ -213,6 +216,9 @@ impl TaskStore {
 
     pub fn rename(&mut self, id: TaskId, title: impl Into<String>) -> Result<(), TaskError> {
         let title = TaskTitle::parse(&title.into())?;
+        if title.as_str() == "Void" {
+            return Err(TaskError::ReservedTitle);
+        }
         self.task_mut(id)?.title = title;
         Ok(())
     }
@@ -251,6 +257,7 @@ impl TaskStore {
 pub enum TaskError {
     EmptyTitle,
     UnsafeTitleCharacter,
+    ReservedTitle,
     TitleTooLong { max: usize, actual: usize },
     TitleTooWide { max: usize, actual: usize },
     IdExhausted,

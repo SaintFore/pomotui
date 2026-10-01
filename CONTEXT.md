@@ -49,11 +49,11 @@ The optional Task to which a Focus Session and its actual focus time are attribu
 _Avoid_: Required task, timer name
 
 **Task**:
-A lightweight work item with a stable identity, a non-unique title, an open or completed status, and actual focus time accumulated from its Focus Sessions. Starting by a new title creates a Task, while ambiguous existing titles require an explicit identity; completing it does not stop its Current Session, deleting it never deletes Session History, and a Task referenced by the Current Session cannot be deleted.
+A lightweight work item with a stable identity, a non-unique title, an open or completed status, and actual focus time accumulated from its Focus Sessions. Starting by a new title creates a Task, while ambiguous existing titles require an explicit identity; `Void` is reserved for the system Void Task and cannot be used as an ordinary Task title. Completing a Task does not stop its Current Session, deleting it never deletes Session History, and a Task referenced by the Current Session cannot be deleted.
 _Avoid_: Project, todo.txt entry
 
 **Void Task**:
-The single system-owned Task used when a reviewed Focus Session had no Current Task and the user does not assign a regular Task during Session Review. Its title is always `Void` in every interface language, it cannot be renamed or deleted, and it remains visible in focus-time statistics. Reviewing against the Void Task requires a Chain Entry Title.
+The single system-owned Task used when a reviewed Focus Session had no Current Task and the user does not assign a regular Task during Session Review. Its reserved title is always `Void` in every interface language; an ordinary Task cannot use that title, and the Void Task cannot be renamed or deleted. It remains visible in focus-time statistics. Reviewing against the Void Task requires a Chain Entry Title.
 _Avoid_: Missing Task, a newly created `Void` Task, empty Task
 
 **Action Chain**:

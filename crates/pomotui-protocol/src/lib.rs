@@ -344,6 +344,7 @@ pub enum ProtocolError {
 pub enum TaskTitleRule {
     Empty,
     UnsafeCharacter,
+    Reserved,
     TooLong,
     TooWide,
 }

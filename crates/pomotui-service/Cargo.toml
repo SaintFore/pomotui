@@ -19,6 +19,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [dev-dependencies]
 pomotui-cli = { path = "../pomotui-cli" }
 pomotui-platform = { path = "../pomotui-platform", features = ["test-support"] }
+rusqlite = "0.38"
 
 [lints]
 workspace = true

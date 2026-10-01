@@ -230,6 +230,18 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                 return;
             }
         };
+        match service.lock() {
+            Ok(mut service) => {
+                if let Err(error) = service.prepare_first_export(&work.path) {
+                    service.finish_sync_failure(&work.path, "migration", error);
+                    return;
+                }
+            }
+            Err(error) => {
+                eprintln!("sync worker cannot lock Timer Service: {error}");
+                return;
+            }
+        }
         let Some(plan) = current_plan(service, &work.path, &incoming) else {
             return;
         };

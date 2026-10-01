@@ -1,6 +1,7 @@
 use pomotui_sync::{
     ActivityProjection, Document, EntityId, MutationInstant, Record, RecordId, RecordPayload,
-    SessionKind, SessionOutcome, SessionReviewJudgment, TaskProjection, TaskStatus, plan_sync,
+    ReviewedTaskKind, SessionKind, SessionOutcome, SessionReviewJudgment, TaskProjection,
+    TaskStatus, plan_sync,
 };
 
 fn record_id(value: u128) -> RecordId {
@@ -39,6 +40,7 @@ fn session_review(
             judgment,
             task_entity_id: EntityId::parse(&uuid::Uuid::from_u128(16).to_string())
                 .expect("task identity"),
+            task_kind: pomotui_sync::ReviewedTaskKind::Regular,
             task_title: "Snapshot".into(),
             actual_seconds: 731,
             reflection: (judgment == SessionReviewJudgment::Failed).then(|| "Learned".into()),
@@ -79,6 +81,49 @@ fn valid_task_records_have_byte_stable_round_trips() {
 
     assert_eq!(decoded.to_json().expect("serialize again"), encoded);
     assert!(encoded.ends_with('\n'));
+}
+
+#[test]
+fn format_four_is_validated_and_upgraded_to_format_five() {
+    let current = Document::new(&[task_version(1, 9, 1_000, "First")])
+        .and_then(|document| document.to_json())
+        .expect("current document");
+    let legacy = current.replacen("\"version\": 5", "\"version\": 4", 1);
+
+    let upgraded = Document::from_json(&legacy)
+        .and_then(|document| document.to_json())
+        .expect("upgrade format four");
+
+    assert!(upgraded.contains("\"version\": 5"));
+    assert!(!upgraded.contains("\"version\": 4"));
+}
+
+#[test]
+fn format_four_void_title_upgrades_to_system_void_attribution() {
+    let legacy_records = vec![
+        task_version(1, 16, 1_000, "Void"),
+        ended_session(2, 20, Some(16)),
+        session_review(3, 30, 20, SessionReviewJudgment::Successful),
+    ];
+    let current = Document::new(&legacy_records)
+        .and_then(|document| document.to_json())
+        .expect("legacy-shaped document");
+    let legacy = current.replacen("\"version\": 5", "\"version\": 4", 1);
+
+    let upgraded = Document::from_json(&legacy).expect("upgrade format four");
+    assert!(upgraded.records().iter().any(|record| matches!(
+        record.payload,
+        RecordPayload::SessionReviewed {
+            task_kind: ReviewedTaskKind::SystemVoid,
+            ..
+        }
+    )));
+    assert!(
+        plan_sync(&[], upgraded.records())
+            .expect("project upgraded document")
+            .task_projections()
+            .is_empty()
+    );
 }
 
 #[test]

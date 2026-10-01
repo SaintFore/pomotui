@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: i64 = 3;
 
@@ -46,19 +46,26 @@ pub struct ReminderDeliveryCounts {
 #[derive(Debug)]
 pub enum RepositoryError {
     Sqlite(rusqlite::Error),
+    Io(std::io::Error),
     IncompatibleSchema { found: i64, supported: i64 },
+    UnsupportedLegacySchema { found: i64 },
 }
 
 impl std::fmt::Display for RepositoryError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(error) => write!(formatter, "SQLite repository error: {error}"),
+            Self::Io(error) => write!(formatter, "database backup error: {error}"),
             Self::IncompatibleSchema { found, supported } => {
                 write!(
                     formatter,
                     "database schema {found} is newer than supported schema {supported}"
                 )
             }
+            Self::UnsupportedLegacySchema { found } => write!(
+                formatter,
+                "database schema {found} is not a supported released migration input"
+            ),
         }
     }
 }
@@ -71,8 +78,15 @@ impl From<rusqlite::Error> for RepositoryError {
     }
 }
 
+impl From<std::io::Error> for RepositoryError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
 pub struct SqliteRepository {
     connection: Connection,
+    path: Option<PathBuf>,
 }
 
 /// Installs a test-only trigger that aborts durable snapshot updates until the
@@ -101,7 +115,7 @@ impl SqliteRepository {
     /// Returns a diagnostic error when `SQLite` cannot open/migrate the file or
     /// when its schema is newer than this binary supports.
     pub fn open(path: &Path) -> Result<Self, RepositoryError> {
-        Self::from_connection(Connection::open(path)?)
+        Self::from_connection(Connection::open(path)?, Some(path.to_owned()))
     }
 
     /// Opens a migrated in-memory repository.
@@ -110,11 +124,14 @@ impl SqliteRepository {
     ///
     /// Returns a diagnostic `SQLite` migration error.
     pub fn open_in_memory() -> Result<Self, RepositoryError> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn from_connection(mut connection: Connection) -> Result<Self, RepositoryError> {
+    fn from_connection(
+        mut connection: Connection,
+        path: Option<PathBuf>,
+    ) -> Result<Self, RepositoryError> {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let found = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if found > SCHEMA_VERSION {
@@ -122,6 +139,9 @@ impl SqliteRepository {
                 found,
                 supported: SCHEMA_VERSION,
             });
+        }
+        if matches!(found, 1 | 2) {
+            return Err(RepositoryError::UnsupportedLegacySchema { found });
         }
         if found == 0 {
             let transaction = connection.transaction()?;
@@ -262,7 +282,54 @@ impl SqliteRepository {
             )?;
             transaction.commit()?;
         }
-        Ok(Self { connection })
+        Ok(Self { connection, path })
+    }
+
+    /// Creates a non-overwriting, transactionally consistent and durable backup.
+    ///
+    /// The backup sits beside the database and can be opened independently. Its
+    /// name includes the rewrite stage and timestamp so separate migration
+    /// boundaries never overwrite one another.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this repository has no filesystem path or the
+    /// `SQLite` backup or durability flush fails.
+    pub fn create_migration_backup(
+        &self,
+        stage: &str,
+        timestamp: i64,
+    ) -> Result<PathBuf, RepositoryError> {
+        let source = self.path.as_ref().ok_or(rusqlite::Error::InvalidQuery)?;
+        let parent = source.parent().unwrap_or_else(|| Path::new("."));
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("pomotui.sqlite3");
+        let mut suffix = 0_u32;
+        let destination = loop {
+            let collision = if suffix == 0 {
+                String::new()
+            } else {
+                format!("-{suffix}")
+            };
+            let candidate = parent.join(format!(
+                "{name}.backup-{stage}-{timestamp}{collision}.sqlite3"
+            ));
+            if !candidate.exists() {
+                break candidate;
+            }
+            suffix = suffix.saturating_add(1);
+        };
+        let mut target = Connection::open(&destination)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&self.connection, &mut target)?;
+            backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+        }
+        target.close().map_err(|(_, error)| error)?;
+        std::fs::File::open(&destination)?.sync_all()?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(destination)
     }
 
     #[must_use]
@@ -631,7 +698,7 @@ mod tests {
             .pragma_update(None, "user_version", 99)
             .expect("version");
 
-        let error = SqliteRepository::from_connection(connection)
+        let error = SqliteRepository::from_connection(connection, None)
             .err()
             .expect("reject");
         assert!(matches!(
@@ -651,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn version_one_database_migrates_without_recreating_existing_data() {
+    fn unreleased_version_one_database_is_rejected_without_mutation() {
         let connection = Connection::open_in_memory().expect("open");
         connection
             .execute("CREATE TABLE precious(value TEXT)", [])
@@ -663,17 +730,13 @@ mod tests {
             .pragma_update(None, "user_version", 1)
             .expect("version");
 
-        let repository = SqliteRepository::from_connection(connection).expect("migrate");
-        let value: String = repository
-            .connection
-            .query_row("SELECT value FROM precious", [], |row| row.get(0))
-            .expect("preserved data");
-        let version: i64 = repository
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("schema version");
-        assert_eq!(value, "keep");
-        assert_eq!(version, 3);
+        let error = SqliteRepository::from_connection(connection, None)
+            .err()
+            .expect("reject unreleased schema");
+        assert!(matches!(
+            error,
+            RepositoryError::UnsupportedLegacySchema { found: 1 }
+        ));
     }
 
     #[test]

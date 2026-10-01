@@ -16,6 +16,15 @@ fn duplicate_titles_require_explicit_identity() {
 }
 
 #[test]
+fn void_is_reserved_for_the_system_task() {
+    let mut tasks = TaskStore::new();
+    assert_eq!(tasks.create(" Void "), Err(TaskError::ReservedTitle));
+    let task = tasks.create("Regular").expect("regular Task");
+    assert_eq!(tasks.rename(task, "Void"), Err(TaskError::ReservedTitle));
+    assert_eq!(tasks.get(task).expect("unchanged Task").title(), "Regular");
+}
+
+#[test]
 fn history_keeps_title_snapshot_after_task_rename_and_delete() {
     let mut tasks = TaskStore::new();
     let id = tasks.create("Original").expect("create");

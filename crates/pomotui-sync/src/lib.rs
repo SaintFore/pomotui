@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 4;
+pub const FORMAT_VERSION: u16 = 5;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -107,6 +107,19 @@ pub enum SessionReviewJudgment {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewedTaskKind {
+    #[default]
+    Regular,
+    SystemVoid,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_regular_task(kind: &ReviewedTaskKind) -> bool {
+    matches!(kind, ReviewedTaskKind::Regular)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RecordPayload {
@@ -129,6 +142,8 @@ pub enum RecordPayload {
         session_entity_id: EntityId,
         judgment: SessionReviewJudgment,
         task_entity_id: EntityId,
+        #[serde(default, skip_serializing_if = "is_regular_task")]
+        task_kind: ReviewedTaskKind,
         task_title: String,
         actual_seconds: u64,
         reflection: Option<String>,
@@ -218,12 +233,12 @@ impl Document {
     }
 
     pub fn from_json(source: &str) -> Result<Self, String> {
-        let document: Self = serde_json::from_str(source)
+        let mut document: Self = serde_json::from_str(source)
             .map_err(|error| format!("invalid sync document: {error}"))?;
         if document.format != FORMAT_NAME {
             return Err("unsupported sync document format".into());
         }
-        if document.version != FORMAT_VERSION {
+        if !matches!(document.version, 4 | FORMAT_VERSION) {
             return Err(format!(
                 "unsupported sync document version {}; reset local pre-release data with `pomotui reset --all-data --confirm`",
                 document.version
@@ -236,7 +251,33 @@ impl Document {
         if document.integrity.records_sha256 != checksum(&document.records)? {
             return Err("sync document checksum does not match its records".into());
         }
-        Ok(document)
+        if document.version == 4 {
+            let void_entities = document
+                .records
+                .iter()
+                .filter_map(|record| match &record.payload {
+                    RecordPayload::TaskVersion { title, .. } if title == "Void" => {
+                        Some(record.entity_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            for record in &mut document.records {
+                if let RecordPayload::SessionReviewed {
+                    task_entity_id,
+                    task_kind,
+                    ..
+                } = &mut record.payload
+                    && void_entities.contains(task_entity_id)
+                {
+                    *task_kind = ReviewedTaskKind::SystemVoid;
+                }
+            }
+        }
+        Ok(Self {
+            version: FORMAT_VERSION,
+            ..document
+        })
     }
 
     pub fn to_json(&self) -> Result<String, String> {
@@ -368,6 +409,7 @@ pub struct ProjectedSessionReview {
     pub session_entity_id: EntityId,
     pub judgment: SessionReviewJudgment,
     pub task_entity_id: EntityId,
+    pub task_kind: ReviewedTaskKind,
     pub task_title: String,
     pub actual_seconds: u64,
     pub reflection: Option<String>,
@@ -539,6 +581,7 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
 /// Projects immutable Session Reviews in source-Session end order. Session Review identity is
 /// the stable tie-breaker, so arrival order can never affect chain boundaries.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
     let session_ends = records
         .iter()
@@ -577,6 +620,7 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                 session_entity_id,
                 judgment,
                 task_entity_id,
+                task_kind,
                 task_title,
                 actual_seconds,
                 reflection,
@@ -601,6 +645,7 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                         session_entity_id: session_entity_id.clone(),
                         judgment: *judgment,
                         task_entity_id: task_entity_id.clone(),
+                        task_kind: *task_kind,
                         task_title: task_title.clone(),
                         actual_seconds: *actual_seconds,
                         reflection,
@@ -644,8 +689,22 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
 
 #[must_use]
 pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
+    let system_void_entities = records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            RecordPayload::SessionReviewed {
+                task_entity_id,
+                task_kind: ReviewedTaskKind::SystemVoid,
+                ..
+            } => Some(task_entity_id),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
     let mut by_entity = BTreeMap::<EntityId, Vec<&Record>>::new();
     for record in records {
+        if system_void_entities.contains(&record.entity_id) {
+            continue;
+        }
         by_entity
             .entry(record.entity_id.clone())
             .or_default()
@@ -945,6 +1004,7 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
         if let RecordPayload::SessionReviewed {
             session_entity_id,
             task_entity_id,
+            task_kind,
             actual_seconds,
             ..
         } = &record.payload
@@ -960,7 +1020,7 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             if !reviewed_sessions.insert(session_entity_id) {
                 return Err("synchronized Session has more than one Review".into());
             }
-            if !task_entities.contains(task_entity_id) {
+            if *task_kind == ReviewedTaskKind::Regular && !task_entities.contains(task_entity_id) {
                 return Err("synchronized Session Review references unknown Task identity".into());
             }
             let session_actual = records.iter().find_map(|candidate| {

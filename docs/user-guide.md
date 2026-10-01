@@ -151,6 +151,18 @@ pomotui sync now
 pomotui sync status
 ```
 
+On an existing installation, the Timer Service first validates the complete
+sync document and creates a durable SQLite backup beside the database. Backup
+names contain `initial-sync-export` and a timestamp; they are never overwritten
+or removed automatically. It then exports existing Shared Activity and global
+identity mappings in one transaction. If initial publication fails, the local
+migration remains committed and `pomotui sync now` can safely retry.
+
+Opening the unversioned schema-3 database shipped by Pomotui v0.1.0 and v0.2.0
+also creates a separate `schema-migration` backup before upgrading its durable
+state. To restore either backup, stop the Timer Service and replace the database
+with the selected `.sqlite3` backup. The sync file is not required to open it.
+
 Use `pomotui sync status --json` for automation (the global `--json` flag may
 also come first):
 

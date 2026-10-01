@@ -16,10 +16,10 @@ use pomotui_protocol::{
 };
 use pomotui_sync::{
     ActivityProjection, Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION,
-    MutationInstant, Record as SyncRecord, RecordId, RecordPayload, RewardMilestoneProjection,
-    RewardProjection, SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome,
-    SessionReviewJudgment, SessionReviewProjection, SyncPlan, TaskProjection,
-    TaskStatus as SyncTaskStatus, plan_sync,
+    MutationInstant, Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind,
+    RewardMilestoneProjection, RewardProjection, SessionKind as SyncSessionKind,
+    SessionOutcome as SyncSessionOutcome, SessionReviewJudgment, SessionReviewProjection, SyncPlan,
+    TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -51,6 +51,13 @@ trait ServiceRepository: Send {
         error: &str,
     ) -> Result<(), String>;
     fn reminder_delivery_counts(&self) -> Result<ReminderDeliveryCounts, String>;
+    fn create_migration_backup(
+        &self,
+        _stage: &str,
+        _timestamp: i64,
+    ) -> Result<std::path::PathBuf, String> {
+        Err("database backup is unavailable".into())
+    }
 }
 
 impl ServiceRepository for SqliteRepository {
@@ -98,6 +105,15 @@ impl ServiceRepository for SqliteRepository {
 
     fn reminder_delivery_counts(&self) -> Result<ReminderDeliveryCounts, String> {
         self.reminder_delivery_counts()
+            .map_err(|error| error.to_string())
+    }
+
+    fn create_migration_backup(
+        &self,
+        stage: &str,
+        timestamp: i64,
+    ) -> Result<std::path::PathBuf, String> {
+        self.create_migration_backup(stage, timestamp)
             .map_err(|error| error.to_string())
     }
 }
@@ -163,6 +179,14 @@ struct SyncState {
     session_review_entries: std::collections::BTreeMap<EntityId, u64>,
     #[serde(default)]
     reward_milestone_entities: std::collections::BTreeMap<u64, EntityId>,
+    #[serde(default)]
+    reward_unlock_entities: std::collections::BTreeMap<u64, EntityId>,
+    #[serde(default)]
+    void_task_entity: Option<EntityId>,
+    #[serde(default)]
+    legacy_export_completed: bool,
+    #[serde(default)]
+    migration_backups: Vec<std::path::PathBuf>,
     last_attempt: Option<i64>,
     last_success: Option<i64>,
     last_error: Option<String>,
@@ -316,6 +340,19 @@ impl Service {
             .into_iter()
             .collect();
         let had_payload = payload.is_some();
+        let legacy = payload
+            .as_deref()
+            .is_some_and(|payload| PersistedService::format_version(payload) == Ok(0));
+        let schema_backup = if legacy {
+            let timestamp = PlatformClock::default().wall_seconds().unwrap_or(0);
+            Some(
+                repository
+                    .create_migration_backup("schema-migration", timestamp)
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
         let mut service = if let Some(payload) = payload.as_deref() {
             PersistedService::decode(payload)?
         } else {
@@ -324,7 +361,10 @@ impl Service {
         let created_void = service.ensure_void_task()?;
         service.applied_keys = keys;
         service.repository = Some(Box::new(repository));
-        if !had_payload || created_void {
+        if let Some(backup) = schema_backup {
+            service.sync.migration_backups.push(backup);
+        }
+        if !had_payload || created_void || legacy {
             service.persist(None)?;
         }
         service.observe_time();
@@ -367,6 +407,27 @@ impl Service {
             return Err("synchronization configuration changed during the attempt".into());
         }
         Ok(self.sync.records.clone())
+    }
+
+    /// Prepares a validated first export for the worker. The following
+    /// `apply_sync_plan` call commits these mappings with the incoming projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backup or legacy-record export cannot be prepared.
+    pub fn prepare_first_export(&mut self, path: &Path) -> Result<(), String> {
+        if self.sync.path.as_deref() != Some(path) || self.sync.legacy_export_completed {
+            return Ok(());
+        }
+        let backup = self
+            .repository
+            .as_ref()
+            .ok_or_else(|| "durable repository is unavailable".to_owned())?
+            .create_migration_backup("initial-sync-export", self.wall)?;
+        self.sync.migration_backups.push(backup);
+        self.backfill_sync_records()?;
+        self.sync.legacy_export_completed = true;
+        Ok(())
     }
 
     /// Applies validated incoming records and returns the latest retained union.
@@ -839,12 +900,8 @@ impl Service {
                 if let Some(id) = self.void_task_id {
                     TaskId::new(id)
                 } else {
-                    let id = self
-                        .tasks
-                        .create("Void")
-                        .map_err(|error| error.to_string())?;
-                    self.void_task_id = Some(id.get());
-                    id
+                    self.ensure_void_task()?;
+                    TaskId::new(self.void_task_id.expect("Void identity was created"))
                 }
             } else {
                 TaskId::new(
@@ -920,9 +977,13 @@ impl Service {
                     .cloned()
                 {
                     let previous_chain_break_review_entity_id = self.current_chain_anchor();
+                    let reward_entity = EntityId::random();
+                    self.sync
+                        .reward_unlock_entities
+                        .insert(self.next_reward_unlock_id, reward_entity.clone());
                     self.sync.records.push(SyncRecord::new(
                         RecordId::random(),
-                        EntityId::random(),
+                        reward_entity,
                         self.next_sync_mutation_time(),
                         RecordPayload::RewardUnlocked {
                             milestone_entity_id,
@@ -1114,12 +1175,8 @@ impl Service {
                 if let Some(id) = self.void_task_id {
                     TaskId::new(id)
                 } else {
-                    let id = self
-                        .tasks
-                        .create("Void")
-                        .map_err(|error| error.to_string())?;
-                    self.void_task_id = Some(id.get());
-                    id
+                    self.ensure_void_task()?;
+                    TaskId::new(self.void_task_id.expect("Void identity was created"))
                 }
             } else {
                 TaskId::new(task_id.expect("regular Task choice validated"))
@@ -1480,10 +1537,18 @@ impl Service {
             .get(&review.session_id)
             .cloned()
             .ok_or_else(|| "submitted Session Review source has no global identity".to_owned())?;
-        if !self.sync.task_entities.contains_key(&review.task_id) {
+        let is_void = self.void_task_id == Some(review.task_id);
+        if !is_void && !self.sync.task_entities.contains_key(&review.task_id) {
             self.record_task_creation(review.task_id, &review.task_title);
         }
-        let task_entity_id = self.sync.task_entities[&review.task_id].clone();
+        let task_entity_id = if is_void {
+            self.sync
+                .void_task_entity
+                .get_or_insert_with(EntityId::random)
+                .clone()
+        } else {
+            self.sync.task_entities[&review.task_id].clone()
+        };
         let review_entity_id = EntityId::random();
         self.sync
             .session_review_entries
@@ -1496,6 +1561,11 @@ impl Service {
                 session_entity_id,
                 judgment: review.judgment,
                 task_entity_id,
+                task_kind: if is_void {
+                    ReviewedTaskKind::SystemVoid
+                } else {
+                    ReviewedTaskKind::Regular
+                },
                 task_title: review.task_title,
                 actual_seconds: review.actual_seconds,
                 reflection: review.reflection,
@@ -1614,6 +1684,88 @@ impl Service {
         for id in missing_milestones {
             self.record_reward_milestone_version(id)?;
         }
+        let missing_unlocks = self
+            .reward_unlocks
+            .iter()
+            .filter(|unlock| !self.sync.reward_unlock_entities.contains_key(&unlock.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for unlock in missing_unlocks {
+            let milestone_entity_id = if let Some(entity) = self
+                .sync
+                .reward_milestone_entities
+                .get(&unlock.milestone_id)
+                .cloned()
+            {
+                entity
+            } else {
+                let entity = EntityId::random();
+                self.sync
+                    .reward_milestone_entities
+                    .insert(unlock.milestone_id, entity.clone());
+                self.sync.records.push(SyncRecord::new(
+                    RecordId::random(),
+                    entity.clone(),
+                    self.next_sync_mutation_time(),
+                    RecordPayload::RewardMilestoneVersion {
+                        name: unlock.name.clone(),
+                        threshold: unlock.threshold,
+                        budget: unlock.budget,
+                    },
+                ));
+                self.sync.records.push(SyncRecord::new(
+                    RecordId::random(),
+                    entity.clone(),
+                    self.next_sync_mutation_time(),
+                    RecordPayload::RewardMilestoneDeleted,
+                ));
+                entity
+            };
+            let previous_chain_break_review_entity_id = self
+                .ended_chains
+                .iter()
+                .position(|chain| chain.id == unlock.chain_id)
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| self.ended_chains.get(index))
+                .and_then(|chain| {
+                    self.sync
+                        .session_review_entries
+                        .iter()
+                        .find_map(|(entity, local)| {
+                            (*local == chain.chain_break.id).then(|| entity.clone())
+                        })
+                });
+            let reward_entity = EntityId::random();
+            self.sync
+                .reward_unlock_entities
+                .insert(unlock.id, reward_entity.clone());
+            self.sync.records.push(SyncRecord::new(
+                RecordId::random(),
+                reward_entity.clone(),
+                self.next_sync_mutation_time(),
+                RecordPayload::RewardUnlocked {
+                    milestone_entity_id: milestone_entity_id.clone(),
+                    previous_chain_break_review_entity_id: previous_chain_break_review_entity_id
+                        .clone(),
+                    name: unlock.name,
+                    threshold: unlock.threshold,
+                    budget: unlock.budget,
+                },
+            ));
+            if let Some(claimed_at) = unlock.claimed_at {
+                self.sync.records.push(SyncRecord::new(
+                    RecordId::random(),
+                    reward_entity,
+                    self.next_sync_mutation_time(),
+                    RecordPayload::RewardClaimed {
+                        milestone_entity_id,
+                        previous_chain_break_review_entity_id,
+                        claimed_at,
+                    },
+                ));
+            }
+        }
+        self.sync.records.sort();
         Ok(())
     }
 
@@ -1659,6 +1811,70 @@ impl Service {
         self.persist(None)?;
         let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
         replace_sync_file(&path, &serialized)?;
+        self.sync.file_record_count = Some(self.sync.records.len());
+        self.sync.last_success = Some(self.wall);
+        self.sync.last_error = None;
+        self.sync.last_error_stage = None;
+        self.persist(None)?;
+        Ok(self.sync.records.len())
+    }
+
+    /// Performs the one-time legacy export after validating the exchange file.
+    /// All local identity mappings, generated records, incoming projections and
+    /// the completion marker are included in the first durable state write.
+    fn enable_sync(&mut self, path: &Path) -> Result<usize, String> {
+        self.observe_time();
+        let source = read_sync_file(path)?;
+        let missing_file = source.is_none();
+        let incoming = source
+            .as_deref()
+            .map(SyncDocument::from_json)
+            .transpose()?
+            .map_or_else(Vec::new, SyncDocument::into_records);
+        // Validate the complete incoming set before backup creation or mutation.
+        let _ = plan_sync(&self.sync.records, &incoming)?;
+
+        if !self.sync.legacy_export_completed {
+            let backup = self
+                .repository
+                .as_ref()
+                .ok_or_else(|| "durable repository is unavailable".to_owned())?
+                .create_migration_backup("initial-sync-export", self.wall)?;
+            self.sync.migration_backups.push(backup);
+        }
+        self.backfill_sync_records()?;
+        self.sync.path = Some(path.to_owned());
+        self.sync.warning = None;
+        self.sync.last_attempt = Some(self.wall);
+        self.sync.file_record_count = Some(incoming.len());
+        let plan = plan_sync(&self.sync.records, &incoming)?;
+        self.sync.records = plan.retained_records().to_vec();
+        self.apply_task_projections(plan.task_projections())?;
+        self.apply_activity_projections(plan.activity_projections());
+        self.apply_session_review_projection(plan.session_review_projection())?;
+        self.apply_reward_projection(plan.reward_projection());
+        self.apply_deferred_task_deletions()?;
+        self.set_clock_warning(plan.retained_records());
+        self.sync.legacy_export_completed = true;
+        self.persist(None)?;
+
+        if missing_file {
+            let error = "sync file does not exist; local migration completed and `pomotui sync rebuild` can publish retained records".to_owned();
+            self.sync.last_error = Some(error.clone());
+            self.sync.last_error_stage = Some("initial_publication".into());
+            let _ = self.persist(None);
+            return Err(error);
+        }
+
+        let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
+        if let Err(error) = replace_sync_file(path, &serialized) {
+            self.sync.last_error = Some(error.clone());
+            self.sync.last_error_stage = Some("initial_publication".into());
+            let _ = self.persist(None);
+            return Err(format!(
+                "local migration completed, but initial sync publication failed: {error}"
+            ));
+        }
         self.sync.file_record_count = Some(self.sync.records.len());
         self.sync.last_success = Some(self.wall);
         self.sync.last_error = None;
@@ -1864,14 +2080,18 @@ impl Service {
                     .ok_or_else(|| {
                         "projected Session Review source Session is not local".to_owned()
                     })?;
-                let task_id = self
-                    .sync
-                    .task_entities
-                    .iter()
-                    .find_map(|(local, global)| {
-                        (global == &review.task_entity_id).then_some(*local)
-                    })
-                    .ok_or_else(|| "projected Session Review Task is not local".to_owned())?;
+                let task_id = if review.task_kind == ReviewedTaskKind::SystemVoid {
+                    self.void_task_id
+                        .ok_or_else(|| "system Void Task is unavailable".to_owned())?
+                } else {
+                    self.sync
+                        .task_entities
+                        .iter()
+                        .find_map(|(local, global)| {
+                            (global == &review.task_entity_id).then_some(*local)
+                        })
+                        .ok_or_else(|| "projected Session Review Task is not local".to_owned())?
+                };
                 if self
                     .history
                     .records()
@@ -2150,6 +2370,7 @@ impl Service {
             TaskError::UnsafeTitleCharacter => {
                 Some(pomotui_protocol::TaskTitleRule::UnsafeCharacter)
             }
+            TaskError::ReservedTitle => Some(pomotui_protocol::TaskTitleRule::Reserved),
             TaskError::TitleTooLong { .. } => Some(pomotui_protocol::TaskTitleRule::TooLong),
             TaskError::TitleTooWide { .. } => Some(pomotui_protocol::TaskTitleRule::TooWide),
             _ => None,
@@ -2340,20 +2561,22 @@ impl Handler for Service {
                 };
             }
             Command::SyncEnable { path } => {
-                if let Err(error) = self.backfill_sync_records() {
-                    return Self::rejected(error);
-                }
-                self.sync.path = Some(path);
-                self.sync.warning = None;
-                if let Err(error) = self.persist(mutation_key.as_deref()) {
-                    return self.durable_rejected(error);
-                }
                 if self.sync.background {
-                    return Response::Data {
-                        value: self.sync_status(),
+                    self.sync.path = Some(path);
+                    self.sync.warning = None;
+                    return match self.persist(mutation_key.as_deref()) {
+                        Ok(()) => Response::Data {
+                            value: self.sync_status(),
+                        },
+                        Err(error) => self.durable_rejected(error),
                     };
                 }
-                return self.merge_sync_response();
+                return match self.enable_sync(&path) {
+                    Ok(_) => Response::Data {
+                        value: self.sync_status(),
+                    },
+                    Err(error) => Self::rejected(error),
+                };
             }
             Command::SyncDisable => {
                 self.sync.path = None;
@@ -2725,9 +2948,15 @@ impl Handler for Service {
                                     })
                                 })
                         };
+                        let reward_entity = self
+                            .sync
+                            .reward_unlock_entities
+                            .entry(unlock_id)
+                            .or_insert_with(EntityId::random)
+                            .clone();
                         self.sync.records.push(SyncRecord::new(
                             RecordId::random(),
-                            EntityId::random(),
+                            reward_entity,
                             self.next_sync_mutation_time(),
                             RecordPayload::RewardClaimed {
                                 milestone_entity_id,
@@ -2935,6 +3164,17 @@ struct PersistedRecord {
 }
 
 impl PersistedService {
+    fn format_version(payload: &str) -> Result<u16, String> {
+        let value: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|error| format!("invalid durable state: {error}"))?;
+        value.get("data_format_version").map_or(Ok(0), |version| {
+            version
+                .as_u64()
+                .and_then(|version| u16::try_from(version).ok())
+                .ok_or_else(|| "invalid durable state format version".to_owned())
+        })
+    }
+
     fn encode(service: &Service) -> Result<String, String> {
         let state = service.timer.state();
         let session = match state.session {
@@ -3033,11 +3273,11 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
-        if persisted.data_format_version != 2 {
-            return Err(
-                "database format is incompatible with experimental synchronization; reset local pre-release data with `pomotui reset --all-data --confirm`"
-                    .into(),
-            );
+        if !matches!(persisted.data_format_version, 0 | 2) {
+            return Err(format!(
+                "unsupported persisted-state format {}; supported formats are unversioned released state and format 2",
+                persisted.data_format_version
+            ));
         }
         let durations = SessionDurations::new(
             persisted.timer.focus_seconds,
@@ -3274,6 +3514,140 @@ mod tests {
         std::fs::write(path, document).expect("create sync document");
     }
 
+    fn migration_backups(root: &Path, stage: &str) -> Vec<std::path::PathBuf> {
+        let mut backups = std::fs::read_dir(root)
+            .expect("backup directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(&format!("backup-{stage}-")))
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        backups
+    }
+
+    #[test]
+    fn opening_released_unversioned_state_creates_a_restorable_backup() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-unversioned-migration-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let database = root.join("pomotui.sqlite3");
+        {
+            let mut service = Service::open(&database).expect("create released database");
+            service.handle(request(
+                Some("legacy-task"),
+                Command::TaskCreate {
+                    title: "Preserved work".into(),
+                },
+            ));
+        }
+        let connection = rusqlite::Connection::open(&database).expect("legacy database");
+        let payload: String = connection
+            .query_row(
+                "SELECT payload FROM current_session WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy payload");
+        let mut state: serde_json::Value = serde_json::from_str(&payload).expect("state JSON");
+        state
+            .as_object_mut()
+            .expect("state object")
+            .remove("data_format_version");
+        connection
+            .execute(
+                "UPDATE current_session SET payload = ?1 WHERE singleton = 1",
+                [serde_json::to_string(&state).expect("unversioned state")],
+            )
+            .expect("install released state");
+        drop(connection);
+
+        let mut migrated = Service::open(&database).expect("migrate released state");
+        let Response::Data { value: tasks } = migrated.handle(request(None, Command::TaskList))
+        else {
+            panic!("Task list response");
+        };
+        assert!(
+            tasks
+                .as_array()
+                .expect("tasks")
+                .iter()
+                .any(|task| task["title"] == "Preserved work")
+        );
+        let backups = migration_backups(&root, "schema-migration");
+        assert_eq!(backups.len(), 1);
+        let backup = rusqlite::Connection::open(&backups[0]).expect("restorable backup");
+        let backed_up: String = backup
+            .query_row(
+                "SELECT payload FROM current_session WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backed-up payload");
+        assert_eq!(PersistedService::format_version(&backed_up), Ok(0));
+        drop(migrated);
+        let restarted = Service::open(&database).expect("restart migrated service");
+        assert_eq!(migration_backups(&root, "schema-migration").len(), 1);
+        drop(restarted);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn first_sync_export_creates_one_backup_and_retry_reuses_records() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-first-export-backup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let database = root.join("pomotui.sqlite3");
+        let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
+        let mut service = Service::open(&database).expect("service");
+        service.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Existing work".into(),
+            },
+        ));
+        let first = service.handle(request(
+            Some("enable"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        assert!(matches!(first, Response::Data { .. }));
+        let first_document = std::fs::read_to_string(&sync_path).expect("first document");
+        let first_count = SyncDocument::from_json(&first_document)
+            .expect("first document")
+            .records()
+            .len();
+        let retry = service.handle(request(
+            Some("enable-again"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        assert!(matches!(retry, Response::Data { .. }));
+        assert_eq!(migration_backups(&root, "initial-sync-export").len(), 1);
+        assert_eq!(
+            SyncDocument::from_json(&std::fs::read_to_string(&sync_path).expect("retry document"))
+                .expect("retry document")
+                .records()
+                .len(),
+            first_count
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn one_task_converges_between_two_fresh_services_through_one_file() {
         let root = std::env::temp_dir().join(format!(
@@ -3363,7 +3737,7 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&document).expect("valid JSON");
         assert_eq!(json["format"], "pomotui.sync");
-        assert_eq!(json["version"], 4);
+        assert_eq!(json["version"], 5);
         assert_eq!(json["integrity"]["record_count"], 1);
         assert_eq!(
             json["integrity"]["records_sha256"]
@@ -3768,20 +4142,17 @@ mod tests {
     }
 
     #[test]
-    fn pre_lifecycle_database_requires_an_explicit_full_reset() {
+    fn unreleased_format_one_database_requires_an_explicit_full_reset() {
         let service = Service::new();
         let encoded = PersistedService::encode(&service).expect("encode current state");
         let mut legacy: serde_json::Value = serde_json::from_str(&encoded).expect("durable JSON");
-        legacy
-            .as_object_mut()
-            .expect("durable object")
-            .remove("data_format_version");
+        legacy["data_format_version"] = serde_json::json!(1);
 
         let error = PersistedService::decode(&legacy.to_string())
             .err()
-            .expect("legacy state must be rejected");
+            .expect("unreleased state must be rejected");
 
-        assert!(error.contains("pomotui reset --all-data --confirm"));
+        assert!(error.contains("unsupported persisted-state format 1"));
     }
 
     #[test]
@@ -4146,12 +4517,19 @@ mod tests {
                     .count(),
                 1
             );
-            service.handle(request(
-                Some("ordinary-void"),
-                Command::TaskCreate {
-                    title: "Void".into(),
-                },
-            ));
+            assert_eq!(
+                service.handle(request(
+                    Some("ordinary-void"),
+                    Command::TaskCreate {
+                        title: "Void".into(),
+                    },
+                )),
+                Response::Error {
+                    error: ProtocolError::InvalidTaskTitle {
+                        rule: TaskTitleRule::Reserved,
+                    },
+                }
+            );
             assert_eq!(
                 service
                     .snapshot()
@@ -4159,7 +4537,7 @@ mod tests {
                     .iter()
                     .filter(|task| task.title == "Void")
                     .count(),
-                2
+                1
             );
         }
         let service = Service::open(&path).expect("restart");
@@ -5043,6 +5421,20 @@ mod tests {
         }
         assert!(service.tasks.all().is_empty());
 
+        assert_eq!(
+            service.handle(request(
+                Some("reserved-create"),
+                Command::TaskCreate {
+                    title: "Void".into(),
+                },
+            )),
+            Response::Error {
+                error: ProtocolError::InvalidTaskTitle {
+                    rule: TaskTitleRule::Reserved
+                }
+            }
+        );
+
         service.handle(request(
             Some("safe-create"),
             Command::TaskCreate {
@@ -5233,6 +5625,7 @@ mod tests {
                     session_entity_id: session,
                     judgment: SessionReviewJudgment::Successful,
                     task_entity_id: task,
+                    task_kind: ReviewedTaskKind::Regular,
                     task_title: "Atomic Review".into(),
                     actual_seconds: 300,
                     reflection: None,

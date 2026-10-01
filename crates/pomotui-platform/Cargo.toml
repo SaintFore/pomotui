@@ -11,7 +11,7 @@ test-support = []
 [dependencies]
 pomotui-domain = { path = "../pomotui-domain" }
 pomotui-sync = { path = "../pomotui-sync" }
-rusqlite = "0.38"
+rusqlite = { version = "0.38", features = ["backup"] }
 
 [lints]
 workspace = true
