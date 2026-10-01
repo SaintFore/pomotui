@@ -75,6 +75,24 @@ pub struct SqliteRepository {
     connection: Connection,
 }
 
+/// Installs a test-only trigger that aborts durable snapshot updates until the
+/// disposable test database is removed.
+///
+/// # Errors
+///
+/// Returns a `SQLite` error when the database cannot be opened or modified.
+#[cfg(feature = "test-support")]
+pub fn install_persistent_save_state_failure_trigger(path: &Path) -> Result<(), RepositoryError> {
+    Connection::open(path)?.execute_batch(
+        "CREATE TRIGGER reject_save_state
+         BEFORE UPDATE ON current_session
+         BEGIN
+             SELECT RAISE(ABORT, 'injected SQLite save-state failure');
+         END;",
+    )?;
+    Ok(())
+}
+
 impl SqliteRepository {
     /// Opens and migrates a repository at `path`.
     ///

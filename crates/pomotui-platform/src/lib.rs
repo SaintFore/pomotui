@@ -31,6 +31,8 @@ pub type PlatformDesktopReminder = MacDesktopReminder;
 #[cfg(not(target_os = "macos"))]
 pub type PlatformDesktopReminder = DesktopReminder;
 
+#[cfg(feature = "test-support")]
+pub use repository::install_persistent_save_state_failure_trigger;
 pub use repository::{
     PendingReminderEffect, ReminderDeliveryCounts, ReminderEffectKind, RepositoryError,
     SqliteRepository,

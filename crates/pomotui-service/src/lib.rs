@@ -4833,15 +4833,7 @@ mod tests {
         let sync_path = std::path::PathBuf::from("atomic-session-review.sync");
         service.sync.path = Some(sync_path.clone());
         service.persist(None).expect("persist synchronization path");
-        rusqlite::Connection::open(&database)
-            .expect("failure injection connection")
-            .execute_batch(
-                "CREATE TRIGGER reject_session_review_import
-                 BEFORE UPDATE ON current_session
-                 BEGIN
-                     SELECT RAISE(ABORT, 'injected SQLite commit failure');
-                 END;",
-            )
+        pomotui_platform::install_persistent_save_state_failure_trigger(&database)
             .expect("failure injection trigger");
 
         assert!(
