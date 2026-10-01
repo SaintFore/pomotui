@@ -393,7 +393,6 @@ impl Service {
         self.sync.last_error = None;
         self.sync.last_error_stage = None;
         self.sync.file_record_count = None;
-        let _ = self.persist(None);
         Ok(SyncWork { path })
     }
 
@@ -409,25 +408,47 @@ impl Service {
         Ok(self.sync.records.clone())
     }
 
-    /// Prepares a validated first export for the worker. The following
-    /// `apply_sync_plan` call commits these mappings with the incoming projection.
+    /// Applies validated incoming records, including an atomic first legacy export.
     ///
     /// # Errors
     ///
-    /// Returns an error when the backup or legacy-record export cannot be prepared.
-    pub fn prepare_first_export(&mut self, path: &Path) -> Result<(), String> {
-        if self.sync.path.as_deref() != Some(path) || self.sync.legacy_export_completed {
-            return Ok(());
+    /// Returns an error when backup, export, planning, projection, or commit fails.
+    pub fn apply_sync_records(
+        &mut self,
+        path: &Path,
+        incoming: &[SyncRecord],
+    ) -> Result<Vec<SyncRecord>, String> {
+        if self.sync.path.as_deref() != Some(path) {
+            return Err("synchronization configuration changed during the attempt".into());
         }
-        let backup = self
-            .repository
-            .as_ref()
-            .ok_or_else(|| "durable repository is unavailable".to_owned())?
-            .create_migration_backup("initial-sync-export", self.wall)?;
-        self.sync.migration_backups.push(backup);
-        self.backfill_sync_records()?;
-        self.sync.legacy_export_completed = true;
-        Ok(())
+        let before_export = self.sync.clone();
+        if !self.sync.legacy_export_completed {
+            let backup = self
+                .repository
+                .as_ref()
+                .ok_or_else(|| "durable repository is unavailable".to_owned())?
+                .create_migration_backup("initial-sync-export", self.wall)?;
+            self.sync.migration_backups.push(backup);
+            if let Err(error) = self.backfill_sync_records() {
+                self.sync = before_export;
+                return Err(error);
+            }
+            self.sync.legacy_export_completed = true;
+        }
+        let plan = match plan_sync(&self.sync.records, incoming) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.sync = before_export;
+                return Err(error);
+            }
+        };
+        match self.apply_sync_plan(path, &plan, incoming.len()) {
+            Ok(records) => Ok(records),
+            Err(error) => {
+                self.sync = before_export;
+                Err(error)
+            }
+        }
     }
 
     /// Applies validated incoming records and returns the latest retained union.
@@ -518,6 +539,9 @@ impl Service {
         self.sync.in_progress = false;
         self.sync.last_error_stage = Some(stage.into());
         self.sync.last_error = Some(error);
+        if !self.sync.legacy_export_completed {
+            return;
+        }
         let _ = self.persist(None);
     }
 
@@ -1507,8 +1531,12 @@ impl Service {
         self.sync
             .session_entities
             .insert(session_id, entity_id.clone());
+        let is_void = record
+            .task_id
+            .is_some_and(|id| self.void_task_id == Some(id.get()));
         let task_entity_id = record
             .task_id
+            .filter(|_| !is_void)
             .and_then(|id| self.sync.task_entities.get(&id.get()).cloned());
         self.sync.records.push(SyncRecord::new(
             RecordId::random(),
@@ -1521,7 +1549,7 @@ impl Service {
                 planned_seconds: record.planned_seconds,
                 actual_seconds: record.actual_seconds,
                 task_entity_id,
-                task_title: record.task_title.clone(),
+                task_title: (!is_void).then_some(record.task_title).flatten(),
             },
         ));
         self.sync.records.sort();
@@ -1606,7 +1634,10 @@ impl Service {
             .records()
             .iter()
             .filter_map(|record| Some((record.task_id?.get(), record.task_title.clone()?)))
-            .filter(|(task_id, _)| !self.sync.task_entities.contains_key(task_id))
+            .filter(|(task_id, _)| {
+                Some(*task_id) != self.void_task_id
+                    && !self.sync.task_entities.contains_key(task_id)
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         for (task_id, title) in deleted_task_snapshots {
             self.record_task_creation(task_id, &title);
@@ -1729,20 +1760,23 @@ impl Service {
                 ));
                 entity
             };
-            let previous_chain_break_review_entity_id = self
-                .ended_chains
-                .iter()
-                .position(|chain| chain.id == unlock.chain_id)
-                .and_then(|index| index.checked_sub(1))
-                .and_then(|index| self.ended_chains.get(index))
-                .and_then(|chain| {
-                    self.sync
-                        .session_review_entries
-                        .iter()
-                        .find_map(|(entity, local)| {
-                            (*local == chain.chain_break.id).then(|| entity.clone())
-                        })
-                });
+            let previous_chain = if unlock.chain_id == self.current_chain_id {
+                self.ended_chains.last()
+            } else {
+                self.ended_chains
+                    .iter()
+                    .position(|chain| chain.id == unlock.chain_id)
+                    .and_then(|index| index.checked_sub(1))
+                    .and_then(|index| self.ended_chains.get(index))
+            };
+            let previous_chain_break_review_entity_id = previous_chain.and_then(|chain| {
+                self.sync
+                    .session_review_entries
+                    .iter()
+                    .find_map(|(entity, local)| {
+                        (*local == chain.chain_break.id).then(|| entity.clone())
+                    })
+            });
             let reward_entity = EntityId::random();
             self.sync
                 .reward_unlock_entities
@@ -1849,8 +1883,8 @@ impl Service {
                 .ok_or_else(|| "durable repository is unavailable".to_owned())?
                 .create_migration_backup("initial-sync-export", self.wall)?;
             self.sync.migration_backups.push(backup);
+            self.backfill_sync_records()?;
         }
-        self.backfill_sync_records()?;
         self.sync.path = Some(path.to_owned());
         self.sync.warning = None;
         self.sync.last_attempt = Some(self.wall);
@@ -1940,7 +1974,7 @@ impl Service {
                 let task_id = self
                     .tasks
                     .create(&title)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| format!("cannot create projected Task {title:?}: {error}"))?;
                 self.sync
                     .task_entities
                     .insert(task_id.get(), entity_id.clone());
@@ -1949,7 +1983,7 @@ impl Service {
             if self.tasks.get(task_id).is_ok() {
                 self.tasks
                     .rename(task_id, &title)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| format!("cannot project Task title {title:?}: {error}"))?;
                 match status {
                     Some(SyncTaskStatus::Open) | None => self.tasks.reopen(task_id),
                     Some(SyncTaskStatus::Completed) => self.tasks.complete(task_id),
@@ -2572,11 +2606,8 @@ impl Handler for Service {
                 if self.sync.background {
                     self.sync.path = Some(path);
                     self.sync.warning = None;
-                    return match self.persist(mutation_key.as_deref()) {
-                        Ok(()) => Response::Data {
-                            value: self.sync_status(),
-                        },
-                        Err(error) => self.durable_rejected(error),
+                    return Response::Data {
+                        value: self.sync_status(),
                     };
                 }
                 return match self.enable_sync(&path) {

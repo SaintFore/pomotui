@@ -151,6 +151,11 @@ fn released_databases_migrate_export_once_and_restore_independently() {
                 .iter()
                 .any(|session| { session.task_title.as_deref() == Some("Released open task") })
         );
+        assert!(snapshot.recent_history.iter().any(|session| {
+            session.kind == pomotui_protocol::SessionKind::ShortBreak
+                && session.outcome == "Completed"
+                && session.actual_seconds == 1
+        }));
         let ended = snapshot
             .recent_ended_chains
             .first()
@@ -164,11 +169,25 @@ fn released_databases_migrate_export_once_and_restore_independently() {
         assert_eq!(ended.rewards.len(), 1);
         assert_eq!(ended.rewards[0].name, "Released reward");
         assert_eq!(ended.rewards[0].state, "claimed");
+        assert_eq!(snapshot.action_chain.length, 1);
+        assert_eq!(snapshot.recent_chain_links.len(), 1);
+        assert_eq!(
+            snapshot.recent_chain_links[0].chain_entry_title.as_deref(),
+            Some("Released Void work")
+        );
+        assert_eq!(snapshot.recent_chain_links[0].task_title, "Void");
+        assert!(snapshot.current_chain_rewards.iter().any(|reward| {
+            reward.name == "Released available reward" && reward.state == "unlocked"
+        }));
         assert!(
             snapshot.pending_review.is_none(),
             "Pending Review stays local"
         );
         assert_eq!(snapshot.completed_rounds, 0, "Focus Cycle stays local");
+        assert_eq!(
+            snapshot.planned_seconds, 1_500,
+            "Session Durations stay local"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

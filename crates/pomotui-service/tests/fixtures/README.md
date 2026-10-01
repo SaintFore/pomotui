@@ -9,14 +9,16 @@ payload. Each fixture contains:
 
 - the singleton system Void Task;
 - one open Task and one completed Task;
-- stopped Focus Session History attributed to both Tasks;
+- completed and stopped Focus Session History attributed to both Tasks;
+- completed Short Break Session History;
 - one submitted successful Review with a Reflection;
 - one submitted failed Review and its Ended Chain and Chain Break;
-- one Reward Milestone and a claimed unlock snapshot; and
+- a current Chain Link reviewed against the system Void Task;
+- one claimed and one available Reward unlock snapshot; and
 - one local Pending Review, used to prove that transient local state is not
   exported.
 
 Fixture checksums:
 
-- `v0.1.0-production.sqlite3`: `9282f0337d6d58333ad039add9c6fee1c027021e51d2b760c036ae1a880ec57e`
-- `v0.2.0-production.sqlite3`: `786ab5f72dc1e0536581e6cffce04a4b5592c9d7dc522698a457d3cee283ab51`
+- `v0.1.0-production.sqlite3`: `4856263cc4f07ecf25856a6aae5d1d6998b0b187fde9874f859418936d8fd8ce`
+- `v0.2.0-production.sqlite3`: `dbe08119fbf1652e8008aa508f93debe792ca2c24da5a0212aa188f823c4e79a`

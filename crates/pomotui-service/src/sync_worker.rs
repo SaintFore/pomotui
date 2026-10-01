@@ -230,33 +230,9 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                 return;
             }
         };
-        match service.lock() {
-            Ok(mut service) => {
-                if let Err(error) = service.prepare_first_export(&work.path) {
-                    service.finish_sync_failure(&work.path, "migration", error);
-                    return;
-                }
-            }
-            Err(error) => {
-                eprintln!("sync worker cannot lock Timer Service: {error}");
-                return;
-            }
-        }
-        let Some(plan) = current_plan(service, &work.path, &incoming) else {
-            return;
-        };
         let retained = match service.lock() {
-            Ok(mut service) => match service.apply_sync_plan(&work.path, &plan, incoming.len()) {
+            Ok(mut service) => match service.apply_sync_records(&work.path, &incoming) {
                 Ok(records) => records,
-                Err(error)
-                    if error == "local synchronization records changed during the attempt" =>
-                {
-                    if attempt < 3 {
-                        continue;
-                    }
-                    service.finish_sync_failure(&work.path, "plan", error);
-                    return;
-                }
                 Err(error) => {
                     service.finish_sync_failure(&work.path, "import", error);
                     return;

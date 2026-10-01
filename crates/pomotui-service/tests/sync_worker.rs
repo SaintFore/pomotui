@@ -116,6 +116,52 @@ fn worker_synchronizes_once_when_it_starts() {
 }
 
 #[test]
+fn invalid_first_document_does_not_durably_enable_synchronization() {
+    let root = test_root("invalid-first-document");
+    let path = root.join("pomotui.sync");
+    std::fs::write(&path, "truncated").expect("invalid sync file");
+    let service = configured_service(&root, &path);
+    let worker =
+        SyncWorker::start(Arc::clone(&service), Duration::from_mins(1)).expect("sync worker");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let Response::Data { value: status } = service
+            .lock()
+            .expect("service")
+            .handle(request(None, Command::SyncStatus))
+        else {
+            panic!("sync status");
+        };
+        if status["last_error_stage"] == "validate" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "validation attempt timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    worker.shutdown();
+    drop(service);
+
+    let mut restarted = Service::open(&root.join("service.sqlite3")).expect("restart service");
+    let Response::Data { value: status } = restarted.handle(request(None, Command::SyncStatus))
+    else {
+        panic!("restarted sync status");
+    };
+    assert_eq!(status["enabled"], false);
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("test directory")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("initial-sync-export"))
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn worker_synchronizes_again_on_the_fixed_interval() {
     let root = test_root("interval");
     let path = root.join("pomotui.sync");
