@@ -158,7 +158,7 @@ struct SyncState {
     task_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default)]
     session_entities: std::collections::BTreeMap<u64, EntityId>,
-    #[serde(default)]
+    #[serde(default, alias = "review_entries")]
     session_review_entries: std::collections::BTreeMap<EntityId, u64>,
     last_attempt: Option<i64>,
     last_success: Option<i64>,
@@ -4751,6 +4751,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_review_entry_mapping_name_survives_state_upgrade() {
+        let mut service = Service::new();
+        let review_identity = EntityId::parse("00000000-0000-0000-0000-000000000001")
+            .expect("Session Review identity");
+        service
+            .sync
+            .session_review_entries
+            .insert(review_identity.clone(), 42);
+        let current = PersistedService::encode(&service).expect("current state");
+        let mut legacy: serde_json::Value = serde_json::from_str(&current).expect("state JSON");
+        let sync = legacy["sync"].as_object_mut().expect("sync state");
+        let mappings = sync
+            .remove("session_review_entries")
+            .expect("current mapping name");
+        sync.insert("review_entries".into(), mappings);
+
+        let upgraded = PersistedService::decode(&legacy.to_string()).expect("legacy state upgrade");
+
+        assert_eq!(
+            upgraded.sync.session_review_entries.get(&review_identity),
+            Some(&42)
+        );
+    }
+
+    #[test]
     fn session_review_records_and_projected_chains_roll_back_in_sqlite_together() {
         let identity = |value: u128| {
             EntityId::parse(&format!("00000000-0000-0000-0000-{value:012x}"))
@@ -4808,10 +4833,16 @@ mod tests {
         let sync_path = std::path::PathBuf::from("atomic-session-review.sync");
         service.sync.path = Some(sync_path.clone());
         service.persist(None).expect("persist synchronization path");
-        service.repository = Some(Box::new(FailingRepository {
-            successful_writes_remaining: 0,
-            inner: Some(SqliteRepository::open(&database).expect("SQLite repository")),
-        }));
+        rusqlite::Connection::open(&database)
+            .expect("failure injection connection")
+            .execute_batch(
+                "CREATE TRIGGER reject_session_review_import
+                 BEFORE UPDATE ON current_session
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected SQLite commit failure');
+                 END;",
+            )
+            .expect("failure injection trigger");
 
         assert!(
             service
