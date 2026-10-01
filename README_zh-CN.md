@@ -259,6 +259,43 @@ Timer Service 运行期间，Pomotui 会在服务启动、发生相关持久化�
 > 数据库备份。冲突、升级、路径变更、恢复和故障排查流程请参阅
 > [用户指南](docs/user-guide.md#cross-device-synchronization)。
 
+### 预发布升级与旧同步格式
+
+稳定版发布前，Pomotui 的数据库和同步格式可能发生不兼容变更。恢复文件复制
+前，请先升级所有参与同步的电脑。如果升级后出现 `missing field ...`、服务
+反复退出，或 `pomotui.service` 进入 `start-limit-hit`，应重置预发布数据库并
+重新启动用户 socket，无需重新安装软件：
+
+```sh
+systemctl --user stop pomotui.socket pomotui.service
+pomotui reset --all-data --confirm
+systemctl --user reset-failed pomotui.service pomotui.socket
+systemctl --user restart pomotui.socket
+pomotui status
+```
+
+重置会创建带时间戳的 SQLite 备份并保留配置，但会有意丢弃当前本地数据库。
+它也不会删除外部 `.sync` 文件，因此重置后，旧交换文件仍可能验证失败：
+
+```text
+unsupported sync document version ...
+```
+
+如果要从零开始，请先暂停文件复制工具，避免其他电脑把旧文件传回来；可按需
+复制一份旧文件作为备份，然后只在一台已重置的电脑上生成当前格式：
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync rebuild
+pomotui --json sync status
+```
+
+`sync rebuild` 在后台异步执行，命令刚返回时可能仍显示上一次错误。应反复检查
+`sync status`，直到 `in_progress` 为 `false`、`last_success` 已设置且
+`last_error` 为 `null`。`file records unknown` 表示文件在统计记录数之前就未
+通过验证，并非当前格式版本未知。确认重建后的文件有效后再恢复文件复制；其他
+已升级电脑应执行 `sync now`，不要再次执行 `sync rebuild`。
+
 ## 配置和数据
 
 Pomotui 遵循 XDG 基目录规范：

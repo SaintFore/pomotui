@@ -285,6 +285,48 @@ Task used by the local Current Session.
 > [user guide](docs/user-guide.md#cross-device-synchronization) for conflict,
 > upgrade, path-change, recovery, and troubleshooting procedures.
 
+### Pre-release upgrades and old sync formats
+
+Pomotui may make breaking database and sync-format changes before a stable
+release. Upgrade every participating computer before resuming replication. If
+an upgrade reports `missing field ...`, repeatedly exits, or leaves
+`pomotui.service` in `start-limit-hit`, reset the pre-release database and
+restart the user socket; reinstalling the package is not necessary:
+
+```sh
+systemctl --user stop pomotui.socket pomotui.service
+pomotui reset --all-data --confirm
+systemctl --user reset-failed pomotui.service pomotui.socket
+systemctl --user restart pomotui.socket
+pomotui status
+```
+
+The reset creates a timestamped SQLite backup and preserves configuration, but
+it intentionally discards the active local database. It also deliberately
+leaves the external `.sync` file untouched. Consequently, an older exchange
+file can still fail validation after a reset:
+
+```text
+unsupported sync document version ...
+```
+
+To start fresh, pause the file-copy tool so another computer cannot restore the
+old file, optionally copy that file as a backup, then seed the current format
+from one reset computer:
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync rebuild
+pomotui --json sync status
+```
+
+`sync rebuild` is asynchronous and may initially print the previous error.
+Poll `sync status` until `in_progress` is `false`, `last_success` is set, and
+`last_error` is `null`. `file records unknown` means validation failed before
+Pomotui could count records; it does not mean the current format version is
+unknown. Resume file replication only after the rebuilt file validates, then
+use `sync now`—not `sync rebuild`—on the other upgraded computers.
+
 ## Configuration and data
 
 Pomotui follows the XDG base-directory conventions:
