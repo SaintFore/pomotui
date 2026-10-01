@@ -1111,6 +1111,14 @@ impl Service {
             {
                 if let Some(local_id) = local_id {
                     let task_id = TaskId::new(local_id);
+                    if self.tasks.get(task_id).is_ok()
+                        && self.timer.current_task() == Some(task_id)
+                        && matches!(self.timer.current_session(), CurrentSession::Pending(_))
+                    {
+                        self.timer
+                            .detach_pending_task(task_id)
+                            .map_err(|error| error.to_string())?;
+                    }
                     if self.tasks.get(task_id).is_ok() && self.timer.current_task() != Some(task_id)
                     {
                         self.tasks
@@ -2411,6 +2419,78 @@ mod tests {
             .find(|task| task["id"] == 1)
             .expect("local Task");
         assert_eq!(task["status"], "open");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imported_task_deletion_waits_for_the_current_session_then_converges() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-task-delete-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        for (service, key) in [(&mut first, "enable-first"), (&mut second, "enable-second")] {
+            service.handle(request(
+                Some(key),
+                Command::SyncEnable {
+                    path: sync_path.clone(),
+                },
+            ));
+        }
+        first.handle(request(
+            Some("create"),
+            Command::TaskCreate {
+                title: "Protected remote Task".into(),
+            },
+        ));
+        second.handle(request(Some("import-create"), Command::SyncNow));
+        second.handle(request(
+            Some("start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+
+        first.handle(request(Some("delete"), Command::TaskDelete { id: 1 }));
+        second.handle(request(Some("import-delete"), Command::SyncNow));
+        let Response::Snapshot { snapshot } = second.handle(request(None, Command::Status)) else {
+            panic!("status response");
+        };
+        assert!(snapshot.tasks.iter().any(|task| task.id == 1));
+        assert_eq!(snapshot.current_task_id, Some(1));
+
+        second.handle(request(Some("stop"), Command::Stop));
+        second.handle(request(Some("apply-delete"), Command::SyncNow));
+        let Response::Data { value: tasks } = second.handle(request(None, Command::TaskList))
+        else {
+            panic!("Task list response");
+        };
+        assert!(
+            !tasks
+                .as_array()
+                .expect("tasks")
+                .iter()
+                .any(|task| task["id"] == 1)
+        );
+        second.handle(request(Some("repeat-delete"), Command::SyncNow));
+        let Response::Data { value: tasks } = second.handle(request(None, Command::TaskList))
+        else {
+            panic!("Task list response");
+        };
+        assert!(
+            !tasks
+                .as_array()
+                .expect("tasks")
+                .iter()
+                .any(|task| task["id"] == 1)
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
