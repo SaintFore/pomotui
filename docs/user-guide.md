@@ -138,10 +138,12 @@ Stop `pomotui.service`, copy the SQLite database and TOML configuration, then
 restart the socket. Restore only into an empty data directory while the service
 is stopped. Keep both files from the same backup point.
 
-## Cross-device Task synchronization
+## Cross-device synchronization
 
-Configure one provider-neutral exchange file on each Device after arranging for
-another tool to replicate that file:
+Pomotui exchanges Shared Activity through one ordinary file. First configure a
+file-copy or file-replication tool of your choice to carry a file between your
+Devices. Then point each Device at its local path for that file; paths do not
+need to be identical:
 
 ```sh
 pomotui sync enable "/path/replicated-by-your-tool/pomotui.sync"
@@ -149,13 +151,112 @@ pomotui sync now
 pomotui sync status
 ```
 
-The exchange file is not the SQLite database and is not a backup. Each Device
-retains every Synchronization Record it has observed and merges by set union;
-copying an older exchange file therefore does not instruct Pomotui to forget
-locally retained records. Keep ordinary database backups before retiring a
-Device.
+Use `pomotui sync status --json` for automation (the global `--json` flag may
+also come first):
 
-If changes have not appeared on another computer, first confirm that the file
-replication tool has transferred `pomotui.sync`, then run `pomotui sync now` on
-both computers and inspect `pomotui sync status`. Restart the Timer Service if
-the CLI reports that the running service is older than the installed command.
+```sh
+pomotui --json sync status
+pomotui --json sync now
+```
+
+Synchronization is eventually consistent. Each Device retains every valid
+Synchronization Record it creates or observes, unions those records with the
+file, applies new records transactionally, and atomically replaces the file.
+Repeated imports are safe and do not double totals. Tasks, ended Session
+History, submitted Session Reviews, Action Chains and their edits, Reward
+Milestones, unlocks, claims, and synchronized deletions converge. Running or
+Paused Current Sessions, Pending Reviews, Focus Cycle progress, Session
+Durations, and interface settings remain local.
+
+The Timer Service requests a merge when it starts, after relevant durable local
+changes, and every 30 seconds while it is running. Overlapping requests are
+coalesced into one later run. `pomotui sync now` requests the same merge
+immediately when diagnosing or coordinating file transfer; it is not required
+after every local command.
+
+Concurrent edits resolve without an interactive conflict screen. Immutable
+facts from both sides are retained. Versions of mutable data use their UTC
+mutation time and then a stable global identity as a deterministic tie-breaker;
+the same records therefore produce the same result on every Device regardless
+of arrival order. Submitted Session Reviews are ordered by the source Session's
+end time and a stable identity tie-breaker. A later offline Session Review can
+consequently revise old Action Chain boundaries and unclaimed reward
+eligibility. A claimed reward remains claimed. A clock-skew warning reported by
+`sync status` means a Device's clock may have produced a surprising order;
+synchronization continues so the
+record is not silently lost. Correct that Device's clock, make a new corrective
+edit where applicable, and synchronize again.
+
+### Upgrades, paths, and disabling
+
+Back up the local SQLite database before first enabling synchronization and
+before upgrades. After upgrading, restart the Timer Service if the package did
+not do so automatically:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user restart pomotui.service
+pomotui sync status
+```
+
+To move the exchange file, disable synchronization, arrange replication at the
+new location, and enable the new local path. Disabling or changing a path does
+not erase locally retained records:
+
+```sh
+pomotui sync disable
+pomotui sync enable "/new/local/path/pomotui.sync"
+pomotui sync now
+```
+
+Leave synchronization disabled with `pomotui sync disable`. Ordinary timer
+commands and local data continue to work.
+
+### Recovery and rebuild
+
+An older copy overwriting `pomotui.sync` does not tell a Device to forget known
+records. Run `pomotui sync now` on a Device that previously observed the missing
+work, allow the transport tool to copy the repaired file, then run it on the
+other Devices. Repeated merges restore the union.
+
+If the file is deleted or cannot be parsed, choose a surviving Device and
+rebuild from all records in that Device's database:
+
+```sh
+pomotui sync rebuild
+pomotui sync status
+pomotui --json sync status
+```
+
+Rebuild deliberately ignores an invalid target and replaces it with a valid
+document. It can recover only records that the chosen database has observed.
+Afterward, synchronize every other surviving Device: one that retained an
+additional record will add it back to the union. Do not rebuild independently
+on several Devices while the transport tool is actively copying the file;
+rebuild once, let it replicate, then merge the others in turn.
+
+Keep normal backups of each Device's SQLite database as described above.
+`pomotui.sync` is a disposable exchange artifact: its presence only proves that
+one local path exists. It does not prove the transport tool copied it anywhere,
+does not acknowledge that another Device imported it, cannot recover unseen
+records from a lost Device, and is not a replacement for a database backup.
+
+### Troubleshooting
+
+If changes have not appeared elsewhere:
+
+1. Run `pomotui sync status` and `pomotui --json sync status` and check the
+   configured path, enabled state, `in_progress`, `last_success`, warning, and
+   stage-specific error fields.
+2. Confirm independently that the transport tool copied the same
+   `pomotui.sync` content to the other Device. Pomotui has no provider or Device
+   registry and cannot report transport progress.
+3. Run `pomotui sync now` on one Device, wait for success, let the file copy,
+   and run it on the next Device. Repeat once if an older copy won a race.
+4. Fix permission errors on the selected file and its parent directory. An
+   invalid or inaccessible file is left untouched, local SQLite data is not
+   imported or corrupted, and ordinary timer commands remain available.
+5. Use `sync rebuild` only for a missing or invalid file and only after choosing
+   the database with the broadest known history. Preserve database backups.
+6. Restart the Timer Service if the CLI says the running service is older than
+   the installed synchronization command.

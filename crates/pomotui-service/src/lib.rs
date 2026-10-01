@@ -5403,6 +5403,12 @@ mod tests {
         second
             .apply_sync_plan(&sync_path, &plan, plan.retained_records().len())
             .expect("import Ended Chain");
+        let records_before_late_session = second
+            .sync
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
         second.handle(request(
             Some("late-start"),
             Command::Start {
@@ -5411,6 +5417,32 @@ mod tests {
             },
         ));
         second.handle(request(Some("late-stop"), Command::StopReview));
+        let latest_known_end = second
+            .sync
+            .records
+            .iter()
+            .filter_map(|record| match record.payload {
+                RecordPayload::SessionEnded { ended_at, .. }
+                    if records_before_late_session.contains(&record.id) =>
+                {
+                    Some(ended_at)
+                }
+                _ => None,
+            })
+            .max()
+            .expect("known Session end");
+        let late_session = second
+            .sync
+            .records
+            .iter_mut()
+            .find(|record| {
+                !records_before_late_session.contains(&record.id)
+                    && matches!(record.payload, RecordPayload::SessionEnded { .. })
+            })
+            .expect("late Session record");
+        if let RecordPayload::SessionEnded { ended_at, .. } = &mut late_session.payload {
+            *ended_at = latest_known_end.saturating_add(10);
+        }
         second.handle(request(
             Some("late-review"),
             Command::ReviewSuccess {

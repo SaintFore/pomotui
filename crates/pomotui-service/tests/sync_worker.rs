@@ -39,18 +39,33 @@ fn configured_service(root: &std::path::Path, path: &std::path::Path) -> Arc<Mut
 fn worker_synchronizes_once_when_it_starts() {
     let root = test_root("startup");
     let path = root.join("pomotui.sync");
-    let remote = Record::new(
+    let task_entity = EntityId::parse("00000000-0000-0000-0000-000000000002").expect("entity");
+    let remote_task = Record::new(
         RecordId::parse("00000000-0000-0000-0000-000000000001").expect("record"),
-        EntityId::parse("00000000-0000-0000-0000-000000000002").expect("entity"),
+        task_entity.clone(),
         MutationInstant::from_millis(1_000).expect("instant"),
         RecordPayload::TaskVersion {
             title: "Imported on startup".into(),
             status: TaskStatus::Open,
         },
     );
+    let remote_session = Record::new(
+        RecordId::parse("00000000-0000-0000-0000-000000000003").expect("record"),
+        EntityId::parse("00000000-0000-0000-0000-000000000004").expect("entity"),
+        MutationInstant::from_millis(2_000).expect("instant"),
+        RecordPayload::SessionEnded {
+            ended_at: 1,
+            kind: pomotui_sync::SessionKind::Focus,
+            outcome: pomotui_sync::SessionOutcome::Stopped,
+            planned_seconds: 60,
+            actual_seconds: 1,
+            task_entity_id: Some(task_entity),
+            task_title: Some("Imported on startup".into()),
+        },
+    );
     std::fs::write(
         &path,
-        Document::new(&[remote])
+        Document::new(&[remote_task, remote_session])
             .and_then(|document| document.to_json())
             .expect("document"),
     )
@@ -84,6 +99,18 @@ fn worker_synchronizes_once_when_it_starts() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
+    let Response::Data { value: status } = service
+        .lock()
+        .expect("service")
+        .handle(request(None, Command::SyncStatus))
+    else {
+        panic!("sync status");
+    };
+    assert!(
+        status["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("timestamp more than one year"))
+    );
     worker.shutdown();
     let _ = std::fs::remove_dir_all(root);
 }

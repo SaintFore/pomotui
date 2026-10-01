@@ -172,12 +172,13 @@ When a reviewed Session has no Task, assign one with `--task ID`, or use
 `--void "Chain Entry Title"`. Run a command with `--json` to obtain stable
 internal identities for editing entries or claiming rewards.
 
-## Sync Tasks across computers
+## Sync Shared Activity across computers
 
-Pomotui can converge the complete Task lifecycle—creation, rename, completion,
-reopening, and deletion—through one provider-neutral file. Put that file in a
-directory already replicated by Syncthing, Dropbox, iCloud Drive, Nextcloud,
-or another file-copy tool, then enable it independently on each computer:
+Pomotui converges Tasks, ended Session History, submitted Session Reviews,
+Action Chains, Reward Milestones, unlocks, and claims through one
+provider-neutral file. Put that file in a
+directory carried by the file-copy tool you already use, then enable it
+independently on each computer:
 
 ```sh
 pomotui sync enable "$HOME/Sync/pomotui.sync"
@@ -191,12 +192,12 @@ merge changes. Same-titled Tasks retain distinct identities, concurrent edits
 resolve deterministically, and deletions do not invalidate a Task used by the
 local Current Session.
 
-Synchronization currently covers Tasks. Current Sessions, Focus Cycle
-progress, Pending Reviews, durations, and interface preferences remain local to
-each computer. The sync file is an exchange document, not a replacement for
-backing up the local SQLite database. See the
-[user guide](docs/user-guide.md#cross-device-task-synchronization) for
-recovery and troubleshooting details.
+Current Sessions, Focus Cycle progress, Pending Reviews, Session Durations,
+and interface preferences remain local to each computer. The sync file is an
+exchange document, not proof of replication and not a replacement for backing
+up the local SQLite database. See the
+[user guide](docs/user-guide.md#cross-device-synchronization) for conflict,
+upgrade, path-change, recovery, and troubleshooting procedures.
 
 ## Add Pomotui to Waybar
 
