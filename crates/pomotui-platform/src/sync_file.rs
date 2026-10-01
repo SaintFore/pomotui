@@ -49,7 +49,7 @@ pub fn replace_sync_file(path: &Path, document: &str) -> Result<(), String> {
             .map_err(|error| format!("cannot write temporary sync file: {error}"))?;
         let validation = std::fs::read_to_string(&temporary)
             .map_err(|error| format!("cannot validate temporary sync file: {error}"))?;
-        serde_json::from_str::<serde_json::Value>(&validation)
+        pomotui_sync::Document::from_json(&validation)
             .map_err(|error| format!("temporary sync document is invalid: {error}"))?;
         if validation != document {
             return Err("temporary sync document changed while being written".into());
@@ -69,4 +69,32 @@ fn temporary_path(path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("pomotui.sync");
     path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_replacement_rejects_a_semantically_invalid_sync_document() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-sync-replace-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let destination = root.join("pomotui.sync");
+        std::fs::write(&destination, "previous valid destination").expect("existing destination");
+
+        let error = replace_sync_file(&destination, r#"{"not":"a sync document"}"#)
+            .expect_err("invalid document must not replace destination");
+
+        assert!(error.contains("temporary sync document is invalid"));
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("preserved destination"),
+            "previous valid destination"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

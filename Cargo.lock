@@ -1751,8 +1751,8 @@ name = "pomotui-platform"
 version = "0.1.0"
 dependencies = [
  "pomotui-domain",
+ "pomotui-sync",
  "rusqlite",
- "serde_json",
 ]
 
 [[package]]

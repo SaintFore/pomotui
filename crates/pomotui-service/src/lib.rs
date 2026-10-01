@@ -16,11 +16,14 @@ use pomotui_protocol::{
 };
 use pomotui_sync::{
     Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant,
-    Record as SyncRecord, RecordId, RecordPayload, TaskProjection, TaskStatus as SyncTaskStatus,
-    project_tasks, union,
+    Record as SyncRecord, RecordId, RecordPayload, SyncPlan, TaskProjection,
+    TaskStatus as SyncTaskStatus, plan_sync,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+mod sync_worker;
+pub use sync_worker::{SyncFileAdapter, SyncServiceHandler, SyncWorker, SyncWorkerTrigger};
 
 const MAX_REMINDER_ATTEMPTS: u32 = 3;
 const MAX_REMINDER_AGE_SECONDS: i64 = 60 * 60;
@@ -171,7 +174,6 @@ struct SyncState {
 #[derive(Clone, Debug)]
 pub struct SyncWork {
     pub path: std::path::PathBuf,
-    pub records: Vec<SyncRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -332,10 +334,19 @@ impl Service {
         self.sync.last_error_stage = None;
         self.sync.file_record_count = None;
         let _ = self.persist(None);
-        Ok(SyncWork {
-            path,
-            records: self.sync.records.clone(),
-        })
+        Ok(SyncWork { path })
+    }
+
+    /// Captures the latest locally retained records for worker-side planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the synchronization path changed during the attempt.
+    pub fn sync_records_for(&self, path: &Path) -> Result<Vec<SyncRecord>, String> {
+        if self.sync.path.as_deref() != Some(path) {
+            return Err("synchronization configuration changed during the attempt".into());
+        }
+        Ok(self.sync.records.clone())
     }
 
     /// Applies validated incoming records and returns the latest retained union.
@@ -345,21 +356,24 @@ impl Service {
     ///
     /// Returns an error if configuration changed, records conflict, projection
     /// fails, or the resulting state cannot be committed.
-    pub fn apply_sync_import(
+    pub fn apply_sync_plan(
         &mut self,
         path: &Path,
-        incoming: &[SyncRecord],
+        plan: &SyncPlan,
         file_record_count: usize,
     ) -> Result<Vec<SyncRecord>, String> {
         if self.sync.path.as_deref() != Some(path) {
             return Err("synchronization configuration changed during the attempt".into());
         }
+        if self.sync.records != plan.base_records() {
+            return Err("local synchronization records changed during the attempt".into());
+        }
         let old_sync = self.sync.clone();
         let old_tasks = self.tasks.clone();
-        self.sync.records = union(&self.sync.records, incoming)?;
+        self.sync.records = plan.retained_records().to_vec();
         self.sync.file_record_count = Some(file_record_count);
         if let Err(error) = self
-            .project_tasks_from_sync_records()
+            .apply_task_projections(plan.task_projections())
             .and_then(|()| self.persist(None))
         {
             self.sync = old_sync;
@@ -1106,8 +1120,9 @@ impl Service {
         })?;
         let incoming = SyncDocument::from_json(&source)?.into_records();
         self.sync.file_record_count = Some(incoming.len());
-        self.sync.records = union(&self.sync.records, &incoming)?;
-        self.project_tasks_from_sync_records()?;
+        let plan = plan_sync(&self.sync.records, &incoming)?;
+        self.sync.records = plan.retained_records().to_vec();
+        self.apply_task_projections(plan.task_projections())?;
         self.persist(None)?;
         let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
         replace_sync_file(&path, &serialized)?;
@@ -1140,8 +1155,8 @@ impl Service {
         Ok(self.sync.records.len())
     }
 
-    fn project_tasks_from_sync_records(&mut self) -> Result<(), String> {
-        for projection in project_tasks(&self.sync.records) {
+    fn apply_task_projections(&mut self, projections: &[TaskProjection]) -> Result<(), String> {
+        for projection in projections.iter().cloned() {
             let TaskProjection::Version {
                 entity_id,
                 title,

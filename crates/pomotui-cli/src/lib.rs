@@ -122,7 +122,7 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["sync", "now"] => Command::SyncNow,
         ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
-        _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
+        _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
 }
@@ -401,6 +401,49 @@ mod tests {
         let (_, json, _) =
             parse(&["--json".into(), "sync".into(), "status".into()]).expect("JSON sync status");
         assert!(json);
+    }
+
+    #[test]
+    fn usage_error_lists_every_sync_operation() {
+        let error = parse(&["sync".into(), "unknown".into()]).expect_err("unknown operation");
+
+        for operation in ["enable", "disable", "now", "rebuild", "status"] {
+            assert!(
+                error.contains(operation),
+                "usage must mention sync {operation}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_health_is_visible_in_human_and_json_output() {
+        let response = Response::Data {
+            value: serde_json::json!({
+                "stability": "experimental",
+                "capabilities": ["task_lifecycle"],
+                "enabled": true,
+                "path": "/tmp/path with spaces/pomotui.sync",
+                "format_version": 2,
+                "in_progress": true,
+                "last_attempt": 10,
+                "last_success": 9,
+                "last_error": "changed repeatedly",
+                "last_error_stage": "compare",
+                "warning": "unseen remote records cannot be recovered",
+                "local_record_count": 3,
+                "file_record_count": 2
+            }),
+        };
+
+        let human = render(&response, false, false).expect("human status");
+        assert!(human.contains("in progress"));
+        assert!(human.contains("compare error: changed repeatedly"));
+        assert!(human.contains("unseen remote records"));
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&response, true, false).expect("JSON status"))
+                .expect("JSON response");
+        assert_eq!(json["value"]["last_error_stage"], "compare");
+        assert_eq!(json["value"]["file_record_count"], 2);
     }
 
     #[test]

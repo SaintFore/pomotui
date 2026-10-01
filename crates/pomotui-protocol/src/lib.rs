@@ -557,6 +557,32 @@ mod tests {
         assert!(serde_json::from_str::<Request>("{broken").is_err());
     }
 
+    #[test]
+    fn every_sync_command_has_a_stable_protocol_round_trip() {
+        let commands = [
+            Command::SyncEnable {
+                path: "/tmp/path with spaces/pomotui.sync".into(),
+            },
+            Command::SyncDisable,
+            Command::SyncNow,
+            Command::SyncRebuild,
+            Command::SyncStatus,
+        ];
+
+        for command in commands {
+            let request = Request {
+                version: PROTOCOL_VERSION,
+                idempotency_key: command.mutates().then(|| "sync-command".into()),
+                command,
+            };
+            let encoded = serde_json::to_string(&request).expect("encode request");
+            assert_eq!(
+                serde_json::from_str::<Request>(&encoded).expect("decode request"),
+                request
+            );
+        }
+    }
+
     struct CountingHandler(u64);
 
     impl Handler for CountingHandler {

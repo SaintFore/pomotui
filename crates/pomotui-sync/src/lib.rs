@@ -215,6 +215,42 @@ pub enum TaskProjection {
     },
 }
 
+/// A validated synchronization result ready for the Timer Service to apply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncPlan {
+    base_records: Vec<Record>,
+    retained_records: Vec<Record>,
+    task_projections: Vec<TaskProjection>,
+}
+
+impl SyncPlan {
+    #[must_use]
+    pub fn base_records(&self) -> &[Record] {
+        &self.base_records
+    }
+
+    #[must_use]
+    pub fn retained_records(&self) -> &[Record] {
+        &self.retained_records
+    }
+
+    #[must_use]
+    pub fn task_projections(&self) -> &[TaskProjection] {
+        &self.task_projections
+    }
+}
+
+/// Produces the retained record union and its deterministic projections.
+pub fn plan_sync(local: &[Record], incoming: &[Record]) -> Result<SyncPlan, String> {
+    let retained_records = union(local, incoming)?;
+    let task_projections = project_tasks(&retained_records);
+    Ok(SyncPlan {
+        base_records: local.to_vec(),
+        retained_records,
+        task_projections,
+    })
+}
+
 #[must_use]
 pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
     let mut by_entity = BTreeMap::<EntityId, Vec<&Record>>::new();

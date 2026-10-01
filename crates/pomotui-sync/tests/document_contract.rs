@@ -1,5 +1,6 @@
 use pomotui_sync::{
-    Document, EntityId, MutationInstant, Record, RecordId, RecordPayload, TaskStatus,
+    Document, EntityId, MutationInstant, Record, RecordId, RecordPayload, TaskProjection,
+    TaskStatus, plan_sync,
 };
 
 fn task_version(record: u128, entity: u128, mutation: i64, title: &str) -> Record {
@@ -91,5 +92,28 @@ fn task_projection_is_deterministic_and_deletion_is_permanent() {
     assert_eq!(
         pomotui_sync::project_tasks(&[older, newer, deletion]),
         vec![pomotui_sync::TaskProjection::Deleted { entity_id: entity }],
+    );
+}
+
+#[test]
+fn sync_engine_plans_the_retained_union_and_task_projection_together() {
+    let local = task_version(1, 16, 1_000, "Local");
+    let remote = task_version(2, 16, 2_000, "Remote");
+
+    let plan =
+        plan_sync(&[local], std::slice::from_ref(&remote)).expect("valid synchronization plan");
+
+    assert_eq!(
+        plan.retained_records(),
+        &[task_version(1, 16, 1_000, "Local"), remote]
+    );
+    assert_eq!(
+        plan.task_projections(),
+        &[TaskProjection::Version {
+            entity_id: EntityId::parse("00000000-0000-0000-0000-000000000010").expect("entity"),
+            record_id: RecordId::parse("00000000-0000-0000-0000-000000000002").expect("record"),
+            title: "Remote".into(),
+            status: TaskStatus::Open,
+        }]
     );
 }
