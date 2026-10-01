@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 3;
+pub const FORMAT_VERSION: u16 = 4;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -143,6 +143,24 @@ pub enum RecordPayload {
         deleted_review_entity_ids: Vec<EntityId>,
         observed_chain_break_review_entity_ids: Vec<EntityId>,
     },
+    RewardMilestoneVersion {
+        name: String,
+        threshold: u64,
+        budget: Option<u64>,
+    },
+    RewardMilestoneDeleted,
+    RewardUnlocked {
+        milestone_entity_id: EntityId,
+        previous_chain_break_review_entity_id: Option<EntityId>,
+        name: String,
+        threshold: u64,
+        budget: Option<u64>,
+    },
+    RewardClaimed {
+        milestone_entity_id: EntityId,
+        previous_chain_break_review_entity_id: Option<EntityId>,
+        claimed_at: i64,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -278,6 +296,7 @@ pub struct SyncPlan {
     task_projections: Vec<TaskProjection>,
     activity_projections: Vec<ActivityProjection>,
     session_review_projection: SessionReviewProjection,
+    reward_projection: RewardProjection,
 }
 
 impl SyncPlan {
@@ -305,7 +324,42 @@ impl SyncPlan {
     pub const fn session_review_projection(&self) -> &SessionReviewProjection {
         &self.session_review_projection
     }
+    #[must_use]
+    pub const fn reward_projection(&self) -> &RewardProjection {
+        &self.reward_projection
+    }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RewardMilestoneProjection {
+    Version {
+        entity_id: EntityId,
+        name: String,
+        threshold: u64,
+        budget: Option<u64>,
+    },
+    Deleted {
+        entity_id: EntityId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedRewardUnlock {
+    pub milestone_entity_id: EntityId,
+    pub previous_chain_break_review_entity_id: Option<EntityId>,
+    pub name: String,
+    pub threshold: u64,
+    pub budget: Option<u64>,
+    pub claimed_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RewardProjection {
+    pub milestones: Vec<RewardMilestoneProjection>,
+    pub unlocks: Vec<ProjectedRewardUnlock>,
+}
+
+type RewardUnlockKey<'a> = (&'a EntityId, Option<&'a EntityId>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectedSessionReview {
@@ -356,13 +410,130 @@ pub fn plan_sync(local: &[Record], incoming: &[Record]) -> Result<SyncPlan, Stri
     let task_projections = project_tasks(&retained_records);
     let activity_projections = project_activity(&retained_records);
     let session_review_projection = project_session_reviews(&retained_records);
+    let reward_projection = project_rewards(&retained_records);
     Ok(SyncPlan {
         base_records: local.to_vec(),
         retained_records,
         task_projections,
         activity_projections,
         session_review_projection,
+        reward_projection,
     })
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn project_rewards(records: &[Record]) -> RewardProjection {
+    let deleted_chain_anchors = records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            RecordPayload::EndedChainDeleted {
+                previous_chain_break_review_entity_id,
+                ..
+            } => Some(previous_chain_break_review_entity_id.as_ref()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut milestone_records = BTreeMap::<&EntityId, Vec<&Record>>::new();
+    for record in records {
+        if matches!(
+            record.payload,
+            RecordPayload::RewardMilestoneVersion { .. } | RecordPayload::RewardMilestoneDeleted
+        ) {
+            milestone_records
+                .entry(&record.entity_id)
+                .or_default()
+                .push(record);
+        }
+    }
+    let milestones = milestone_records
+        .into_iter()
+        .filter_map(|(entity_id, versions)| {
+            if versions
+                .iter()
+                .any(|record| matches!(record.payload, RecordPayload::RewardMilestoneDeleted))
+            {
+                return Some(RewardMilestoneProjection::Deleted {
+                    entity_id: entity_id.clone(),
+                });
+            }
+            versions
+                .into_iter()
+                .filter_map(|record| match &record.payload {
+                    RecordPayload::RewardMilestoneVersion {
+                        name,
+                        threshold,
+                        budget,
+                    } => Some((record.mutation_time, &record.id, name, threshold, budget)),
+                    _ => None,
+                })
+                .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
+                .map(
+                    |(_, _, name, threshold, budget)| RewardMilestoneProjection::Version {
+                        entity_id: entity_id.clone(),
+                        name: name.clone(),
+                        threshold: *threshold,
+                        budget: *budget,
+                    },
+                )
+        })
+        .collect();
+    let mut unlocks = BTreeMap::<RewardUnlockKey<'_>, ProjectedRewardUnlock>::new();
+    let mut claims = BTreeMap::<RewardUnlockKey<'_>, i64>::new();
+    for record in records {
+        match &record.payload {
+            RecordPayload::RewardUnlocked {
+                milestone_entity_id,
+                previous_chain_break_review_entity_id,
+                name,
+                threshold,
+                budget,
+            } => {
+                let key = (
+                    milestone_entity_id,
+                    previous_chain_break_review_entity_id.as_ref(),
+                );
+                if deleted_chain_anchors.contains(&key.1) {
+                    continue;
+                }
+                unlocks.entry(key).or_insert_with(|| ProjectedRewardUnlock {
+                    milestone_entity_id: milestone_entity_id.clone(),
+                    previous_chain_break_review_entity_id: previous_chain_break_review_entity_id
+                        .clone(),
+                    name: name.clone(),
+                    threshold: *threshold,
+                    budget: *budget,
+                    claimed_at: None,
+                });
+            }
+            RecordPayload::RewardClaimed {
+                milestone_entity_id,
+                previous_chain_break_review_entity_id,
+                claimed_at,
+            } => {
+                if deleted_chain_anchors.contains(&previous_chain_break_review_entity_id.as_ref()) {
+                    continue;
+                }
+                claims
+                    .entry((
+                        milestone_entity_id,
+                        previous_chain_break_review_entity_id.as_ref(),
+                    ))
+                    .and_modify(|current| *current = (*current).min(*claimed_at))
+                    .or_insert(*claimed_at);
+            }
+            _ => {}
+        }
+    }
+    for (key, claimed_at) in claims {
+        if let Some(unlock) = unlocks.get_mut(&key) {
+            unlock.claimed_at = Some(claimed_at);
+        }
+    }
+    RewardProjection {
+        milestones,
+        unlocks: unlocks.into_values().collect(),
+    }
 }
 
 /// Projects immutable Session Reviews in source-Session end order. Session Review identity is
@@ -513,7 +684,11 @@ pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
                     | RecordPayload::SessionDeleted
                     | RecordPayload::SessionReviewed { .. }
                     | RecordPayload::ChainEntryVersion { .. }
-                    | RecordPayload::EndedChainDeleted { .. } => None,
+                    | RecordPayload::EndedChainDeleted { .. }
+                    | RecordPayload::RewardMilestoneVersion { .. }
+                    | RecordPayload::RewardMilestoneDeleted
+                    | RecordPayload::RewardUnlocked { .. }
+                    | RecordPayload::RewardClaimed { .. } => None,
                 })
                 .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
                 .map(|(_, record_id, title, status)| TaskProjection::Version {
@@ -621,7 +796,23 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             }
             RecordPayload::TaskDeleted
             | RecordPayload::SessionDeleted
-            | RecordPayload::EndedChainDeleted { .. } => {}
+            | RecordPayload::EndedChainDeleted { .. }
+            | RecordPayload::RewardMilestoneDeleted
+            | RecordPayload::RewardClaimed { .. } => {}
+            RecordPayload::RewardMilestoneVersion {
+                name, threshold, ..
+            } => {
+                if name.trim().is_empty() || *threshold == 0 {
+                    return Err("invalid synchronized Reward Milestone".into());
+                }
+            }
+            RecordPayload::RewardUnlocked {
+                name, threshold, ..
+            } => {
+                if name.trim().is_empty() || *threshold == 0 {
+                    return Err("invalid synchronized reward unlock".into());
+                }
+            }
             RecordPayload::ChainEntryVersion {
                 reflection,
                 chain_entry_title,
@@ -668,6 +859,11 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             RecordPayload::ChainEntryVersion { .. } | RecordPayload::EndedChainDeleted { .. } => {
                 ("Review", false)
             }
+            RecordPayload::RewardMilestoneVersion { .. }
+            | RecordPayload::RewardMilestoneDeleted => ("Reward Milestone", false),
+            RecordPayload::RewardUnlocked { .. } | RecordPayload::RewardClaimed { .. } => {
+                ("Reward", false)
+            }
         };
         let entry = entity_kinds.entry(&record.entity_id).or_insert((kind, 0));
         if entry.0 != kind {
@@ -686,6 +882,55 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             matches!(record.payload, RecordPayload::TaskVersion { .. }).then_some(&record.entity_id)
         })
         .collect::<std::collections::BTreeSet<_>>();
+    let milestone_entities = records
+        .iter()
+        .filter_map(|record| {
+            matches!(record.payload, RecordPayload::RewardMilestoneVersion { .. })
+                .then_some(&record.entity_id)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let failed_reviews = records
+        .iter()
+        .filter_map(|record| {
+            matches!(
+                record.payload,
+                RecordPayload::SessionReviewed {
+                    judgment: SessionReviewJudgment::Failed,
+                    ..
+                }
+            )
+            .then_some(&record.entity_id)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for record in records {
+        match &record.payload {
+            RecordPayload::RewardUnlocked {
+                milestone_entity_id,
+                previous_chain_break_review_entity_id,
+                ..
+            }
+            | RecordPayload::RewardClaimed {
+                milestone_entity_id,
+                previous_chain_break_review_entity_id,
+                ..
+            } => {
+                if !milestone_entities.contains(milestone_entity_id) {
+                    return Err(
+                        "synchronized Reward references unknown Reward Milestone identity".into(),
+                    );
+                }
+                if previous_chain_break_review_entity_id
+                    .as_ref()
+                    .is_some_and(|identity| !failed_reviews.contains(identity))
+                {
+                    return Err(
+                        "synchronized Reward references unknown Chain Break identity".into(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
     let sessions = records
         .iter()
         .filter_map(|record| match &record.payload {

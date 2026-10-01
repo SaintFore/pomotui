@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 / Converge Session Reviews and Action Chains.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] Reward Milestone creation, update, and deletion are versioned synchronization records with deterministic convergence.
 - [ ] Devices with the same Shared Activity and Reward Milestone records derive the same current unlock eligibility.
@@ -15,4 +15,3 @@
 - [ ] Unlock snapshots preserve reward name, threshold, and budget despite later configuration changes.
 - [ ] Reward queries, CLI output, and existing TUI views display converged state without device-specific concepts.
 - [ ] Two-database tests cover concurrent configuration, duplicate unlock, claim, late failure, deletion, restart, and reversed import order.
-

@@ -85,7 +85,7 @@ fn valid_task_records_have_byte_stable_round_trips() {
 fn task_deletion_cannot_contain_version_state() {
     let source = r#"{
       "format":"pomotui.sync",
-      "version":3,
+      "version":4,
       "integrity":{"record_count":1,"records_sha256":"ignored"},
       "records":[{
         "id":"00000000-0000-0000-0000-000000000001",
