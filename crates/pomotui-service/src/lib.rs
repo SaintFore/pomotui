@@ -153,6 +153,7 @@ pub struct Service {
 struct SyncState {
     path: Option<std::path::PathBuf>,
     records: Vec<SyncRecord>,
+    task_entities: std::collections::BTreeMap<u64, String>,
     last_attempt: Option<i64>,
     last_success: Option<i64>,
     last_error: Option<String>,
@@ -897,10 +898,12 @@ impl Service {
         }
     }
 
-    fn record_task_creation(&mut self, title: &str) {
+    fn record_task_creation(&mut self, task_id: u64, title: &str) {
+        let entity_id = uuid::Uuid::new_v4().to_string();
+        self.sync.task_entities.insert(task_id, entity_id.clone());
         self.sync.records.push(SyncRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            entity_id: uuid::Uuid::new_v4().to_string(),
+            entity_id,
             kind: SyncRecordKind::TaskCreated,
             title: title.into(),
             status: SyncTaskStatus::Open,
@@ -964,9 +967,13 @@ impl Service {
             if known.contains(&record.id) {
                 continue;
             }
-            self.tasks
+            let task_id = self
+                .tasks
                 .create(record.title.clone())
                 .map_err(|error| error.to_string())?;
+            self.sync
+                .task_entities
+                .insert(task_id.get(), record.entity_id.clone());
             self.sync.records.push(record);
         }
         self.sync.records.sort();
@@ -1284,7 +1291,7 @@ impl Handler for Service {
             Command::TaskCreate { title } => {
                 return match self.tasks.create(title.clone()) {
                     Ok(id) => {
-                        self.record_task_creation(&title);
+                        self.record_task_creation(id.get(), &title);
                         match self.persist(mutation_key.as_deref()) {
                             Ok(()) => {
                                 if self.sync.path.is_some()
