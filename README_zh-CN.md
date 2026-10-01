@@ -127,6 +127,8 @@ pomotui chain
 
 其他命令包括 `start short-break`、`start long-break`、`skip`、`history`、`summary` 以及完整的任务生命周期：`create/rename/complete/reopen/delete`。与脚本集成时使用 `--json`。
 
+实验性的任务同步可通过 `sync enable`、`sync now` 和 `sync status` 使用。预发布数据契约仍可能变化；启用前或使用显式恢复命令 `reset --all-data --confirm` 前，请先阅读[用户指南](docs/user-guide.md#experimental-cross-device-synchronization)。
+
 使用 `stop --review` 将提前结束的专注会话送去复盘，或 `stop --no-review` 记录但不影响行动链条。失败的复盘需要复盘内容：
 
 ```sh

@@ -5,7 +5,9 @@ and infrastructure details.
 
 ```text
 pomotui-domain
-      ↑
+   ↑      ↑
+   │  pomotui-sync
+   │      ↑
 pomotui-protocol
       ↑
   ┌───┴──────────────┐
@@ -22,11 +24,16 @@ pomotui-platform
   systemd, D-Bus, audio, or operating-system clock APIs.
 - `pomotui-protocol` owns versioned wire DTOs and the reusable client. It may
   translate to and from public domain types but contains no business rules.
+- `pomotui-sync` owns the provider-neutral synchronization document, validated
+  global identities and mutation instants, set union, and deterministic
+  projection plans. It depends only on domain vocabulary, not on the Timer
+  Service, SQLite, or filesystem APIs.
 - `pomotui-platform` implements domain/service ports for Linux facilities such
   as SQLite, clocks, notifications, audio, XDG paths, and systemd integration.
   It does not contain Timer Frontend behavior.
 - `pomotui-service` composes the domain, protocol server, and platform adapters.
-  It is the sole process allowed to write the domain database.
+  It applies Sync Engine projection plans and is the sole process allowed to
+  write the domain database.
 - `pomotui-cli` and `pomotui-tui` are Timer Frontends. They depend on the
   protocol client and never access SQLite or own timer progression.
 

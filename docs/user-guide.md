@@ -124,3 +124,38 @@ failures are logged by their adapters and never undo Session completion.
 Stop `pomotui.service`, copy the SQLite database and TOML configuration, then
 restart the socket. Restore only into an empty data directory while the service
 is stopped. Keep both files from the same backup point.
+
+## Experimental cross-device synchronization
+
+Task synchronization is a pre-release experimental feature. Configure the same
+provider-neutral exchange file on each Device after arranging for another tool
+to replicate that file:
+
+```sh
+pomotui sync enable "/path/replicated-by-your-tool/pomotui.sync"
+pomotui sync now
+pomotui sync status
+```
+
+The exchange file is not the SQLite database and is not a backup. Each Device
+retains every Synchronization Record it has observed and merges by set union;
+copying an older exchange file therefore does not instruct Pomotui to forget
+locally retained records. Keep ordinary database backups before retiring a
+Device.
+
+Before the stable data contract is frozen, an upgrade may reject an older local
+database or sync document. Pomotui never deletes incompatible data
+automatically. If the reported incompatibility is expected and the Timer
+Service has been stopped, reset all local domain data explicitly:
+
+```sh
+systemctl --user stop pomotui.socket pomotui.service
+pomotui reset --all-data --confirm
+systemctl --user start pomotui.socket
+```
+
+Reset creates and flushes a timestamped backup beside the SQLite database, then
+removes that database and its SQLite sidecars. It preserves the TOML
+configuration and never removes the configured synchronization file. Because
+the surviving sync file may repopulate synchronized data later, remove or move
+it separately only when that is your explicit intention.

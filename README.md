@@ -141,6 +141,12 @@ Other commands include `start short-break`, `start long-break`, `skip`,
 `create/rename/complete/reopen/delete`. Use `--json` with status, history, and
 other commands when integrating with scripts.
 
+Experimental Task synchronization is available through `sync enable`, `sync
+now`, and `sync status`. Its pre-release data contract may still change; see
+the [user guide](docs/user-guide.md#experimental-cross-device-synchronization)
+before enabling it or using the explicit `reset --all-data --confirm` recovery
+command.
+
 Use `stop --review` to send an early Focus Session to Session Review, or
 `stop --no-review` to record it without affecting the Action Chain. A failed
 review requires a Reflection:
