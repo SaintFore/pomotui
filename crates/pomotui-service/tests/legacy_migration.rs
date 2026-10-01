@@ -156,6 +156,18 @@ fn released_databases_migrate_export_once_and_restore_independently() {
                 && session.outcome == "Completed"
                 && session.actual_seconds == 1
         }));
+        assert!(
+            snapshot
+                .recent_history
+                .iter()
+                .any(|session| { session.task_title.as_deref() == Some("Released deleted task") })
+        );
+        assert!(
+            snapshot
+                .tasks
+                .iter()
+                .all(|task| task.title != "Released deleted task")
+        );
         let ended = snapshot
             .recent_ended_chains
             .first()
@@ -179,6 +191,15 @@ fn released_databases_migrate_export_once_and_restore_independently() {
         assert!(snapshot.current_chain_rewards.iter().any(|reward| {
             reward.name == "Released available reward" && reward.state == "unlocked"
         }));
+        assert!(snapshot.current_chain_rewards.iter().any(|reward| {
+            reward.name == "Released deleted reward" && reward.state == "unlocked"
+        }));
+        assert!(
+            snapshot
+                .reward_milestones
+                .iter()
+                .all(|milestone| milestone.name != "Released deleted reward")
+        );
         assert!(
             snapshot.pending_review.is_none(),
             "Pending Review stays local"
@@ -188,6 +209,7 @@ fn released_databases_migrate_export_once_and_restore_independently() {
             snapshot.planned_seconds, 1_500,
             "Session Durations stay local"
         );
+        assert_eq!(snapshot.state, "pending", "Current Session stays local");
 
         let _ = std::fs::remove_dir_all(root);
     }

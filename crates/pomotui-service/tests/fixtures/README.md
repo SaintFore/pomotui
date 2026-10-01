@@ -9,16 +9,22 @@ payload. Each fixture contains:
 
 - the singleton system Void Task;
 - one open Task and one completed Task;
+- one deleted Task retained unambiguously by its Session History snapshot;
 - completed and stopped Focus Session History attributed to both Tasks;
 - completed Short Break Session History;
 - one submitted successful Review with a Reflection;
 - one submitted failed Review and its Ended Chain and Chain Break;
 - a current Chain Link reviewed against the system Void Task;
-- one claimed and one available Reward unlock snapshot; and
-- one local Pending Review, used to prove that transient local state is not
-  exported.
+- one claimed and one available Reward unlock snapshot;
+- one deleted Reward Milestone retained unambiguously by its unlock snapshot;
+- one local Pending Review and Paused Break, used with the one-second fixture
+  durations to prove that transient local state is not exported.
+
+Released History and Ended Chain deletion removed the underlying state entirely,
+so those deletions are not recoverable from these inputs and migration does not
+invent tombstones for them.
 
 Fixture checksums:
 
-- `v0.1.0-production.sqlite3`: `4856263cc4f07ecf25856a6aae5d1d6998b0b187fde9874f859418936d8fd8ce`
-- `v0.2.0-production.sqlite3`: `dbe08119fbf1652e8008aa508f93debe792ca2c24da5a0212aa188f823c4e79a`
+- `v0.1.0-production.sqlite3`: `bf067db44aeb4db37d65e8fbc01bd6de989b55b7569621edc8bbb3038a23eb00`
+- `v0.2.0-production.sqlite3`: `b217f9b3c0b5fb7a209966df753027a7042f351fb13abfa23500ff3dcc901f6e`
