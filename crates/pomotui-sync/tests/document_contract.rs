@@ -75,3 +75,21 @@ fn union_is_commutative_associative_and_idempotent() {
         vec![first],
     );
 }
+
+#[test]
+fn task_projection_is_deterministic_and_deletion_is_permanent() {
+    let entity = EntityId::parse("00000000-0000-0000-0000-000000000010").expect("entity");
+    let older = task_version(1, 16, 1_000, "Older");
+    let newer = task_version(2, 16, 2_000, "Newer");
+    let deletion = Record::new(
+        RecordId::parse("00000000-0000-0000-0000-000000000003").expect("record"),
+        entity.clone(),
+        MutationInstant::from_millis(500).expect("mutation instant"),
+        RecordPayload::TaskDeleted,
+    );
+
+    assert_eq!(
+        pomotui_sync::project_tasks(&[older, newer, deletion]),
+        vec![pomotui_sync::TaskProjection::Deleted { entity_id: entity }],
+    );
+}

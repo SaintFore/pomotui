@@ -202,6 +202,56 @@ pub fn union(left: &[Record], right: &[Record]) -> Result<Vec<Record>, String> {
     Ok(records.into_values().collect())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskProjection {
+    Version {
+        entity_id: EntityId,
+        record_id: RecordId,
+        title: String,
+        status: TaskStatus,
+    },
+    Deleted {
+        entity_id: EntityId,
+    },
+}
+
+#[must_use]
+pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
+    let mut by_entity = BTreeMap::<EntityId, Vec<&Record>>::new();
+    for record in records {
+        by_entity
+            .entry(record.entity_id.clone())
+            .or_default()
+            .push(record);
+    }
+    by_entity
+        .into_iter()
+        .filter_map(|(entity_id, records)| {
+            if records
+                .iter()
+                .any(|record| matches!(record.payload, RecordPayload::TaskDeleted))
+            {
+                return Some(TaskProjection::Deleted { entity_id });
+            }
+            records
+                .into_iter()
+                .filter_map(|record| match &record.payload {
+                    RecordPayload::TaskVersion { title, status } => {
+                        Some((record.mutation_time, &record.id, title, *status))
+                    }
+                    RecordPayload::TaskDeleted => None,
+                })
+                .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
+                .map(|(_, record_id, title, status)| TaskProjection::Version {
+                    entity_id,
+                    record_id: record_id.clone(),
+                    title: title.clone(),
+                    status,
+                })
+        })
+        .collect()
+}
+
 fn validate_records(records: &[Record]) -> Result<(), String> {
     let unique = union(&[], records)?;
     if unique.len() != records.len() {

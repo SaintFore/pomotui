@@ -1,7 +1,7 @@
 use pomotui_domain::{
     CurrentSession, History, SessionDurations, SessionKind as DomainKind, SessionOutcome,
-    SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, TaskSyncFact, Timer,
-    TimerState, Transition, project_task_sync_fact,
+    SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, Timer, TimerState,
+    Transition,
 };
 use pomotui_platform::{
     Clock, DesktopReminder, PendingReminderEffect, PlatformClock, RecoveryObservation,
@@ -11,21 +11,19 @@ use pomotui_platform::{
 use pomotui_protocol::{
     ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState,
     EndedChainSummary, Handler, PendingReviewSummary, ProtocolError, RecentSessionSummary,
-    ReminderDelivery, Request, Response, RewardMilestoneSummary, RewardUnlockSummary,
-    SYNC_FORMAT_VERSION, SessionKind, Snapshot, SyncDocument, SyncIntegrity, SyncRecord,
-    SyncRecordKind, SyncStatus, SyncTaskStatus, TaskFocusSummary, TaskSummary, TodaySummary,
+    ReminderDelivery, Request, Response, RewardMilestoneSummary, RewardUnlockSummary, SessionKind,
+    Snapshot, SyncStatus, TaskFocusSummary, TaskSummary, TodaySummary,
+};
+use pomotui_sync::{
+    Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant,
+    Record as SyncRecord, RecordId, RecordPayload, TaskProjection, TaskStatus as SyncTaskStatus,
+    project_tasks, union,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const MAX_REMINDER_ATTEMPTS: u32 = 3;
 const MAX_REMINDER_AGE_SECONDS: i64 = 60 * 60;
-
-fn records_checksum(records: &[SyncRecord]) -> Result<String, String> {
-    let canonical = serde_json::to_vec(records).map_err(|error| error.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(canonical)))
-}
 
 trait ServiceRepository: Send {
     fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String>;
@@ -153,7 +151,7 @@ pub struct Service {
 struct SyncState {
     path: Option<std::path::PathBuf>,
     records: Vec<SyncRecord>,
-    task_entities: std::collections::BTreeMap<u64, String>,
+    task_entities: std::collections::BTreeMap<u64, EntityId>,
     last_attempt: Option<i64>,
     last_success: Option<i64>,
     last_error: Option<String>,
@@ -899,28 +897,31 @@ impl Service {
     }
 
     fn record_task_creation(&mut self, task_id: u64, title: &str) {
-        let entity_id = uuid::Uuid::new_v4().to_string();
+        let entity_id = EntityId::random();
         self.sync.task_entities.insert(task_id, entity_id.clone());
-        self.sync.records.push(SyncRecord {
-            id: uuid::Uuid::new_v4().to_string(),
+        self.sync.records.push(SyncRecord::new(
+            RecordId::random(),
             entity_id,
-            mutation_time: self.next_sync_mutation_time(),
-            kind: SyncRecordKind::TaskVersion,
-            title: Some(title.into()),
-            status: Some(SyncTaskStatus::Open),
-        });
+            self.next_sync_mutation_time(),
+            RecordPayload::TaskVersion {
+                title: title.into(),
+                status: SyncTaskStatus::Open,
+            },
+        ));
         self.sync.records.sort();
     }
 
-    fn next_sync_mutation_time(&self) -> i64 {
-        self.sync
+    fn next_sync_mutation_time(&self) -> MutationInstant {
+        let millis = self
+            .sync
             .records
             .iter()
-            .map(|record| record.mutation_time)
+            .map(|record| record.mutation_time.as_millis())
             .max()
             .unwrap_or(i64::MIN)
             .saturating_add(1)
-            .max(self.wall.saturating_mul(1_000))
+            .max(self.wall.saturating_mul(1_000));
+        MutationInstant::from_millis(millis).expect("service wall time is a valid UTC instant")
     }
 
     fn record_task_version(&mut self, task_id: u64) -> Result<(), String> {
@@ -939,14 +940,12 @@ impl Service {
             .get(&task_id)
             .cloned()
             .ok_or_else(|| format!("Task {task_id} has no global identity"))?;
-        self.sync.records.push(SyncRecord {
-            id: uuid::Uuid::new_v4().to_string(),
+        self.sync.records.push(SyncRecord::new(
+            RecordId::random(),
             entity_id,
-            mutation_time: self.next_sync_mutation_time(),
-            kind: SyncRecordKind::TaskVersion,
-            title: Some(title),
-            status: Some(status),
-        });
+            self.next_sync_mutation_time(),
+            RecordPayload::TaskVersion { title, status },
+        ));
         self.sync.records.sort();
         Ok(())
     }
@@ -958,14 +957,12 @@ impl Service {
             .get(&task_id)
             .cloned()
             .ok_or_else(|| format!("Task {task_id} has no global identity"))?;
-        self.sync.records.push(SyncRecord {
-            id: uuid::Uuid::new_v4().to_string(),
+        self.sync.records.push(SyncRecord::new(
+            RecordId::random(),
             entity_id,
-            mutation_time: self.next_sync_mutation_time(),
-            kind: SyncRecordKind::TaskDeleted,
-            title: None,
-            status: None,
-        });
+            self.next_sync_mutation_time(),
+            RecordPayload::TaskDeleted,
+        ));
         self.sync.records.sort();
         Ok(())
     }
@@ -996,94 +993,14 @@ impl Service {
             .ok_or_else(|| "synchronization is not enabled".to_owned())?;
         self.sync.last_attempt = Some(self.wall);
         let incoming = match read_sync_file(&path)? {
-            Some(source) => {
-                let document: SyncDocument = serde_json::from_str(&source)
-                    .map_err(|error| format!("invalid sync document: {error}"))?;
-                if document.format != "pomotui.sync" {
-                    return Err("unsupported sync document format".into());
-                }
-                if document.version != SYNC_FORMAT_VERSION {
-                    return Err(format!(
-                        "unsupported sync document version {}",
-                        document.version
-                    ));
-                }
-                if document.integrity.record_count != document.records.len() {
-                    return Err("sync document integrity check failed".into());
-                }
-                let checksum = records_checksum(&document.records)?;
-                if document.integrity.records_sha256 != checksum {
-                    return Err("sync document checksum does not match its records".into());
-                }
-                document.records
-            }
+            Some(source) => SyncDocument::from_json(&source)?.into_records(),
             None => Vec::new(),
         };
         self.sync.file_record_count = Some(incoming.len());
-        let mut document_ids = std::collections::HashSet::new();
-        let mut validation_store = TaskStore::new();
-        for record in &incoming {
-            if !document_ids.insert(&record.id) {
-                return Err(format!("duplicate synchronization record {}", record.id));
-            }
-            uuid::Uuid::parse_str(&record.id)
-                .map_err(|_| format!("invalid synchronization record identity {}", record.id))?;
-            uuid::Uuid::parse_str(&record.entity_id)
-                .map_err(|_| format!("invalid synchronized Task identity {}", record.entity_id))?;
-            match record.kind {
-                SyncRecordKind::TaskVersion => {
-                    let title = record.title.clone().ok_or_else(|| {
-                        format!("synchronized Task version {} has no title", record.id)
-                    })?;
-                    if record.status.is_none() {
-                        return Err(format!(
-                            "synchronized Task version {} has no status",
-                            record.id
-                        ));
-                    }
-                    validation_store
-                        .create(title)
-                        .map_err(|error| format!("invalid synchronized Task: {error}"))?;
-                }
-                SyncRecordKind::TaskDeleted => {
-                    if record.title.is_some() || record.status.is_some() {
-                        return Err(format!(
-                            "synchronized Task deletion {} contains mutable state",
-                            record.id
-                        ));
-                    }
-                }
-            }
-        }
-        let known: std::collections::HashSet<_> = self
-            .sync
-            .records
-            .iter()
-            .map(|record| record.id.clone())
-            .collect();
-        for record in incoming {
-            if known.contains(&record.id) {
-                continue;
-            }
-            self.sync.records.push(record);
-        }
-        self.sync.records.sort();
-        self.sync
-            .records
-            .dedup_by(|left, right| left.id == right.id);
+        self.sync.records = union(&self.sync.records, &incoming)?;
         self.project_tasks_from_sync_records()?;
         self.persist(None)?;
-        let document = SyncDocument {
-            format: "pomotui.sync".into(),
-            version: SYNC_FORMAT_VERSION,
-            integrity: SyncIntegrity {
-                record_count: self.sync.records.len(),
-                records_sha256: records_checksum(&self.sync.records)?,
-            },
-            records: self.sync.records.clone(),
-        };
-        let mut serialized = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
-        serialized.push('\n');
+        let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
         replace_sync_file(&path, &serialized)?;
         self.sync.file_record_count = Some(self.sync.records.len());
         self.sync.last_success = Some(self.wall);
@@ -1093,49 +1010,27 @@ impl Service {
     }
 
     fn project_tasks_from_sync_records(&mut self) -> Result<(), String> {
-        let mut by_entity = std::collections::BTreeMap::<String, Vec<SyncRecord>>::new();
-        for record in &self.sync.records {
-            by_entity
-                .entry(record.entity_id.clone())
-                .or_default()
-                .push(record.clone());
-        }
-        for (entity_id, records) in by_entity {
+        for projection in project_tasks(&self.sync.records) {
+            let TaskProjection::Version {
+                entity_id,
+                title,
+                status,
+                ..
+            } = projection
+            else {
+                continue;
+            };
             let local_id = self
                 .sync
                 .task_entities
                 .iter()
                 .find_map(|(local_id, mapped)| (mapped == &entity_id).then_some(*local_id));
-            let projected =
-                project_task_sync_fact(records.iter().map(|record| match record.kind {
-                    SyncRecordKind::TaskVersion => TaskSyncFact::Version {
-                        mutation_time: record.mutation_time,
-                        record_id: &record.id,
-                    },
-                    SyncRecordKind::TaskDeleted => TaskSyncFact::Deletion {
-                        record_id: &record.id,
-                    },
-                }));
-            let Some(TaskSyncFact::Version { record_id, .. }) = projected else {
-                continue;
-            };
-            let version = records
-                .iter()
-                .find(|record| record.id == record_id)
-                .ok_or_else(|| format!("projected Task record {record_id} is missing"))?;
-            let title = version
-                .title
-                .as_deref()
-                .ok_or_else(|| format!("synchronized Task version {} has no title", version.id))?;
-            let status = version
-                .status
-                .ok_or_else(|| format!("synchronized Task version {} has no status", version.id))?;
             let task_id = if let Some(local_id) = local_id {
                 TaskId::new(local_id)
             } else {
                 let task_id = self
                     .tasks
-                    .create(title)
+                    .create(&title)
                     .map_err(|error| error.to_string())?;
                 self.sync
                     .task_entities
@@ -1144,7 +1039,7 @@ impl Service {
             };
             if self.tasks.get(task_id).is_ok() {
                 self.tasks
-                    .rename(task_id, title)
+                    .rename(task_id, &title)
                     .map_err(|error| error.to_string())?;
                 match status {
                     SyncTaskStatus::Open => self.tasks.reopen(task_id),
@@ -1162,17 +1057,15 @@ impl Service {
             .sync
             .records
             .iter()
-            .filter(|record| record.kind == SyncRecordKind::TaskDeleted)
-            .map(|record| record.entity_id.as_str())
+            .filter(|record| matches!(record.payload, RecordPayload::TaskDeleted))
+            .map(|record| &record.entity_id)
             .collect::<std::collections::HashSet<_>>();
         let local_ids = self
             .sync
             .task_entities
             .iter()
             .filter_map(|(local_id, entity_id)| {
-                deleted_entities
-                    .contains(entity_id.as_str())
-                    .then_some(*local_id)
+                deleted_entities.contains(entity_id).then_some(*local_id)
             })
             .collect::<Vec<_>>();
         for local_id in local_ids {
@@ -2024,7 +1917,7 @@ impl PersistedService {
         };
         let clock = PlatformClock::default();
         let persisted = Self {
-            data_format_version: 1,
+            data_format_version: 2,
             timer: PersistedTimer {
                 session,
                 current_task: state.current_task.map(TaskId::get),
@@ -2088,9 +1981,9 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
-        if persisted.data_format_version != 1 {
+        if persisted.data_format_version != 2 {
             return Err(
-                "database format is incompatible with experimental Task synchronization; full data reset required"
+                "database format is incompatible with experimental synchronization; reset local pre-release data with `pomotui reset --all-data --confirm`"
                     .into(),
             );
         }
@@ -2374,7 +2267,7 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&document).expect("valid JSON");
         assert_eq!(json["format"], "pomotui.sync");
-        assert_eq!(json["version"], 1);
+        assert_eq!(json["version"], 2);
         assert_eq!(json["integrity"]["record_count"], 1);
         assert_eq!(
             json["integrity"]["records_sha256"]
@@ -2707,7 +2600,7 @@ mod tests {
             .err()
             .expect("legacy state must be rejected");
 
-        assert!(error.contains("full data reset required"));
+        assert!(error.contains("pomotui reset --all-data --confirm"));
     }
 
     #[test]
