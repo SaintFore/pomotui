@@ -215,6 +215,61 @@ fn clock(seconds: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct ResetOutcome {
+    pub backup: Option<std::path::PathBuf>,
+}
+
+pub fn reset_all_data(
+    database: &std::path::Path,
+    socket: &std::path::Path,
+) -> Result<ResetOutcome, String> {
+    if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+        return Err("Timer Service is running; stop it before resetting all local data".into());
+    }
+    let parent = database
+        .parent()
+        .ok_or_else(|| "database path has no parent directory".to_owned())?;
+    let backup = if database.exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("cannot timestamp database backup: {error}"))?
+            .as_nanos();
+        let file_name = database
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| "database path has no valid file name".to_owned())?;
+        let backup = parent.join(format!("{file_name}.backup-{stamp}"));
+        std::fs::copy(database, &backup)
+            .map_err(|error| format!("cannot create database backup: {error}"))?;
+        std::fs::File::open(&backup)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("cannot flush database backup: {error}"))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("cannot flush database backup directory: {error}"))?;
+        Some(backup)
+    } else {
+        None
+    };
+
+    for path in [
+        database.to_path_buf(),
+        std::path::PathBuf::from(format!("{}-wal", database.display())),
+        std::path::PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot remove {}: {error}", path.display())),
+        }
+    }
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("cannot flush reset database directory: {error}"))?;
+    Ok(ResetOutcome { backup })
+}
+
 fn percentage(remaining: u64, planned: u64) -> u64 {
     if planned == 0 {
         0
@@ -399,5 +454,62 @@ mod tests {
         );
         let json = render(&response, true, false).expect("json");
         assert!(json.contains("\"code\":\"disconnected\""));
+    }
+
+    #[test]
+    fn reset_refuses_a_reachable_timer_service() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-reset-live-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temporary directory");
+        let database = root.join("pomotui.sqlite3");
+        std::fs::write(&database, "database").expect("database");
+        let socket = root.join("pomotui.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("listener");
+
+        let error = reset_all_data(&database, &socket).expect_err("live service must block reset");
+
+        assert!(error.contains("Timer Service is running"));
+        assert_eq!(
+            std::fs::read_to_string(&database).expect("database remains"),
+            "database"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reset_backs_up_database_and_only_removes_sqlite_files() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-reset-files-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temporary directory");
+        let database = root.join("pomotui.sqlite3");
+        std::fs::write(&database, "durable state").expect("database");
+        std::fs::write(root.join("pomotui.sqlite3-wal"), "wal").expect("wal");
+        std::fs::write(root.join("pomotui.sqlite3-shm"), "shm").expect("shm");
+        let config = root.join("config.toml");
+        let sync_file = root.join("chosen.sync");
+        std::fs::write(&config, "theme = 'test'").expect("config");
+        std::fs::write(&sync_file, "sync").expect("sync file");
+
+        let outcome = reset_all_data(&database, &root.join("missing.sock")).expect("safe reset");
+
+        let backup = outcome.backup.expect("backup path");
+        assert_eq!(
+            std::fs::read_to_string(backup).expect("backup"),
+            "durable state"
+        );
+        assert!(!database.exists());
+        assert!(!root.join("pomotui.sqlite3-wal").exists());
+        assert!(!root.join("pomotui.sqlite3-shm").exists());
+        assert!(config.exists());
+        assert!(sync_file.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
