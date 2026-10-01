@@ -134,6 +134,15 @@ pub enum RecordPayload {
         reflection: Option<String>,
         chain_entry_title: Option<String>,
     },
+    ChainEntryVersion {
+        reflection: Option<String>,
+        chain_entry_title: Option<String>,
+    },
+    EndedChainDeleted {
+        previous_chain_break_review_entity_id: Option<EntityId>,
+        deleted_review_entity_ids: Vec<EntityId>,
+        observed_chain_break_review_entity_ids: Vec<EntityId>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -367,6 +376,29 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
             _ => None,
         })
         .collect::<BTreeMap<_, _>>();
+    let mut entry_versions = BTreeMap::<&EntityId, &Record>::new();
+    let mut deleted_intervals = Vec::new();
+    for record in records {
+        match record.payload {
+            RecordPayload::ChainEntryVersion { .. } => {
+                if entry_versions.get(&record.entity_id).is_none_or(|current| {
+                    (record.mutation_time, &record.id) > (current.mutation_time, &current.id)
+                }) {
+                    entry_versions.insert(&record.entity_id, record);
+                }
+            }
+            RecordPayload::EndedChainDeleted {
+                ref previous_chain_break_review_entity_id,
+                ..
+            } => {
+                deleted_intervals.push((
+                    previous_chain_break_review_entity_id.as_ref(),
+                    &record.entity_id,
+                ));
+            }
+            _ => {}
+        }
+    }
     let mut reviews = records
         .iter()
         .filter_map(|record| match &record.payload {
@@ -378,34 +410,62 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                 actual_seconds,
                 reflection,
                 chain_entry_title,
-            } => Some((
-                *session_ends.get(session_entity_id)?,
-                record.entity_id.clone(),
-                ProjectedSessionReview {
-                    review_entity_id: record.entity_id.clone(),
-                    record_id: record.id.clone(),
-                    session_entity_id: session_entity_id.clone(),
-                    judgment: *judgment,
-                    task_entity_id: task_entity_id.clone(),
-                    task_title: task_title.clone(),
-                    actual_seconds: *actual_seconds,
-                    reflection: reflection.clone(),
-                    chain_entry_title: chain_entry_title.clone(),
-                },
-            )),
+            } => {
+                let (reflection, chain_entry_title) = entry_versions
+                    .get(&record.entity_id)
+                    .and_then(|version| match &version.payload {
+                        RecordPayload::ChainEntryVersion {
+                            reflection,
+                            chain_entry_title,
+                        } => Some((reflection.clone(), chain_entry_title.clone())),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| (reflection.clone(), chain_entry_title.clone()));
+                Some((
+                    *session_ends.get(session_entity_id)?,
+                    record.entity_id.clone(),
+                    ProjectedSessionReview {
+                        review_entity_id: record.entity_id.clone(),
+                        record_id: record.id.clone(),
+                        session_entity_id: session_entity_id.clone(),
+                        judgment: *judgment,
+                        task_entity_id: task_entity_id.clone(),
+                        task_title: task_title.clone(),
+                        actual_seconds: *actual_seconds,
+                        reflection,
+                        chain_entry_title,
+                    },
+                ))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     reviews.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    let review_positions = reviews
+        .iter()
+        .enumerate()
+        .map(|(index, (_, entity_id, _))| (entity_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut deleted_positions = std::collections::BTreeSet::new();
+    for (previous_break, deleted_break) in deleted_intervals {
+        let start = previous_break
+            .and_then(|identity| review_positions.get(identity).copied())
+            .map_or(0, |index| index.saturating_add(1));
+        if let Some(end) = review_positions.get(deleted_break).copied() {
+            deleted_positions.extend(start..=end);
+        }
+    }
     let mut projection = SessionReviewProjection::default();
-    for (_, _, review) in reviews {
+    for (index, (_, _, review)) in reviews.into_iter().enumerate() {
+        if deleted_positions.contains(&index) {
+            continue;
+        }
         if review.judgment == SessionReviewJudgment::Successful {
             projection.current_chain.links.push(review);
         } else {
             projection.current_chain.chain_break = Some(review);
-            projection
-                .ended_chains
-                .push(std::mem::take(&mut projection.current_chain));
+            let ended = std::mem::take(&mut projection.current_chain);
+            projection.ended_chains.push(ended);
         }
     }
     projection
@@ -451,7 +511,9 @@ pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
                     RecordPayload::TaskDeleted
                     | RecordPayload::SessionEnded { .. }
                     | RecordPayload::SessionDeleted
-                    | RecordPayload::SessionReviewed { .. } => None,
+                    | RecordPayload::SessionReviewed { .. }
+                    | RecordPayload::ChainEntryVersion { .. }
+                    | RecordPayload::EndedChainDeleted { .. } => None,
                 })
                 .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
                 .map(|(_, record_id, title, status)| TaskProjection::Version {
@@ -557,7 +619,26 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                     );
                 }
             }
-            RecordPayload::TaskDeleted | RecordPayload::SessionDeleted => {}
+            RecordPayload::TaskDeleted
+            | RecordPayload::SessionDeleted
+            | RecordPayload::EndedChainDeleted { .. } => {}
+            RecordPayload::ChainEntryVersion {
+                reflection,
+                chain_entry_title,
+            } => {
+                if reflection
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                    || chain_entry_title
+                        .as_deref()
+                        .is_some_and(|value| value.trim().is_empty())
+                {
+                    return Err("synchronized Chain Entry text cannot be blank".into());
+                }
+                if reflection.is_none() && chain_entry_title.is_none() {
+                    return Err("synchronized Chain Entry version must change text".into());
+                }
+            }
             RecordPayload::SessionReviewed {
                 task_title,
                 judgment,
@@ -584,6 +665,9 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             RecordPayload::SessionEnded { .. } => ("Session", true),
             RecordPayload::SessionDeleted => ("Session", false),
             RecordPayload::SessionReviewed { .. } => ("Review", true),
+            RecordPayload::ChainEntryVersion { .. } | RecordPayload::EndedChainDeleted { .. } => {
+                ("Review", false)
+            }
         };
         let entry = entity_kinds.entry(&record.entity_id).or_insert((kind, 0));
         if entry.0 != kind {
@@ -647,6 +731,139 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                     "synchronized Session Review duration differs from its source Session".into(),
                 );
             }
+        }
+    }
+    let reviews = records
+        .iter()
+        .filter_map(|record| match record.payload {
+            RecordPayload::SessionReviewed { judgment, .. } => Some((&record.entity_id, judgment)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for record in records {
+        match record.payload {
+            RecordPayload::ChainEntryVersion { .. } if !reviews.contains_key(&record.entity_id) => {
+                return Err(
+                    "synchronized Chain Entry version references unknown Review identity".into(),
+                );
+            }
+            RecordPayload::EndedChainDeleted { .. }
+                if reviews.get(&record.entity_id) != Some(&SessionReviewJudgment::Failed) =>
+            {
+                return Err(
+                    "synchronized Ended Chain deletion references unknown Chain Break".into(),
+                );
+            }
+            RecordPayload::EndedChainDeleted {
+                previous_chain_break_review_entity_id: Some(ref previous),
+                ..
+            } if reviews.get(previous) != Some(&SessionReviewJudgment::Failed) => {
+                return Err(
+                    "synchronized Ended Chain deletion references unknown previous Chain Break"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let review_order_key = |identity: &EntityId| {
+        records.iter().find_map(|record| {
+            (&record.entity_id == identity).then(|| match &record.payload {
+                RecordPayload::SessionReviewed {
+                    session_entity_id, ..
+                } => records.iter().find_map(|candidate| {
+                    (&candidate.entity_id == session_entity_id).then(|| {
+                        if let RecordPayload::SessionEnded { ended_at, .. } = candidate.payload {
+                            Some((ended_at, identity.clone()))
+                        } else {
+                            None
+                        }
+                    })?
+                }),
+                _ => None,
+            })?
+        })
+    };
+    for record in records {
+        if let RecordPayload::EndedChainDeleted {
+            previous_chain_break_review_entity_id: Some(previous),
+            ..
+        } = &record.payload
+            && review_order_key(previous) >= review_order_key(&record.entity_id)
+        {
+            return Err(
+                "synchronized Ended Chain deletion boundaries are not in Review Order".into(),
+            );
+        }
+    }
+    for tombstone in records {
+        let RecordPayload::EndedChainDeleted {
+            previous_chain_break_review_entity_id,
+            deleted_review_entity_ids,
+            observed_chain_break_review_entity_ids,
+        } = &tombstone.payload
+        else {
+            continue;
+        };
+        let unique = deleted_review_entity_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if deleted_review_entity_ids.is_empty()
+            || unique.len() != deleted_review_entity_ids.len()
+            || deleted_review_entity_ids.last() != Some(&tombstone.entity_id)
+        {
+            return Err(
+                "synchronized Ended Chain deletion must list each deleted Review once and end with its Chain Break"
+                    .into(),
+            );
+        }
+        for identity in deleted_review_entity_ids {
+            let Some(judgment) = reviews.get(identity) else {
+                return Err(
+                    "synchronized Ended Chain deletion references unknown Review identity".into(),
+                );
+            };
+            if identity != &tombstone.entity_id && *judgment != SessionReviewJudgment::Successful {
+                return Err(
+                    "synchronized Ended Chain deletion contains an interior Chain Break".into(),
+                );
+            }
+        }
+        if deleted_review_entity_ids
+            .windows(2)
+            .any(|pair| review_order_key(&pair[0]) >= review_order_key(&pair[1]))
+        {
+            return Err("synchronized Ended Chain deletion Reviews are not in Review Order".into());
+        }
+        let observed_unique = observed_chain_break_review_entity_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if observed_unique.len() != observed_chain_break_review_entity_ids.len()
+            || observed_chain_break_review_entity_ids
+                .iter()
+                .any(|identity| reviews.get(identity) != Some(&SessionReviewJudgment::Failed))
+            || observed_chain_break_review_entity_ids
+                .windows(2)
+                .any(|pair| review_order_key(&pair[0]) >= review_order_key(&pair[1]))
+        {
+            return Err(
+                "synchronized Ended Chain deletion has invalid observed Chain Breaks".into(),
+            );
+        }
+        let Some(target_index) = observed_chain_break_review_entity_ids
+            .iter()
+            .position(|identity| identity == &tombstone.entity_id)
+        else {
+            return Err("synchronized Ended Chain deletion did not observe its Chain Break".into());
+        };
+        let expected_previous = target_index
+            .checked_sub(1)
+            .map(|index| &observed_chain_break_review_entity_ids[index]);
+        if previous_chain_break_review_entity_id.as_ref() != expected_previous {
+            return Err(
+                "synchronized Ended Chain deletion boundaries are not adjacent among observed Chain Breaks"
+                    .into(),
+            );
         }
     }
     for record in records {

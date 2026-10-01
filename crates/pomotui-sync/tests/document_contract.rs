@@ -3,6 +3,14 @@ use pomotui_sync::{
     SessionKind, SessionOutcome, SessionReviewJudgment, TaskProjection, TaskStatus, plan_sync,
 };
 
+fn record_id(value: u128) -> RecordId {
+    RecordId::parse(&uuid::Uuid::from_u128(value).to_string()).expect("record identity")
+}
+
+fn entity_id(value: u128) -> EntityId {
+    EntityId::parse(&uuid::Uuid::from_u128(value).to_string()).expect("entity identity")
+}
+
 fn task_version(record: u128, entity: u128, mutation: i64, title: &str) -> Record {
     Record::new(
         RecordId::parse(&uuid::Uuid::from_u128(record).to_string()).expect("record identity"),
@@ -314,4 +322,168 @@ fn retry_is_idempotent_and_a_second_review_for_one_session_is_rejected() {
         error.contains("more than one Review"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn chain_entry_edits_converge_by_mutation_time_then_record_identity() {
+    let records = vec![
+        task_version(1, 16, 1_000, "Snapshot"),
+        ended_session(2, 20, Some(16)),
+        session_review(3, 30, 20, SessionReviewJudgment::Successful),
+        Record::new(
+            record_id(4),
+            entity_id(30),
+            MutationInstant::from_millis(4_000).expect("instant"),
+            RecordPayload::ChainEntryVersion {
+                reflection: Some("older wording".into()),
+                chain_entry_title: Some("older title".into()),
+            },
+        ),
+        Record::new(
+            record_id(5),
+            entity_id(30),
+            MutationInstant::from_millis(5_000).expect("instant"),
+            RecordPayload::ChainEntryVersion {
+                reflection: Some("corrected wording".into()),
+                chain_entry_title: Some("corrected title".into()),
+            },
+        ),
+    ];
+
+    let forward = plan_sync(&[], &records).expect("valid edit versions");
+    let mut reversed = records.clone();
+    reversed.reverse();
+    let backward = plan_sync(&[], &reversed).expect("same versions in reverse order");
+
+    assert_eq!(
+        forward.session_review_projection(),
+        backward.session_review_projection()
+    );
+    let link = &forward.session_review_projection().current_chain.links[0];
+    assert_eq!(link.reflection.as_deref(), Some("corrected wording"));
+    assert_eq!(link.chain_entry_title.as_deref(), Some("corrected title"));
+    assert_eq!(link.actual_seconds, 731);
+    assert_eq!(link.judgment, SessionReviewJudgment::Successful);
+}
+
+#[test]
+fn ended_chain_tombstone_dominates_stale_replay_and_late_reviews() {
+    let task = task_version(1, 16, 1_000, "Snapshot");
+    let mut first_session = ended_session(2, 20, Some(16));
+    let mut break_session = ended_session(3, 21, Some(16));
+    let mut late_success_session = ended_session(4, 22, Some(16));
+    let mut late_failure_session = ended_session(9, 23, Some(16));
+    for (session, ended_at) in [
+        (&mut first_session, 100),
+        (&mut late_success_session, 200),
+        (&mut late_failure_session, 250),
+        (&mut break_session, 300),
+    ] {
+        if let RecordPayload::SessionEnded {
+            ended_at: value, ..
+        } = &mut session.payload
+        {
+            *value = ended_at;
+        }
+    }
+    let success = session_review(5, 30, 20, SessionReviewJudgment::Successful);
+    let failed = session_review(6, 31, 21, SessionReviewJudgment::Failed);
+    let deletion = Record::new(
+        record_id(7),
+        entity_id(31),
+        MutationInstant::from_millis(7_000).expect("instant"),
+        RecordPayload::EndedChainDeleted {
+            previous_chain_break_review_entity_id: None,
+            deleted_review_entity_ids: vec![entity_id(30), entity_id(31)],
+            observed_chain_break_review_entity_ids: vec![entity_id(31)],
+        },
+    );
+    let mut late_success = session_review(8, 32, 22, SessionReviewJudgment::Successful);
+    late_success.mutation_time = MutationInstant::from_millis(5_000).expect("offline instant");
+    let mut late_failure = session_review(10, 33, 23, SessionReviewJudgment::Failed);
+    late_failure.mutation_time = MutationInstant::from_millis(6_000).expect("offline instant");
+
+    let deleted = plan_sync(
+        &[],
+        &[
+            task.clone(),
+            first_session.clone(),
+            break_session.clone(),
+            success.clone(),
+            failed.clone(),
+            deletion.clone(),
+        ],
+    )
+    .expect("valid deletion");
+    assert!(deleted.session_review_projection().ended_chains.is_empty());
+
+    let replayed = plan_sync(
+        deleted.retained_records(),
+        &[
+            task,
+            first_session,
+            break_session,
+            success,
+            failed,
+            late_success_session,
+            late_failure_session,
+            late_success,
+            late_failure,
+            deletion,
+        ],
+    )
+    .expect("stale and late records remain projectable");
+    assert!(replayed.session_review_projection().ended_chains.is_empty());
+    assert!(
+        replayed
+            .session_review_projection()
+            .current_chain
+            .links
+            .is_empty()
+    );
+}
+
+#[test]
+fn ended_chain_tombstone_cannot_span_an_already_known_intervening_chain() {
+    let task = task_version(1, 16, 1_000, "Snapshot");
+    let mut sessions = [
+        ended_session(2, 20, Some(16)),
+        ended_session(3, 21, Some(16)),
+        ended_session(4, 22, Some(16)),
+    ];
+    for (index, session) in sessions.iter_mut().enumerate() {
+        if let RecordPayload::SessionEnded { ended_at, .. } = &mut session.payload {
+            *ended_at = 100 + i64::try_from(index).expect("small index") * 100;
+        }
+    }
+    let first = session_review(5, 30, 20, SessionReviewJudgment::Failed);
+    let intervening = session_review(6, 31, 21, SessionReviewJudgment::Failed);
+    let third = session_review(7, 32, 22, SessionReviewJudgment::Failed);
+    let invalid = Record::new(
+        record_id(8),
+        entity_id(32),
+        MutationInstant::from_millis(8_000).expect("instant"),
+        RecordPayload::EndedChainDeleted {
+            previous_chain_break_review_entity_id: Some(entity_id(30)),
+            deleted_review_entity_ids: vec![entity_id(32)],
+            observed_chain_break_review_entity_ids: vec![
+                entity_id(30),
+                entity_id(31),
+                entity_id(32),
+            ],
+        },
+    );
+    let records = vec![
+        task,
+        sessions[0].clone(),
+        sessions[1].clone(),
+        sessions[2].clone(),
+        first,
+        intervening,
+        third,
+        invalid,
+    ];
+
+    let error = plan_sync(&[], &records).expect_err("cannot delete across another known chain");
+    assert!(error.contains("not adjacent"), "{error}");
 }

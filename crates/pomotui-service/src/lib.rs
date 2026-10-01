@@ -391,6 +391,7 @@ impl Service {
         let old_next_event_id = self.next_event_id;
         let old_chain_links = self.chain_links.clone();
         let old_ended_chains = self.ended_chains.clone();
+        let old_reward_unlocks = self.reward_unlocks.clone();
         let old_current_chain_id = self.current_chain_id;
         let old_current_chain_length = self.current_chain_length;
         let old_next_chain_entry_id = self.next_chain_entry_id;
@@ -411,6 +412,7 @@ impl Service {
             self.next_event_id = old_next_event_id;
             self.chain_links = old_chain_links;
             self.ended_chains = old_ended_chains;
+            self.reward_unlocks = old_reward_unlocks;
             self.current_chain_id = old_current_chain_id;
             self.current_chain_length = old_current_chain_length;
             self.next_chain_entry_id = old_next_chain_entry_id;
@@ -1020,6 +1022,9 @@ impl Service {
         let chain_entry_title = chain_entry_title
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        if reflection.is_none() && chain_entry_title.is_none() {
+            return Err("Chain Entry edit requires a Reflection or Chain Entry Title".into());
+        }
         if let Some(link) = self.chain_links.iter_mut().find(|link| link.id == id) {
             if let Some(title) = chain_entry_title {
                 link.chain_entry_title = Some(title);
@@ -1027,6 +1032,7 @@ impl Service {
             if reflection.is_some() {
                 link.reflection = reflection;
             }
+            self.record_chain_entry_version(id)?;
             return Ok(());
         }
         for chain in &mut self.ended_chains {
@@ -1037,6 +1043,7 @@ impl Service {
                 if reflection.is_some() {
                     link.reflection = reflection;
                 }
+                self.record_chain_entry_version(id)?;
                 return Ok(());
             }
             if chain.chain_break.id == id {
@@ -1046,10 +1053,113 @@ impl Service {
                 if let Some(reflection) = reflection {
                     chain.chain_break.reflection = reflection;
                 }
+                self.record_chain_entry_version(id)?;
                 return Ok(());
             }
         }
         Err(format!("Chain entry {id} does not exist"))
+    }
+
+    fn record_chain_entry_version(&mut self, entry_id: u64) -> Result<(), String> {
+        let entity_id = self.sync_review_entity_id(entry_id)?;
+        let (reflection, chain_entry_title) = self
+            .chain_links
+            .iter()
+            .find(|entry| entry.id == entry_id)
+            .map(|entry| (entry.reflection.clone(), entry.chain_entry_title.clone()))
+            .or_else(|| {
+                self.ended_chains.iter().find_map(|chain| {
+                    chain
+                        .links
+                        .iter()
+                        .find(|entry| entry.id == entry_id)
+                        .map(|entry| (entry.reflection.clone(), entry.chain_entry_title.clone()))
+                        .or_else(|| {
+                            (chain.chain_break.id == entry_id).then(|| {
+                                (
+                                    Some(chain.chain_break.reflection.clone()),
+                                    chain.chain_break.chain_entry_title.clone(),
+                                )
+                            })
+                        })
+                })
+            })
+            .ok_or_else(|| format!("Chain entry {entry_id} does not exist"))?;
+        self.sync.records.push(SyncRecord::new(
+            RecordId::random(),
+            entity_id,
+            self.next_sync_mutation_time(),
+            RecordPayload::ChainEntryVersion {
+                reflection,
+                chain_entry_title,
+            },
+        ));
+        self.sync.records.sort();
+        Ok(())
+    }
+
+    fn record_ended_chain_deletion(&mut self, chain_id: u64) -> Result<(), String> {
+        let chain_index = self
+            .ended_chains
+            .iter()
+            .position(|chain| chain.id == chain_id)
+            .ok_or_else(|| format!("Ended Chain {chain_id} does not exist"))?;
+        let break_entry_id = self.ended_chains[chain_index].chain_break.id;
+        let deleted_entry_ids = self.ended_chains[chain_index]
+            .links
+            .iter()
+            .map(|link| link.id)
+            .chain(std::iter::once(break_entry_id))
+            .collect::<Vec<_>>();
+        let observed_break_entry_ids = self
+            .ended_chains
+            .iter()
+            .map(|chain| chain.chain_break.id)
+            .collect::<Vec<_>>();
+        let previous_break_entry_id = chain_index
+            .checked_sub(1)
+            .map(|index| self.ended_chains[index].chain_break.id);
+        let break_entity_id = self.sync_review_entity_id(break_entry_id)?;
+        let previous_chain_break_review_entity_id = previous_break_entry_id
+            .map(|entry_id| self.sync_review_entity_id(entry_id))
+            .transpose()?;
+        let mut deleted_review_entity_ids = Vec::with_capacity(deleted_entry_ids.len());
+        for entry_id in deleted_entry_ids {
+            deleted_review_entity_ids.push(self.sync_review_entity_id(entry_id)?);
+        }
+        let mut observed_chain_break_review_entity_ids =
+            Vec::with_capacity(observed_break_entry_ids.len());
+        for entry_id in observed_break_entry_ids {
+            observed_chain_break_review_entity_ids.push(self.sync_review_entity_id(entry_id)?);
+        }
+        self.sync.records.push(SyncRecord::new(
+            RecordId::random(),
+            break_entity_id,
+            self.next_sync_mutation_time(),
+            RecordPayload::EndedChainDeleted {
+                previous_chain_break_review_entity_id,
+                deleted_review_entity_ids,
+                observed_chain_break_review_entity_ids,
+            },
+        ));
+        self.sync.records.sort();
+        Ok(())
+    }
+
+    fn sync_review_entity_id(&mut self, entry_id: u64) -> Result<EntityId, String> {
+        if !self
+            .sync
+            .session_review_entries
+            .values()
+            .any(|local| *local == entry_id)
+        {
+            self.backfill_sync_records()?;
+        }
+        self.sync
+            .session_review_entries
+            .iter()
+            .find_map(|(entity, local)| (*local == entry_id).then(|| entity.clone()))
+            .ok_or_else(|| format!("Chain entry {entry_id} has no synchronization identity"))
     }
 
     fn persist(&mut self, key: Option<&str>) -> Result<(), String> {
@@ -1508,10 +1618,39 @@ impl Service {
         self.history = History::restore(records);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_session_review_projection(
         &mut self,
         projection: &SessionReviewProjection,
     ) -> Result<(), String> {
+        let existing_chain_ids = self
+            .ended_chains
+            .iter()
+            .filter_map(|chain| {
+                self.sync
+                    .session_review_entries
+                    .iter()
+                    .find_map(|(entity, local)| {
+                        (*local == chain.chain_break.id).then(|| (entity.clone(), chain.id))
+                    })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let deleted_break_entries = self
+            .sync
+            .records
+            .iter()
+            .filter(|record| matches!(record.payload, RecordPayload::EndedChainDeleted { .. }))
+            .filter_map(|record| self.sync.session_review_entries.get(&record.entity_id))
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let deleted_chain_ids = self
+            .ended_chains
+            .iter()
+            .filter(|chain| deleted_break_entries.contains(&chain.chain_break.id))
+            .map(|chain| chain.id)
+            .collect::<std::collections::HashSet<_>>();
+        self.reward_unlocks
+            .retain(|reward| !deleted_chain_ids.contains(&reward.chain_id));
         let mut next_entry_id = self.next_chain_entry_id;
         let mut entry_id =
             |entity_id: &EntityId, mappings: &mut std::collections::BTreeMap<EntityId, u64>| {
@@ -1569,7 +1708,9 @@ impl Service {
                 })
             };
         let mut ended_chains = Vec::new();
-        for (index, chain) in projection.ended_chains.iter().enumerate() {
+        let mut used_chain_ids = std::collections::BTreeSet::new();
+        let mut next_chain_id = 1_u64;
+        for chain in &projection.ended_chains {
             let links = chain
                 .links
                 .iter()
@@ -1580,8 +1721,21 @@ impl Service {
                 .as_ref()
                 .ok_or_else(|| "ended projected chain has no Chain Break".to_owned())?;
             let break_link = build_link(break_review)?;
+            let chain_id = existing_chain_ids
+                .get(&break_review.review_entity_id)
+                .copied()
+                .filter(|id| used_chain_ids.insert(*id))
+                .unwrap_or_else(|| {
+                    while used_chain_ids.contains(&next_chain_id) {
+                        next_chain_id = next_chain_id.saturating_add(1);
+                    }
+                    let id = next_chain_id;
+                    used_chain_ids.insert(id);
+                    next_chain_id = next_chain_id.saturating_add(1);
+                    id
+                });
             ended_chains.push(EndedChainState {
-                id: index as u64 + 1,
+                id: chain_id,
                 links,
                 chain_break: ChainBreakState {
                     id: break_link.id,
@@ -1602,7 +1756,11 @@ impl Service {
             .collect::<Result<Vec<_>, _>>()?;
         self.ended_chains = ended_chains;
         self.chain_links = chain_links;
-        self.current_chain_id = projection.ended_chains.len() as u64 + 1;
+        self.current_chain_id = used_chain_ids
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
         self.current_chain_length = self.chain_links.len() as u64;
         self.next_chain_entry_id = next_entry_id;
         Ok(())
@@ -1651,7 +1809,11 @@ impl Service {
     fn sync_status(&self) -> serde_json::Value {
         serde_json::to_value(SyncStatus {
             stability: "experimental".into(),
-            capabilities: vec!["task_lifecycle".into(), "session_history".into()],
+            capabilities: vec![
+                "task_lifecycle".into(),
+                "session_history".into(),
+                "action_chain_maintenance".into(),
+            ],
             enabled: self.sync.path.is_some(),
             path: self.sync.path.clone(),
             format_version: SYNC_FORMAT_VERSION,
@@ -2248,16 +2410,10 @@ impl Handler for Service {
                     }),
                 };
             }
-            Command::EndedChainDelete { id } => {
-                let before = self.ended_chains.len();
+            Command::EndedChainDelete { id } => self.record_ended_chain_deletion(id).map(|()| {
                 self.ended_chains.retain(|chain| chain.id != id);
-                if self.ended_chains.len() == before {
-                    Err(format!("Ended Chain {id} does not exist"))
-                } else {
-                    self.reward_unlocks.retain(|reward| reward.chain_id != id);
-                    Ok(())
-                }
-            }
+                self.reward_unlocks.retain(|reward| reward.chain_id != id);
+            }),
             Command::ChainEntryEdit {
                 id,
                 reflection,
@@ -2921,7 +3077,11 @@ mod tests {
         assert_eq!(rendered["value"]["stability"], "experimental");
         assert_eq!(
             rendered["value"]["capabilities"],
-            serde_json::json!(["task_lifecycle", "session_history"])
+            serde_json::json!([
+                "task_lifecycle",
+                "session_history",
+                "action_chain_maintenance"
+            ])
         );
         second.handle(request(Some("sync-second-again"), Command::SyncNow));
 
@@ -4855,6 +5015,200 @@ mod tests {
         assert!(restarted.ended_chains.is_empty());
         assert_eq!(restarted.current_chain_length, 0);
         std::fs::remove_file(database).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn two_databases_converge_chain_edits_and_durable_deletion_after_restart() {
+        let first_database = database_path().with_extension("chain-maintenance-first.sqlite3");
+        let second_database = database_path().with_extension("chain-maintenance-second.sqlite3");
+        let _ = std::fs::remove_file(&first_database);
+        let _ = std::fs::remove_file(&second_database);
+        let sync_path = std::path::PathBuf::from("chain-maintenance.sync");
+        let mut first = Service::open(&first_database).expect("first Device");
+        let mut second = Service::open(&second_database).expect("second Device");
+        for service in [&mut first, &mut second] {
+            service.sync.path = Some(sync_path.clone());
+            service.persist(None).expect("persist sync path");
+        }
+
+        first.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Shared chain".into(),
+            },
+        ));
+        first.handle(request(
+            Some("start-success"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        first.handle(request(Some("stop-success"), Command::StopReview));
+        first.handle(request(
+            Some("review-success"),
+            Command::ReviewSuccess {
+                reflection: Some("initial wording".into()),
+            },
+        ));
+        if let Some(record) = first
+            .sync
+            .records
+            .iter_mut()
+            .find(|record| matches!(record.payload, RecordPayload::SessionEnded { .. }))
+            && let RecordPayload::SessionEnded { ended_at, .. } = &mut record.payload
+        {
+            *ended_at -= 10;
+        }
+
+        let plan = plan_sync(&second.sync.records, &first.sync.records).expect("initial union");
+        second
+            .apply_sync_plan(&sync_path, &plan, plan.retained_records().len())
+            .expect("initial import");
+        let first_entry = first.snapshot().recent_chain_links[0].id;
+        let second_entry = second.snapshot().recent_chain_links[0].id;
+        first.handle(request(
+            Some("first-edit"),
+            Command::ChainEntryEdit {
+                id: first_entry,
+                reflection: Some("offline wording".into()),
+                chain_entry_title: Some("offline title".into()),
+            },
+        ));
+        second.handle(request(
+            Some("concurrent-edit"),
+            Command::ChainEntryEdit {
+                id: second_entry,
+                reflection: Some("other offline wording".into()),
+                chain_entry_title: Some("other offline title".into()),
+            },
+        ));
+        let union = plan_sync(&first.sync.records, &second.sync.records).expect("concurrent union");
+        first
+            .apply_sync_plan(&sync_path, &union, union.retained_records().len())
+            .expect("first converges");
+        let union = plan_sync(&second.sync.records, &first.sync.records).expect("retry union");
+        second
+            .apply_sync_plan(&sync_path, &union, union.retained_records().len())
+            .expect("second converges");
+        assert_eq!(
+            first.snapshot().recent_chain_links[0],
+            second.snapshot().recent_chain_links[0]
+        );
+        let second_entry = second.snapshot().recent_chain_links[0].id;
+        second.handle(request(
+            Some("correct-edit"),
+            Command::ChainEntryEdit {
+                id: second_entry,
+                reflection: Some("corrected wording".into()),
+                chain_entry_title: Some("corrected title".into()),
+            },
+        ));
+        let union = plan_sync(&first.sync.records, &second.sync.records).expect("corrected union");
+        first
+            .apply_sync_plan(&sync_path, &union, union.retained_records().len())
+            .expect("first imports correction");
+        let union = plan_sync(&second.sync.records, &first.sync.records).expect("correction retry");
+        second
+            .apply_sync_plan(&sync_path, &union, union.retained_records().len())
+            .expect("second retries correction");
+        for service in [&first, &second] {
+            let entry = &service.snapshot().recent_chain_links[0];
+            assert_eq!(entry.reflection.as_deref(), Some("corrected wording"));
+            assert_eq!(entry.chain_entry_title.as_deref(), Some("corrected title"));
+        }
+
+        first.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Chain reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
+
+        first.handle(request(
+            Some("start-failure"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        first.handle(request(Some("stop-failure"), Command::StopReview));
+        first.handle(request(
+            Some("review-failure"),
+            Command::ReviewFailure {
+                reflection: "Finished this chain".into(),
+                task_id: None,
+                use_void: false,
+                chain_entry_title: None,
+            },
+        ));
+        let plan = plan_sync(&second.sync.records, &first.sync.records).expect("Ended Chain union");
+        second
+            .apply_sync_plan(&sync_path, &plan, plan.retained_records().len())
+            .expect("import Ended Chain");
+        second.handle(request(
+            Some("late-start"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        second.handle(request(Some("late-stop"), Command::StopReview));
+        second.handle(request(
+            Some("late-review"),
+            Command::ReviewSuccess {
+                reflection: Some("late offline work".into()),
+            },
+        ));
+        let ended_id = first.snapshot().recent_ended_chains[0].id;
+        first.handle(request(
+            Some("delete-ended-chain"),
+            Command::EndedChainDelete { id: ended_id },
+        ));
+        let stale_records = second.sync.records.clone();
+        let plan = plan_sync(&first.sync.records, &stale_records).expect("stale replay union");
+        first
+            .apply_sync_plan(&sync_path, &plan, stale_records.len())
+            .expect("stale replay cannot resurrect");
+        let plan = plan_sync(&second.sync.records, &first.sync.records).expect("deletion union");
+        second
+            .apply_sync_plan(&sync_path, &plan, plan.retained_records().len())
+            .expect("import deletion");
+        assert!(first.snapshot().recent_ended_chains.is_empty());
+        assert!(second.snapshot().recent_ended_chains.is_empty());
+        assert_eq!(
+            first.snapshot().recent_chain_links,
+            second.snapshot().recent_chain_links
+        );
+        assert_eq!(first.snapshot().recent_history.len(), 3);
+        assert_eq!(second.snapshot().recent_history.len(), 3);
+        assert!(first.reward_unlocks.is_empty());
+        assert_eq!(
+            first.snapshot().today.task_focus,
+            second.snapshot().today.task_focus
+        );
+        drop(first);
+        drop(second);
+
+        let first = Service::open(&first_database).expect("restart first Device");
+        let second = Service::open(&second_database).expect("restart second Device");
+        assert!(first.snapshot().recent_ended_chains.is_empty());
+        assert!(second.snapshot().recent_ended_chains.is_empty());
+        assert!(
+            first.sync.records.iter().any(|record| {
+                matches!(record.payload, RecordPayload::EndedChainDeleted { .. })
+            })
+        );
+        assert!(
+            second.sync.records.iter().any(|record| {
+                matches!(record.payload, RecordPayload::EndedChainDeleted { .. })
+            })
+        );
+        std::fs::remove_file(first_database).expect("cleanup first database");
+        std::fs::remove_file(second_database).expect("cleanup second database");
     }
 
     struct FailingRepository {
