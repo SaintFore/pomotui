@@ -38,6 +38,10 @@ systemctl --user enable --now pomotui.socket
 AUR 软件包会将可执行文件安装到 `/usr/bin`。上述命令会启用 systemd 用户
 socket，并立即启动 Pomotui。
 
+升级时，软件包会尽力重新加载并重启正在运行的 Timer Service。如果安装 hook
+无法访问你的用户服务管理器，它会显示准确的手工重启命令。新 CLI 连接到旧服务时
+也会直接提示版本不匹配；请运行 `systemctl --user restart pomotui.service` 后重试。
+
 ### macOS（Homebrew）
 
 ```sh

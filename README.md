@@ -41,6 +41,12 @@ systemctl --user enable --now pomotui.socket
 The AUR packages install the executables in `/usr/bin`. The command above
 enables the systemd user socket and starts Pomotui immediately.
 
+During upgrades the package makes a best-effort attempt to reload and restart
+an already running Timer Service. If the package hook cannot access your user
+service manager, it prints the exact manual restart command. A newly installed
+CLI that reaches an older service also reports this version mismatch directly;
+run `systemctl --user restart pomotui.service` and retry the command.
+
 ### macOS (Homebrew)
 
 ```sh
