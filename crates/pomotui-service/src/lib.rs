@@ -1871,6 +1871,8 @@ fn today_task_focus(history: &History, start: i64, end: i64) -> Vec<TaskFocusSum
 
 #[derive(Deserialize, Serialize)]
 struct PersistedService {
+    #[serde(default)]
+    data_format_version: u16,
     timer: PersistedTimer,
     tasks: Vec<PersistedTask>,
     next_task_id: u64,
@@ -2000,6 +2002,7 @@ impl PersistedService {
         };
         let clock = PlatformClock::default();
         let persisted = Self {
+            data_format_version: 1,
             timer: PersistedTimer {
                 session,
                 current_task: state.current_task.map(TaskId::get),
@@ -2063,6 +2066,12 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
+        if persisted.data_format_version != 1 {
+            return Err(
+                "database format is incompatible with experimental Task synchronization; full data reset required"
+                    .into(),
+            );
+        }
         let durations = SessionDurations::new(
             persisted.timer.focus_seconds,
             persisted.timer.short_break_seconds,
@@ -2627,6 +2636,23 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pre_lifecycle_database_requires_an_explicit_full_reset() {
+        let service = Service::new();
+        let encoded = PersistedService::encode(&service).expect("encode current state");
+        let mut legacy: serde_json::Value = serde_json::from_str(&encoded).expect("durable JSON");
+        legacy
+            .as_object_mut()
+            .expect("durable object")
+            .remove("data_format_version");
+
+        let error = PersistedService::decode(&legacy.to_string())
+            .err()
+            .expect("legacy state must be rejected");
+
+        assert!(error.contains("full data reset required"));
     }
 
     #[test]
