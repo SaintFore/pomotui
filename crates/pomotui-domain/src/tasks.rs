@@ -14,6 +14,44 @@ pub enum TaskStatus {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskSyncFact<'a> {
+    Version {
+        mutation_time: i64,
+        record_id: &'a str,
+    },
+    Deletion {
+        record_id: &'a str,
+    },
+}
+
+#[must_use]
+pub fn project_task_sync_fact<'a>(
+    facts: impl IntoIterator<Item = TaskSyncFact<'a>>,
+) -> Option<TaskSyncFact<'a>> {
+    let mut winning_version: Option<(i64, &'a str, TaskSyncFact<'a>)> = None;
+    for fact in facts {
+        match fact {
+            deletion @ TaskSyncFact::Deletion { .. } => return Some(deletion),
+            version @ TaskSyncFact::Version {
+                mutation_time,
+                record_id,
+            } => {
+                let replaces_winner =
+                    winning_version
+                        .as_ref()
+                        .is_none_or(|(winning_time, winning_id, _)| {
+                            (mutation_time, record_id) > (*winning_time, *winning_id)
+                        });
+                if replaces_winner {
+                    winning_version = Some((mutation_time, record_id, version));
+                }
+            }
+        }
+    }
+    winning_version.map(|(_, _, fact)| fact)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Task {
     id: TaskId,
@@ -229,6 +267,38 @@ impl fmt::Display for TaskError {
 }
 
 impl std::error::Error for TaskError {}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    #[test]
+    fn latest_task_version_wins_independent_of_input_order() {
+        let older = TaskSyncFact::Version {
+            mutation_time: 10,
+            record_id: "z",
+        };
+        let newer = TaskSyncFact::Version {
+            mutation_time: 11,
+            record_id: "a",
+        };
+        assert_eq!(project_task_sync_fact([older, newer]), Some(newer));
+        assert_eq!(project_task_sync_fact([newer, older]), Some(newer));
+    }
+
+    #[test]
+    fn task_deletion_dominates_versions_independent_of_input_order() {
+        let version = TaskSyncFact::Version {
+            mutation_time: 20,
+            record_id: "version",
+        };
+        let deletion = TaskSyncFact::Deletion {
+            record_id: "deletion",
+        };
+        assert_eq!(project_task_sync_fact([version, deletion]), Some(deletion));
+        assert_eq!(project_task_sync_fact([deletion, version]), Some(deletion));
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRecord {

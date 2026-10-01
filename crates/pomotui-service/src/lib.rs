@@ -1,7 +1,7 @@
 use pomotui_domain::{
     CurrentSession, History, SessionDurations, SessionKind as DomainKind, SessionOutcome,
-    SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, Timer, TimerState,
-    Transition,
+    SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, TaskSyncFact, Timer,
+    TimerState, Transition, project_task_sync_fact,
 };
 use pomotui_platform::{
     Clock, DesktopReminder, PendingReminderEffect, PlatformClock, RecoveryObservation,
@@ -1106,36 +1106,23 @@ impl Service {
                 .task_entities
                 .iter()
                 .find_map(|(local_id, mapped)| (mapped == &entity_id).then_some(*local_id));
-            if records
-                .iter()
-                .any(|record| record.kind == SyncRecordKind::TaskDeleted)
-            {
-                if let Some(local_id) = local_id {
-                    let task_id = TaskId::new(local_id);
-                    if self.tasks.get(task_id).is_ok()
-                        && self.timer.current_task() == Some(task_id)
-                        && matches!(self.timer.current_session(), CurrentSession::Pending(_))
-                    {
-                        self.timer
-                            .detach_pending_task(task_id)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    if self.tasks.get(task_id).is_ok() && self.timer.current_task() != Some(task_id)
-                    {
-                        self.tasks
-                            .delete(task_id, self.timer.current_task())
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
-                continue;
-            }
-            let Some(version) = records.iter().max_by(|left, right| {
-                left.mutation_time
-                    .cmp(&right.mutation_time)
-                    .then_with(|| left.id.cmp(&right.id))
-            }) else {
+            let projected =
+                project_task_sync_fact(records.iter().map(|record| match record.kind {
+                    SyncRecordKind::TaskVersion => TaskSyncFact::Version {
+                        mutation_time: record.mutation_time,
+                        record_id: &record.id,
+                    },
+                    SyncRecordKind::TaskDeleted => TaskSyncFact::Deletion {
+                        record_id: &record.id,
+                    },
+                }));
+            let Some(TaskSyncFact::Version { record_id, .. }) = projected else {
                 continue;
             };
+            let version = records
+                .iter()
+                .find(|record| record.id == record_id)
+                .ok_or_else(|| format!("projected Task record {record_id} is missing"))?;
             let title = version
                 .title
                 .as_deref()
@@ -1164,6 +1151,36 @@ impl Service {
                     SyncTaskStatus::Completed => self.tasks.complete(task_id),
                 }
                 .map_err(|error| error.to_string())?;
+            }
+        }
+        self.apply_deferred_task_deletions()?;
+        Ok(())
+    }
+
+    fn apply_deferred_task_deletions(&mut self) -> Result<(), String> {
+        let deleted_entities = self
+            .sync
+            .records
+            .iter()
+            .filter(|record| record.kind == SyncRecordKind::TaskDeleted)
+            .map(|record| record.entity_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let local_ids = self
+            .sync
+            .task_entities
+            .iter()
+            .filter_map(|(local_id, entity_id)| {
+                deleted_entities
+                    .contains(entity_id.as_str())
+                    .then_some(*local_id)
+            })
+            .collect::<Vec<_>>();
+        for local_id in local_ids {
+            let task_id = TaskId::new(local_id);
+            if self.tasks.get(task_id).is_ok() && self.timer.current_task() != Some(task_id) {
+                self.tasks
+                    .delete(task_id, self.timer.current_task())
+                    .map_err(|error| error.to_string())?;
             }
         }
         Ok(())
@@ -1582,14 +1599,17 @@ impl Handler for Service {
                     self.timer
                         .select_pending_task(id)
                         .map_err(|error| error.to_string())
+                        .and_then(|()| self.apply_deferred_task_deletions())
                 } else if stop_current {
                     let planned = self.timer.planned_seconds();
                     let transition = self.timer.stop(self.now);
-                    self.apply_transition(transition, planned).and_then(|()| {
-                        self.timer
-                            .select_pending_task(id)
-                            .map_err(|error| error.to_string())
-                    })
+                    self.apply_transition(transition, planned)
+                        .and_then(|()| {
+                            self.timer
+                                .select_pending_task(id)
+                                .map_err(|error| error.to_string())
+                        })
+                        .and_then(|()| self.apply_deferred_task_deletions())
                 } else {
                     Err("Current Session must be stopped before switching Task".into())
                 }
@@ -2397,6 +2417,14 @@ mod tests {
             },
         ));
         second.handle(request(Some("import-create"), Command::SyncNow));
+        second.handle(request(
+            Some("start-history"),
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: Some(1),
+            },
+        ));
+        second.handle(request(Some("stop-history"), Command::Stop));
 
         first.handle(request(
             Some("rename"),
@@ -2420,6 +2448,11 @@ mod tests {
             .expect("imported Task");
         assert_eq!(task["title"], "Publish");
         assert_eq!(task["status"], "completed");
+        let Response::Data { value: history } = second.handle(request(None, Command::History))
+        else {
+            panic!("History response");
+        };
+        assert_eq!(history[0]["task_title"], "Draft");
 
         second.handle(request(Some("reopen"), Command::TaskReopen { id: 1 }));
         first.handle(request(Some("import-reopen"), Command::SyncNow));
@@ -2481,7 +2514,27 @@ mod tests {
         assert_eq!(snapshot.current_task_id, Some(1));
 
         second.handle(request(Some("stop"), Command::Stop));
-        second.handle(request(Some("apply-delete"), Command::SyncNow));
+        let Response::Snapshot { snapshot } = second.handle(request(None, Command::Status)) else {
+            panic!("status response");
+        };
+        assert!(snapshot.tasks.iter().any(|task| task.id == 1));
+        second.handle(request(
+            Some("create-replacement"),
+            Command::TaskCreate {
+                title: "Replacement".into(),
+            },
+        ));
+        let Response::Snapshot { snapshot } = second.handle(request(None, Command::Status)) else {
+            panic!("status response");
+        };
+        assert_eq!(snapshot.current_task_id, Some(1));
+        second.handle(request(
+            Some("select-replacement"),
+            Command::TaskSelect {
+                id: 2,
+                stop_current: false,
+            },
+        ));
         let Response::Data { value: tasks } = second.handle(request(None, Command::TaskList))
         else {
             panic!("Task list response");

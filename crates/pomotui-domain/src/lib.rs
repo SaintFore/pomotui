@@ -5,7 +5,8 @@ use core::fmt;
 mod tasks;
 
 pub use tasks::{
-    DailySummary, History, SessionRecord, Task, TaskError, TaskStatus, TaskStore, TaskTitle,
+    DailySummary, History, SessionRecord, Task, TaskError, TaskStatus, TaskStore, TaskSyncFact,
+    TaskTitle, project_task_sync_fact,
 };
 
 /// Identifies the initial protocol-neutral domain model version.
