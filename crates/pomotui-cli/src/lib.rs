@@ -191,12 +191,29 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
         Response::Data { value } => Ok(value.to_string()),
         Response::Accepted => Ok("accepted".into()),
         Response::Error { error } => Err(match error {
+            ProtocolError::Malformed { message } if stale_sync_service(message) => format!(
+                "the installed CLI reached an older Timer Service that does not support synchronization; restart the Timer Service and retry ({message})"
+            ),
             ProtocolError::Rejected { message }
             | ProtocolError::Disconnected { message }
             | ProtocolError::Malformed { message } => message.clone(),
             other => format!("{other:?}"),
         }),
     }
+}
+
+fn stale_sync_service(message: &str) -> bool {
+    message.contains("unknown variant")
+        && [
+            "SyncEnable",
+            "SyncNow",
+            "SyncStatus",
+            "sync_enable",
+            "sync_now",
+            "sync_status",
+        ]
+        .iter()
+        .any(|operation| message.contains(operation))
 }
 
 fn reminder_delivery_label(delivery: &pomotui_protocol::ReminderDelivery) -> String {
@@ -454,6 +471,34 @@ mod tests {
         );
         let json = render(&response, true, false).expect("json");
         assert!(json.contains("\"code\":\"disconnected\""));
+    }
+
+    #[test]
+    fn unknown_sync_operation_identifies_a_stale_timer_service() {
+        let response = Response::Error {
+            error: ProtocolError::Malformed {
+                message: "unknown variant `SyncNow`, expected `Status`".into(),
+            },
+        };
+
+        let error = render(&response, false, false).expect_err("request must fail");
+
+        assert!(error.contains("older Timer Service"));
+        assert!(error.contains("restart"));
+    }
+
+    #[test]
+    fn unrelated_malformed_requests_do_not_claim_the_service_is_stale() {
+        let response = Response::Error {
+            error: ProtocolError::Malformed {
+                message: "request frame is missing a terminator".into(),
+            },
+        };
+
+        assert_eq!(
+            render(&response, false, false),
+            Err("request frame is missing a terminator".into())
+        );
     }
 
     #[test]

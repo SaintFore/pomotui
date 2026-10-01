@@ -1,6 +1,6 @@
 post_install() {
     # Try to enable as the installing user (works with paru + lingering)
-    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
         sudo -u "$SUDO_USER" systemctl --user daemon-reload 2>/dev/null || true
         sudo -u "$SUDO_USER" systemctl --user enable --now pomotui.socket 2>/dev/null && return
     fi
@@ -11,13 +11,18 @@ post_install() {
 }
 
 post_upgrade() {
-    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
-        sudo -u "$SUDO_USER" systemctl --user daemon-reload 2>/dev/null || true
-        sudo -u "$SUDO_USER" systemctl --user try-restart pomotui.service 2>/dev/null || true
-    else
-        systemctl --user daemon-reload 2>/dev/null || true
-        systemctl --user try-restart pomotui.service 2>/dev/null || true
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        if sudo -u "$SUDO_USER" systemctl --user daemon-reload 2>/dev/null \
+            && sudo -u "$SUDO_USER" systemctl --user try-restart pomotui.service 2>/dev/null; then
+            return 0
+        fi
+        echo "WARNING: Pomotui was upgraded, but the Timer Service could not be restarted." >&2
+        echo "Run as $SUDO_USER: systemctl --user restart pomotui.service" >&2
+        return 0
     fi
+    echo "WARNING: Pomotui was upgraded, but the installing user could not be identified." >&2
+    echo "Run in your user session: systemctl --user daemon-reload && systemctl --user restart pomotui.service" >&2
+    return 0
 }
 
 pre_remove() {
