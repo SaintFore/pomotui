@@ -1782,6 +1782,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pomotui-sync"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "pomotui-domain",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "pomotui-tray"
 version = "0.1.0"
 dependencies = [
@@ -2676,6 +2688,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
