@@ -904,11 +904,87 @@ impl Service {
         self.sync.records.push(SyncRecord {
             id: uuid::Uuid::new_v4().to_string(),
             entity_id,
-            kind: SyncRecordKind::TaskCreated,
-            title: title.into(),
-            status: SyncTaskStatus::Open,
+            mutation_time: self.next_sync_mutation_time(),
+            kind: SyncRecordKind::TaskVersion,
+            title: Some(title.into()),
+            status: Some(SyncTaskStatus::Open),
         });
         self.sync.records.sort();
+    }
+
+    fn next_sync_mutation_time(&self) -> i64 {
+        self.sync
+            .records
+            .iter()
+            .map(|record| record.mutation_time)
+            .max()
+            .unwrap_or(i64::MIN)
+            .saturating_add(1)
+            .max(self.wall.saturating_mul(1_000))
+    }
+
+    fn record_task_version(&mut self, task_id: u64) -> Result<(), String> {
+        let task = self
+            .tasks
+            .get(TaskId::new(task_id))
+            .map_err(|error| error.to_string())?;
+        let title = task.title().to_owned();
+        let status = match task.status() {
+            TaskStatus::Open => SyncTaskStatus::Open,
+            TaskStatus::Completed => SyncTaskStatus::Completed,
+        };
+        let entity_id = self
+            .sync
+            .task_entities
+            .get(&task_id)
+            .cloned()
+            .ok_or_else(|| format!("Task {task_id} has no global identity"))?;
+        self.sync.records.push(SyncRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            entity_id,
+            mutation_time: self.next_sync_mutation_time(),
+            kind: SyncRecordKind::TaskVersion,
+            title: Some(title),
+            status: Some(status),
+        });
+        self.sync.records.sort();
+        Ok(())
+    }
+
+    fn record_task_deletion(&mut self, task_id: u64) -> Result<(), String> {
+        let entity_id = self
+            .sync
+            .task_entities
+            .get(&task_id)
+            .cloned()
+            .ok_or_else(|| format!("Task {task_id} has no global identity"))?;
+        self.sync.records.push(SyncRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            entity_id,
+            mutation_time: self.next_sync_mutation_time(),
+            kind: SyncRecordKind::TaskDeleted,
+            title: None,
+            status: None,
+        });
+        self.sync.records.sort();
+        Ok(())
+    }
+
+    fn finish_task_mutation(&mut self, key: Option<&str>) -> Response {
+        match self.persist(key) {
+            Ok(()) => {
+                if self.sync.path.is_some()
+                    && let Err(error) = self.merge_sync_file()
+                {
+                    self.sync.last_error = Some(error);
+                    let _ = self.persist(None);
+                }
+                Response::Snapshot {
+                    snapshot: self.snapshot(),
+                }
+            }
+            Err(error) => self.durable_rejected(error),
+        }
     }
 
     fn merge_sync_file(&mut self) -> Result<usize, String> {
@@ -953,9 +1029,30 @@ impl Service {
                 .map_err(|_| format!("invalid synchronization record identity {}", record.id))?;
             uuid::Uuid::parse_str(&record.entity_id)
                 .map_err(|_| format!("invalid synchronized Task identity {}", record.entity_id))?;
-            validation_store
-                .create(record.title.clone())
-                .map_err(|error| format!("invalid synchronized Task: {error}"))?;
+            match record.kind {
+                SyncRecordKind::TaskVersion => {
+                    let title = record.title.clone().ok_or_else(|| {
+                        format!("synchronized Task version {} has no title", record.id)
+                    })?;
+                    if record.status.is_none() {
+                        return Err(format!(
+                            "synchronized Task version {} has no status",
+                            record.id
+                        ));
+                    }
+                    validation_store
+                        .create(title)
+                        .map_err(|error| format!("invalid synchronized Task: {error}"))?;
+                }
+                SyncRecordKind::TaskDeleted => {
+                    if record.title.is_some() || record.status.is_some() {
+                        return Err(format!(
+                            "synchronized Task deletion {} contains mutable state",
+                            record.id
+                        ));
+                    }
+                }
+            }
         }
         let known: std::collections::HashSet<_> = self
             .sync
@@ -967,19 +1064,13 @@ impl Service {
             if known.contains(&record.id) {
                 continue;
             }
-            let task_id = self
-                .tasks
-                .create(record.title.clone())
-                .map_err(|error| error.to_string())?;
-            self.sync
-                .task_entities
-                .insert(task_id.get(), record.entity_id.clone());
             self.sync.records.push(record);
         }
         self.sync.records.sort();
         self.sync
             .records
             .dedup_by(|left, right| left.id == right.id);
+        self.project_tasks_from_sync_records()?;
         self.persist(None)?;
         let document = SyncDocument {
             format: "pomotui.sync".into(),
@@ -998,6 +1089,75 @@ impl Service {
         self.sync.last_error = None;
         self.persist(None)?;
         Ok(self.sync.records.len())
+    }
+
+    fn project_tasks_from_sync_records(&mut self) -> Result<(), String> {
+        let mut by_entity = std::collections::BTreeMap::<String, Vec<SyncRecord>>::new();
+        for record in &self.sync.records {
+            by_entity
+                .entry(record.entity_id.clone())
+                .or_default()
+                .push(record.clone());
+        }
+        for (entity_id, records) in by_entity {
+            let local_id = self
+                .sync
+                .task_entities
+                .iter()
+                .find_map(|(local_id, mapped)| (mapped == &entity_id).then_some(*local_id));
+            if records
+                .iter()
+                .any(|record| record.kind == SyncRecordKind::TaskDeleted)
+            {
+                if let Some(local_id) = local_id {
+                    let task_id = TaskId::new(local_id);
+                    if self.tasks.get(task_id).is_ok() && self.timer.current_task() != Some(task_id)
+                    {
+                        self.tasks
+                            .delete(task_id, self.timer.current_task())
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                continue;
+            }
+            let Some(version) = records.iter().max_by(|left, right| {
+                left.mutation_time
+                    .cmp(&right.mutation_time)
+                    .then_with(|| left.id.cmp(&right.id))
+            }) else {
+                continue;
+            };
+            let title = version
+                .title
+                .as_deref()
+                .ok_or_else(|| format!("synchronized Task version {} has no title", version.id))?;
+            let status = version
+                .status
+                .ok_or_else(|| format!("synchronized Task version {} has no status", version.id))?;
+            let task_id = if let Some(local_id) = local_id {
+                TaskId::new(local_id)
+            } else {
+                let task_id = self
+                    .tasks
+                    .create(title)
+                    .map_err(|error| error.to_string())?;
+                self.sync
+                    .task_entities
+                    .insert(task_id.get(), entity_id.clone());
+                task_id
+            };
+            if self.tasks.get(task_id).is_ok() {
+                self.tasks
+                    .rename(task_id, title)
+                    .map_err(|error| error.to_string())?;
+                match status {
+                    SyncTaskStatus::Open => self.tasks.reopen(task_id),
+                    SyncTaskStatus::Completed => self.tasks.complete(task_id),
+                }
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn sync_status(&self) -> serde_json::Value {
@@ -1347,34 +1507,42 @@ impl Handler for Service {
                     return Self::rejected("Void Task cannot be renamed");
                 }
                 return match self.tasks.rename(pomotui_domain::TaskId::new(id), title) {
-                    Ok(()) => match self.persist(mutation_key.as_deref()) {
-                        Ok(()) => Response::Snapshot {
-                            snapshot: self.snapshot(),
-                        },
-                        Err(error) => self.durable_rejected(error),
+                    Ok(()) => match self.record_task_version(id) {
+                        Ok(()) => self.finish_task_mutation(mutation_key.as_deref()),
+                        Err(error) => Self::rejected(error),
                     },
                     Err(error) => Self::task_rejected(error),
                 };
             }
             Command::TaskComplete { id } => {
                 if self.void_task_id == Some(id) {
-                    Err("Void Task cannot be completed".into())
+                    return Self::rejected("Void Task cannot be completed");
                 } else {
-                    self.tasks
-                        .complete(pomotui_domain::TaskId::new(id))
-                        .map_err(|error| error.to_string())
+                    return match self.tasks.complete(pomotui_domain::TaskId::new(id)) {
+                        Ok(()) => match self.record_task_version(id) {
+                            Ok(()) => self.finish_task_mutation(mutation_key.as_deref()),
+                            Err(error) => Self::rejected(error),
+                        },
+                        Err(error) => Self::task_rejected(error),
+                    };
                 }
             }
-            Command::TaskReopen { id } => self
-                .tasks
-                .reopen(pomotui_domain::TaskId::new(id))
-                .map_err(|error| error.to_string()),
+            Command::TaskReopen { id } => {
+                return match self.tasks.reopen(pomotui_domain::TaskId::new(id)) {
+                    Ok(()) => match self.record_task_version(id) {
+                        Ok(()) => self.finish_task_mutation(mutation_key.as_deref()),
+                        Err(error) => Self::rejected(error),
+                    },
+                    Err(error) => Self::task_rejected(error),
+                };
+            }
             Command::TaskDelete { id } => {
                 if self.void_task_id == Some(id) {
                     return Self::rejected("Void Task cannot be deleted");
                 }
                 let id = pomotui_domain::TaskId::new(id);
-                self.tasks
+                let result = self
+                    .tasks
                     .get(id)
                     .map_err(|error| error.to_string())
                     .and_then(|_| {
@@ -1387,7 +1555,14 @@ impl Handler for Service {
                             .delete(id, self.timer.current_task())
                             .map(drop)
                             .map_err(|error| error.to_string())
-                    })
+                    });
+                return match result {
+                    Ok(()) => match self.record_task_deletion(id.get()) {
+                        Ok(()) => self.finish_task_mutation(mutation_key.as_deref()),
+                        Err(error) => Self::rejected(error),
+                    },
+                    Err(error) => Self::rejected(error),
+                };
             }
             Command::TaskSelect { id, stop_current } => {
                 let id = pomotui_domain::TaskId::new(id);
@@ -2165,6 +2340,77 @@ mod tests {
             64
         );
         assert_eq!(json["records"].as_array().expect("records").len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn task_rename_completion_and_reopen_converge_between_services() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-task-updates-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        first.handle(request(
+            Some("enable-first"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        second.handle(request(
+            Some("enable-second"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        first.handle(request(
+            Some("create"),
+            Command::TaskCreate {
+                title: "Draft".into(),
+            },
+        ));
+        second.handle(request(Some("import-create"), Command::SyncNow));
+
+        first.handle(request(
+            Some("rename"),
+            Command::TaskRename {
+                id: 1,
+                title: "Publish".into(),
+            },
+        ));
+        first.handle(request(Some("complete"), Command::TaskComplete { id: 1 }));
+        second.handle(request(Some("import-updates"), Command::SyncNow));
+
+        let Response::Data { value: tasks } = second.handle(request(None, Command::TaskList))
+        else {
+            panic!("Task list response");
+        };
+        let task = tasks
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .find(|task| task["id"] == 1)
+            .expect("imported Task");
+        assert_eq!(task["title"], "Publish");
+        assert_eq!(task["status"], "completed");
+
+        second.handle(request(Some("reopen"), Command::TaskReopen { id: 1 }));
+        first.handle(request(Some("import-reopen"), Command::SyncNow));
+        let Response::Data { value: tasks } = first.handle(request(None, Command::TaskList)) else {
+            panic!("Task list response");
+        };
+        let task = tasks
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .find(|task| task["id"] == 1)
+            .expect("local Task");
+        assert_eq!(task["status"], "open");
 
         let _ = std::fs::remove_dir_all(root);
     }

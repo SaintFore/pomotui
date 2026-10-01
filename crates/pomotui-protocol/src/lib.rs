@@ -117,22 +117,25 @@ pub enum Command {
 pub struct SyncRecord {
     pub id: String,
     pub entity_id: String,
+    pub mutation_time: i64,
     #[serde(rename = "type")]
     pub kind: SyncRecordKind,
-    pub title: String,
-    pub status: SyncTaskStatus,
+    pub title: Option<String>,
+    pub status: Option<SyncTaskStatus>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncRecordKind {
-    TaskCreated,
+    TaskVersion,
+    TaskDeleted,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncTaskStatus {
     Open,
+    Completed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
