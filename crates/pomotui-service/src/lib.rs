@@ -987,6 +987,7 @@ impl Service {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn merge_sync_file(&mut self) -> Result<usize, String> {
         let path = self
             .sync
@@ -1527,15 +1528,14 @@ impl Handler for Service {
             Command::TaskComplete { id } => {
                 if self.void_task_id == Some(id) {
                     return Self::rejected("Void Task cannot be completed");
-                } else {
-                    return match self.tasks.complete(pomotui_domain::TaskId::new(id)) {
-                        Ok(()) => match self.record_task_version(id) {
-                            Ok(()) => self.finish_task_mutation(mutation_key.as_deref()),
-                            Err(error) => Self::rejected(error),
-                        },
-                        Err(error) => Self::task_rejected(error),
-                    };
                 }
+                return match self.tasks.complete(pomotui_domain::TaskId::new(id)) {
+                    Ok(()) => match self.record_task_version(id) {
+                        Ok(()) => self.finish_task_mutation(mutation_key.as_deref()),
+                        Err(error) => Self::rejected(error),
+                    },
+                    Err(error) => Self::task_rejected(error),
+                };
             }
             Command::TaskReopen { id } => {
                 return match self.tasks.reopen(pomotui_domain::TaskId::new(id)) {
@@ -2501,6 +2501,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn offline_task_versions_converge_deterministically_and_keep_same_titles_distinct() {
         let root = std::env::temp_dir().join(format!(
             "pomotui-task-conflict-{}-{:?}",
