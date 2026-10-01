@@ -1,17 +1,41 @@
+<div align="center">
+
+<img src="./favicon_io/pomotui-512x512.png" alt="Pomotui logo" align="center" height="96" />
+
 # Pomotui
 
-[![English](https://img.shields.io/badge/English-README-blue?style=flat&logo=readthedocs&logoColor=white)](README.md)
+*一个终端番茄钟——无论你关掉哪个界面，计时都不会停止。*
+
+[![Build Status](https://img.shields.io/github/actions/workflow/status/SaintFore/pomotui/ci.yml?style=flat-square&label=Build)](https://github.com/SaintFore/pomotui/actions/workflows/ci.yml)
+![Rust](https://img.shields.io/badge/Rust-edition%202024-000000?style=flat-square&logo=rust&logoColor=white)
+[![English](https://img.shields.io/badge/English-README-blue?style=flat-square&logo=readthedocs&logoColor=white)](README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Pomotui 是一个终端番茄钟计时器，提供三种前端：
+[概览](#概览) • [安装](#安装) • [TUI](#使用-tui) • [CLI](#使用-cli) • [Waybar](#添加到-waybar) • [同步](#在多台电脑之间同步共享活动) • [开发](#开发)
+
+![Pomotui TUI 仪表盘](https://tree-1327913400.cos.ap-nanjing.myqcloud.com/world/20260731122427701.webp)
+
+</div>
+
+## 概览
+
+Pomotui 是一个驻留在终端里的番茄钟，提供三种前端：
 
 - 键盘优先的 Ratatui 仪表盘；
 - 可脚本化的命令行工具；
 - 轮询式 Waybar 模块。
 
-一个持久化的计时服务拥有当前会话，关闭 TUI 或重启 Waybar 不会停止计时。任务、会话历史、每日统计、重启恢复、桌面提醒和完成音效都集中存储和协调。任务还可以通过一个文件，在多台电脑之间最终收敛；文件传输继续使用你已有的同步工具。
+一个持久化的**计时服务**拥有当前会话，因此关闭 TUI 或重启 Waybar 不会停止时间推进。任务、会话历史、每日统计、重启恢复、桌面提醒和完成音效都集中存储和协调。任务还可以通过一个文件在多台电脑之间收敛；文件传输继续使用你已有的复制工具。
 
-![Pomotui TUI 仪表盘](https://tree-1327913400.cos.ap-nanjing.myqcloud.com/world/20260731122427701.webp)
+## 特性
+
+- **持久计时器** — 即使所有前端都已关闭，会话仍在计时服务中持续推进
+- **三种前端** — TUI 仪表盘、CLI 和 Waybar 模块观察并控制同一个会话
+- **任务与历史** — 任务生命周期、持久会话历史、每日统计和七日趋势
+- **行动链条与奖励** — 复盘的会话累积成链条；奖励里程碑可以解锁并领取
+- **跨设备收敛** — 通过一个与提供商无关的文件同步任务、历史、复盘和链条
+- **桌面集成** — 通知、完成音效、systemd 用户 socket、应用启动器入口
+- **双语界面** — 英文和简体中文，可在设置中切换
 
 ## 系统要求
 
@@ -38,13 +62,8 @@ systemctl --user enable --now pomotui.socket
 AUR 软件包会将可执行文件安装到 `/usr/bin`。上述命令会启用 systemd 用户
 socket，并立即启动 Pomotui。
 
-使用下面的命令更新 git 软件包及其他 VCS 依赖：
-
-```sh
-paru -Syu --devel
-```
-
-升级后，软件包会尽力重启 Timer Service。如果出现重启警告，请运行：
+使用 `paru -Syu --devel` 更新 git 软件包及其他 VCS 依赖。
+升级后，软件包会尽力重启计时服务。如果出现重启警告，请运行：
 
 ```sh
 systemctl --user daemon-reload
@@ -60,7 +79,7 @@ brew services start pomotui
 pomotui-tray   # 可选：菜单栏计时器
 ```
 
-### Linux（从源码构建）
+### 从源码构建（Linux）
 
 为当前用户构建和安装，无需 `sudo`：
 
@@ -72,12 +91,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now pomotui.socket
 ```
 
-重新构建、安装并重启：
-
-```sh
-./packaging/rebuild-restart.sh
-```
-
+更新源码后，运行 `./packaging/rebuild-restart.sh` 重新构建、安装并重启。
 这会保留现有配置、任务和会话历史。
 
 默认安装将可执行文件放在 `~/.local/bin`。确保该目录在 `PATH` 中，然后验证服务：
@@ -87,9 +101,10 @@ pomotui status
 systemctl --user status pomotui.socket
 ```
 
-安装程序会保留现有用户配置。
-
-安装后，桌面应用启动器可以找到 **Pomotui 番茄钟**。打开它会在桌面配置的终端中启动 TUI。
+> [!NOTE]
+> 安装程序会保留现有用户配置。安装后，桌面应用启动器可以找到
+> **Pomotui**（简体中文语言环境下为 **Pomotui 番茄钟**）。打开它会在桌面
+> 配置的终端中启动 TUI。
 
 ## 使用 TUI
 
@@ -122,8 +137,11 @@ pomotui-tui
 | `Esc` | 关闭覆盖层 |
 | `q` | 关闭 TUI（不停止计时服务） |
 
-删除任务需要确认，且不会删除现有会话历史。单行编辑器预填现有值，支持方向键、Home/End、Delete 和 Emacs/Readline 快捷键子集：`C-a/e/b/f`、`M-b/f`、`C-h/d/w`、`M-d`、`C-k/u/y`。
-在设置中按 `g` 可切换英文和简体中文；选择会保存到用户配置。
+> [!TIP]
+> 删除任务需要确认，且不会删除现有会话历史。单行编辑器预填现有值，支持
+> 方向键、Home/End、Delete 和 Emacs/Readline 快捷键子集：`C-a/e/b/f`、
+> `M-b/f`、`C-h/d/w`、`M-d`、`C-k/u/y`。在设置中按 `g` 可切换英文和简体
+> 中文；选择会保存到用户配置。
 
 ## 使用 CLI
 
@@ -138,9 +156,12 @@ pomotui review success --reflection "完成了垂直切片"
 pomotui chain
 ```
 
-其他命令包括 `start short-break`、`start long-break`、`skip`、`history`、`summary` 以及完整的任务生命周期：`create/rename/complete/reopen/delete`。与脚本集成时使用 `--json`。
+其他命令包括 `start short-break`、`start long-break`、`skip`、`history`、
+`summary` 以及完整的任务生命周期：`create/rename/complete/reopen/delete`。
+与脚本集成时对 status、history 等命令使用 `--json`。
 
-使用 `stop --review` 将提前结束的专注会话送去复盘，或 `stop --no-review` 记录但不影响行动链条。失败的复盘需要复盘内容：
+使用 `stop --review` 将提前结束的专注会话送去复盘，或 `stop --no-review`
+记录但不影响行动链条。失败的复盘需要复盘内容：
 
 ```sh
 pomotui review failure "被打断，丢失了思路"
@@ -150,25 +171,13 @@ pomotui reward list
 pomotui reward claim 1
 ```
 
-当复盘的会话没有任务时，用 `--task ID` 分配，或用 `--void "链条条目标题"`。使用 `--json` 获取稳定的内部标识符。
-
-## 在多台电脑之间同步任务
-
-Pomotui 可以通过一个与提供商无关的文件，让任务创建、重命名、完成、重新打开和删除在多台电脑之间收敛。把这个文件放进 Syncthing、Dropbox、iCloud Drive、Nextcloud 或其他文件复制工具管理的目录，然后在每台电脑上分别启用：
-
-```sh
-pomotui sync enable "$HOME/Sync/pomotui.sync"
-pomotui sync now
-pomotui sync status
-```
-
-不同电脑可以使用不同的本地路径。离线时可以继续工作；文件同步工具传输完成后，在两边分别执行 `pomotui sync now` 即可合并。标题相同的任务仍保持不同身份，并发编辑会确定性解决；如果删除的任务正被本机当前会话使用，删除会延迟生效，不会破坏计时。
-
-目前同步范围是任务。当前会话、专注循环进度、待复盘、时长设置和界面偏好仍保留在各自电脑上。同步文件是交换文档，不能代替本地 SQLite 数据库备份。恢复和故障排查请参阅[用户指南](docs/user-guide.md#cross-device-task-synchronization)。
+当复盘的会话没有任务时，用 `--task ID` 分配，或用 `--void "链条条目标题"`。
+使用 `--json` 获取稳定的内部标识符，用于编辑条目或领取奖励。
 
 ## 添加到 Waybar
 
-在 Waybar 的 `modules-left`、`modules-center` 或 `modules-right` 数组中添加 `"custom/pomotui"`，然后添加模块配置：
+在 Waybar 的 `modules-left`、`modules-center` 或 `modules-right` 数组中添加
+`"custom/pomotui"`，然后添加顶层模块配置：
 
 ```jsonc
 "custom/pomotui": {
@@ -205,6 +214,29 @@ pkill -SIGUSR2 waybar
 }
 ```
 
+## 在多台电脑之间同步共享活动
+
+Pomotui 通过一个与提供商无关的文件，收敛任务、已结束的会话历史、已提交的
+会话复盘、行动链条、奖励里程碑、解锁和领取记录。把这个文件放进你已有的
+文件复制工具（Syncthing、Dropbox、iCloud Drive、Nextcloud 等）管理的目录，
+然后在每台电脑上分别启用：
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync now
+pomotui sync status
+```
+
+不同电脑可以使用不同的本地路径。离线时可以继续工作；文件复制工具传输完成
+后，在两边分别执行 `pomotui sync now` 即可合并。标题相同的任务仍保持不同
+身份，并发编辑会确定性解决；删除不会使本机当前会话正在使用的任务失效。
+
+> [!IMPORTANT]
+> 当前会话、专注循环进度、待复盘、会话时长设置和界面偏好仍保留在各自的
+> 电脑上。同步文件是交换文档，不是复制完成的证明，也不能代替本地 SQLite
+> 数据库备份。冲突、升级、路径变更、恢复和故障排查流程请参阅
+> [用户指南](docs/user-guide.md#cross-device-synchronization)。
+
 ## 配置和数据
 
 Pomotui 遵循 XDG 基目录规范：
@@ -215,9 +247,10 @@ Pomotui 遵循 XDG 基目录规范：
 | SQLite 数据和会话历史 | `~/.local/share/pomotui/pomotui.sqlite3` |
 | 运行时 socket | `$XDG_RUNTIME_DIR/pomotui/pomotui.sock` |
 
-配置涵盖会话时长、专注周期轮数、主题、界面语言（`en` 或 `zh-CN`）、通知、声音、音量和完成动画。
+配置涵盖会话时长、专注周期轮数、主题、界面语言（`en` 或 `zh-CN`）、通知、
+声音、音量和完成动画。
 
-备份和恢复指南参见[用户手册](docs/user-guide.md#backup-and-restore)。
+备份和恢复指南参见[用户指南](docs/user-guide.md#backup-and-restore)。
 
 ## 卸载
 
@@ -237,6 +270,19 @@ Pomotui 遵循 XDG 基目录规范：
 
 ## 开发
 
+Pomotui 是一个 Cargo 工作区，具有严格的 crate 分层：
+
+| Crate | 职责 |
+| --- | --- |
+| `pomotui-domain` | 产品模型和与基础设施无关的端口 |
+| `pomotui-service` | 拥有会话推进的持久计时服务 |
+| `pomotui-tui` | Ratatui 仪表盘 |
+| `pomotui-cli` | `pomotui` 命令行 |
+| `pomotui-tray` | macOS 菜单栏计时器 |
+| `pomotui-sync` | 与提供商无关的同步文档和收敛引擎 |
+| `pomotui-protocol` | 计时前端共享的带版本换行分隔 JSON 协议 |
+| `pomotui-platform` | SQLite、时钟、通知、音频和服务生命周期适配器 |
+
 运行 CI 使用的相同检查：
 
 ```sh
@@ -246,4 +292,5 @@ cargo test --workspace --all-targets --all-features
 tests/e2e.sh
 ```
 
-[领域语言](CONTEXT.md)、[已接受的决策](docs/adr/)、[v1 规范](.scratch/pomotui-v1/spec.md)和[crate 边界策略](docs/architecture/crate-boundaries.md)更详细地解释了产品和架构。
+[领域语言](CONTEXT.md)、[已接受的决策](docs/adr/)和
+[crate 边界策略](docs/architecture/crate-boundaries.md)更详细地解释了产品和架构。
