@@ -1531,6 +1531,14 @@ impl Service {
         &mut self,
         review: SubmittedSessionReviewSync,
     ) -> Result<(), String> {
+        self.record_submitted_session_review_with_entity(review, EntityId::random())
+    }
+
+    fn record_submitted_session_review_with_entity(
+        &mut self,
+        review: SubmittedSessionReviewSync,
+        review_entity_id: EntityId,
+    ) -> Result<(), String> {
         let session_entity_id = self
             .sync
             .session_entities
@@ -1549,7 +1557,6 @@ impl Service {
         } else {
             self.sync.task_entities[&review.task_id].clone()
         };
-        let review_entity_id = EntityId::random();
         self.sync
             .session_review_entries
             .insert(review_entity_id.clone(), review.entry_id);
@@ -1667,8 +1674,9 @@ impl Service {
             .filter(|review| !known_entries.contains(&review.entry_id))
             .collect::<Vec<_>>();
         missing_reviews.sort_by_key(|review| review.entry_id);
-        for review in missing_reviews {
-            self.record_submitted_session_review(review)?;
+        let ordered_review_entities = migration_ordered_entities(missing_reviews.len())?;
+        for (review, entity) in missing_reviews.into_iter().zip(ordered_review_entities) {
+            self.record_submitted_session_review_with_entity(review, entity)?;
         }
         let missing_milestones = self
             .reward_milestones
@@ -3063,6 +3071,21 @@ fn today_task_focus(history: &History, start: i64, end: i64) -> Vec<TaskFocusSum
             .then_with(|| left.task_title.cmp(&right.task_title))
     });
     summaries
+}
+
+fn migration_ordered_entities(count: usize) -> Result<Vec<EntityId>, String> {
+    const UUID_SUFFIX_LIMIT: usize = 0x0000_ffff_ffff_ffff;
+    if count > UUID_SUFFIX_LIMIT {
+        return Err("legacy Session Review count exceeds migration identity capacity".into());
+    }
+    let seed = EntityId::random();
+    let prefix = seed
+        .as_str()
+        .get(..24)
+        .ok_or_else(|| "generated migration identity is invalid".to_owned())?;
+    (1..=count)
+        .map(|ordinal| EntityId::parse(&format!("{prefix}{ordinal:012x}")))
+        .collect()
 }
 
 #[derive(Deserialize, Serialize)]
