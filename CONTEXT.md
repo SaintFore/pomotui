@@ -13,8 +13,20 @@ An interface that displays or controls the Timer Service without owning timer pr
 _Avoid_: Timer, timer process
 
 **Current Session**:
-The user's single shared Running, Paused, or Pending Session. Every Timer Frontend observes and controls the same Current Session; Tasks and terminal windows cannot own concurrent timers.
+The single shared Running, Paused, or Pending Session on one Device. Every Timer Frontend on that Device observes and controls the same Current Session; different Devices may have independent Current Sessions, and only facts from ended Sessions enter Shared Activity.
 _Avoid_: Window timer, task timer
+
+**Device**:
+One Pomotui installation with its own Timer Service, Current Session, and Focus Cycle. A Device may work offline and later exchange Shared Activity with the user's other Devices; Pomotui does not maintain a user-visible registry of Devices.
+_Avoid_: Account, client, computer name
+
+**Shared Activity**:
+The converged collection of ended Session facts and submitted Session Reviews from all of the user's Devices. It is the source for cross-device Session History, statistics, Action Chains, and Reward Milestones; live Current Sessions, Focus Cycle progress, and unsubmitted Pending Reviews are not part of it.
+_Avoid_: Synced database, cloud state, backup
+
+**Review Order**:
+The deterministic cross-device order of submitted Session Reviews in Shared Activity. It decides Action Chain membership and reward progress and may be revised when an older offline review arrives, without changing the immutable content of any review.
+_Avoid_: File order, sync order, device order
 
 **Focus Session**:
 A bounded period in which the user intends to focus on the current task.
@@ -41,7 +53,7 @@ The single system-owned Task used when a reviewed Focus Session had no Current T
 _Avoid_: Missing Task, a newly created `Void` Task, empty Task
 
 **Action Chain**:
-The user's single current sequence of successful, explicitly reviewed Focus Sessions. Pomotui always maintains exactly one current Action Chain, including when its length is zero; a failed review atomically ends the old chain and creates a new empty current chain. A Focus Session that reaches its deadline or is stopped after starting requires Session Review; each successful review appends one Chain Link, while a failed review ends the current Action Chain without deleting the information needed for later reflection. An Action Chain never expires or breaks because of midnight, elapsed days, shutdown, inactivity, Break Sessions, or claimed rewards.
+The user's single current sequence of successful, explicitly reviewed Focus Sessions across Shared Activity. Pomotui always maintains exactly one current Action Chain, including when its length is zero; in Review Order, each successful review appends one Chain Link while a failed review ends the old chain and creates a new empty current chain. A Focus Session that reaches its deadline or is stopped after starting requires Session Review. An Action Chain never expires or breaks because of midnight, elapsed days, shutdown, inactivity, Break Sessions, synchronization, or claimed rewards.
 _Avoid_: Task tree, mind map, Focus Cycle
 
 **Chain Link**:
@@ -65,7 +77,7 @@ User-authored text attached during or after Session Review to describe progress,
 _Avoid_: Comment, Task description, Session Outcome
 
 **Reward Milestone**:
-A user-configured Action Chain length and real-world reward promise. Reaching the length unlocks the reward once for the current Action Chain; adding a milestone or lowering its threshold may immediately unlock it when the current chain is already long enough. The user explicitly claims it and Pomotui records the claim without purchasing, paying, or performing the reward. Unlocking snapshots the reward name, threshold, and optional budget so later configuration changes cannot rewrite history. Claimed rewards remain part of an Ended Chain's history, while unlocked but unclaimed rewards become unavailable when the chain ends; configuration changes never retroactively affect Ended Chains.
+A user-configured Action Chain length and real-world reward promise. Reaching the length unlocks the reward once for the current Action Chain; adding a milestone or lowering its threshold may immediately unlock it when the current chain is already long enough. The user explicitly claims it and Pomotui records the claim without purchasing, paying, or performing the reward. Unlocking snapshots the reward name, threshold, and optional budget so later configuration changes cannot rewrite history. Claimed rewards remain historical facts even when late Shared Activity revises Review Order, while unlocked but unclaimed rewards follow the latest projected Action Chain; configuration changes never retroactively affect Ended Chains.
 _Avoid_: Account balance, automatic payment, Completed Round reward
 
 **Session Review**:
@@ -89,7 +101,7 @@ A Focus Session that reached its planned deadline. A stopped or skipped Focus Se
 _Avoid_: Completed task, elapsed session
 
 **Focus Cycle**:
-A configurable number of Completed Rounds separated by Short Breaks and followed by a Long Break. The default cycle contains four Completed Rounds; interrupted Focus Sessions do not advance it, and completing the Long Break resets it.
+A per-Device sequence of a configurable number of Completed Rounds separated by Short Breaks and followed by a Long Break. The default cycle contains four Completed Rounds; interrupted Focus Sessions and Shared Activity imported from other Devices do not advance it, and completing the Long Break resets it.
 _Avoid_: Session, round
 
 **Session Durations**:
