@@ -241,6 +241,7 @@ pub enum TaskProjection {
     },
     Deleted {
         entity_id: EntityId,
+        last_title: Option<String>,
     },
 }
 
@@ -295,6 +296,7 @@ pub enum ActivityProjection {
 /// Produces the retained record union and its deterministic projections.
 pub fn plan_sync(local: &[Record], incoming: &[Record]) -> Result<SyncPlan, String> {
     let retained_records = union(local, incoming)?;
+    validate_records(&retained_records)?;
     let task_projections = project_tasks(&retained_records);
     let activity_projections = project_activity(&retained_records);
     Ok(SyncPlan {
@@ -321,7 +323,20 @@ pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
                 .iter()
                 .any(|record| matches!(record.payload, RecordPayload::TaskDeleted))
             {
-                return Some(TaskProjection::Deleted { entity_id });
+                let last_title = records
+                    .iter()
+                    .filter_map(|record| match &record.payload {
+                        RecordPayload::TaskVersion { title, .. } => {
+                            Some((record.mutation_time, &record.id, title))
+                        }
+                        _ => None,
+                    })
+                    .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
+                    .map(|(_, _, title)| title.clone());
+                return Some(TaskProjection::Deleted {
+                    entity_id,
+                    last_title,
+                });
             }
             records
                 .into_iter()
@@ -455,6 +470,25 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             if entry.1 > 1 {
                 return Err("synchronized Session has more than one ended fact".into());
             }
+        }
+    }
+    let task_entities = records
+        .iter()
+        .filter_map(|record| {
+            matches!(record.payload, RecordPayload::TaskVersion { .. }).then_some(&record.entity_id)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for record in records {
+        if let RecordPayload::SessionEnded {
+            task_entity_id: Some(task_entity_id),
+            ..
+        } = &record.payload
+            && !task_entities.contains(task_entity_id)
+        {
+            return Err(format!(
+                "synchronized Session references unknown Task identity {}",
+                task_entity_id.as_str()
+            ));
         }
     }
     Ok(())

@@ -110,7 +110,10 @@ fn task_projection_is_deterministic_and_deletion_is_permanent() {
 
     assert_eq!(
         pomotui_sync::project_tasks(&[older, newer, deletion]),
-        vec![pomotui_sync::TaskProjection::Deleted { entity_id: entity }],
+        vec![pomotui_sync::TaskProjection::Deleted {
+            entity_id: entity,
+            last_title: Some("Newer".into()),
+        }],
     );
 }
 
@@ -140,7 +143,8 @@ fn sync_engine_plans_the_retained_union_and_task_projection_together() {
 #[test]
 fn ended_sessions_project_once_and_a_tombstone_permanently_hides_them() {
     let session = ended_session(20, 30, Some(16));
-    let plan = plan_sync(&[], std::slice::from_ref(&session)).expect("valid Session record");
+    let task = task_version(19, 16, 2_000, "Snapshot");
+    let plan = plan_sync(&[], &[task.clone(), session.clone()]).expect("valid Session record");
     assert_eq!(
         plan.activity_projections(),
         &[ActivityProjection::Session {
@@ -163,11 +167,22 @@ fn ended_sessions_project_once_and_a_tombstone_permanently_hides_them() {
         MutationInstant::from_millis(4_000).expect("mutation instant"),
         RecordPayload::SessionDeleted,
     );
-    let plan = plan_sync(&[session], &[deletion]).expect("valid tombstone");
+    let plan = plan_sync(&[task, session], &[deletion]).expect("valid tombstone");
     assert_eq!(
         plan.activity_projections(),
         &[ActivityProjection::Deleted {
             entity_id: EntityId::parse("00000000-0000-0000-0000-00000000001e").expect("entity")
         }]
+    );
+}
+
+#[test]
+fn sync_plan_rejects_a_session_referencing_an_unknown_task_identity() {
+    let error = plan_sync(&[], &[ended_session(20, 30, Some(16))])
+        .expect_err("unknown Task reference must fail before orchestration");
+
+    assert!(
+        error.contains("unknown Task identity"),
+        "unexpected error: {error}"
     );
 }

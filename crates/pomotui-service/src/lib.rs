@@ -379,8 +379,10 @@ impl Service {
         self.sync.file_record_count = Some(file_record_count);
         if let Err(error) = self
             .apply_task_projections(plan.task_projections())
-            .and_then(|()| self.apply_activity_projections(plan.activity_projections()))
-            .and_then(|()| self.persist(None))
+            .and_then(|()| {
+                self.apply_activity_projections(plan.activity_projections());
+                self.persist(None)
+            })
         {
             self.sync = old_sync;
             self.tasks = old_tasks;
@@ -1131,6 +1133,47 @@ impl Service {
         self.sync.records.sort();
     }
 
+    fn backfill_sync_records(&mut self) -> Result<(), String> {
+        let missing_tasks = self
+            .tasks
+            .all()
+            .iter()
+            .filter(|task| {
+                Some(task.id().get()) != self.void_task_id
+                    && !self.sync.task_entities.contains_key(&task.id().get())
+            })
+            .map(|task| (task.id().get(), task.title().to_owned(), task.status()))
+            .collect::<Vec<_>>();
+        for (task_id, title, status) in missing_tasks {
+            self.record_task_creation(task_id, &title);
+            if status == TaskStatus::Completed {
+                self.record_task_version(task_id)?;
+            }
+        }
+        let deleted_task_snapshots = self
+            .history
+            .records()
+            .iter()
+            .filter_map(|record| Some((record.task_id?.get(), record.task_title.clone()?)))
+            .filter(|(task_id, _)| !self.sync.task_entities.contains_key(task_id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (task_id, title) in deleted_task_snapshots {
+            self.record_task_creation(task_id, &title);
+            self.record_task_deletion(task_id)?;
+        }
+        let missing_sessions = self
+            .history
+            .records()
+            .iter()
+            .filter(|record| !self.sync.session_entities.contains_key(&record.id))
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        for session_id in missing_sessions {
+            self.record_ended_session(session_id);
+        }
+        Ok(())
+    }
+
     fn finish_task_mutation(&mut self, key: Option<&str>) -> Response {
         match self.persist(key) {
             Ok(()) => {
@@ -1166,7 +1209,7 @@ impl Service {
         let plan = plan_sync(&self.sync.records, &incoming)?;
         self.sync.records = plan.retained_records().to_vec();
         self.apply_task_projections(plan.task_projections())?;
-        self.apply_activity_projections(plan.activity_projections())?;
+        self.apply_activity_projections(plan.activity_projections());
         self.persist(None)?;
         let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
         replace_sync_file(&path, &serialized)?;
@@ -1201,14 +1244,21 @@ impl Service {
 
     fn apply_task_projections(&mut self, projections: &[TaskProjection]) -> Result<(), String> {
         for projection in projections.iter().cloned() {
-            let TaskProjection::Version {
-                entity_id,
-                title,
-                status,
-                ..
-            } = projection
-            else {
-                continue;
+            let (entity_id, title, status) = match projection {
+                TaskProjection::Version {
+                    entity_id,
+                    title,
+                    status,
+                    ..
+                } => (entity_id, title, Some(status)),
+                TaskProjection::Deleted {
+                    entity_id,
+                    last_title: Some(title),
+                } => (entity_id, title, None),
+                TaskProjection::Deleted {
+                    entity_id: _,
+                    last_title: None,
+                } => continue,
             };
             let local_id = self
                 .sync
@@ -1232,8 +1282,8 @@ impl Service {
                     .rename(task_id, &title)
                     .map_err(|error| error.to_string())?;
                 match status {
-                    SyncTaskStatus::Open => self.tasks.reopen(task_id),
-                    SyncTaskStatus::Completed => self.tasks.complete(task_id),
+                    Some(SyncTaskStatus::Open) | None => self.tasks.reopen(task_id),
+                    Some(SyncTaskStatus::Completed) => self.tasks.complete(task_id),
                 }
                 .map_err(|error| error.to_string())?;
             }
@@ -1242,10 +1292,7 @@ impl Service {
         Ok(())
     }
 
-    fn apply_activity_projections(
-        &mut self,
-        projections: &[ActivityProjection],
-    ) -> Result<(), String> {
+    fn apply_activity_projections(&mut self, projections: &[ActivityProjection]) {
         for projection in projections {
             match projection {
                 ActivityProjection::Deleted { entity_id } => {
@@ -1276,19 +1323,15 @@ impl Service {
                     {
                         continue;
                     }
-                    let task_id = task_entity_id.as_ref().and_then(|global_id| {
+                    let task_id = task_entity_id.as_ref().map(|global_id| {
                         self.sync
                             .task_entities
                             .iter()
                             .find_map(|(local_id, mapped)| {
                                 (mapped == global_id).then_some(TaskId::new(*local_id))
                             })
+                            .expect("validated SyncPlan applies Task projections before Sessions")
                     });
-                    if task_entity_id.is_some() && task_id.is_none() {
-                        return Err(
-                            "synchronized Session references an unknown Task identity".into()
-                        );
-                    }
                     let local_id = self.next_event_id;
                     self.next_event_id = self.next_event_id.saturating_add(1);
                     self.history.push(SessionRecord {
@@ -1317,7 +1360,6 @@ impl Service {
             })
         });
         self.history = History::restore(records);
-        Ok(())
     }
 
     fn apply_deferred_task_deletions(&mut self) -> Result<(), String> {
@@ -1688,6 +1730,9 @@ impl Handler for Service {
                 };
             }
             Command::SyncEnable { path } => {
+                if let Err(error) = self.backfill_sync_records() {
+                    return Self::rejected(error);
+                }
                 self.sync.path = Some(path);
                 self.sync.warning = None;
                 if let Err(error) = self.persist(mutation_key.as_deref()) {
@@ -3291,6 +3336,123 @@ mod tests {
         assert_eq!(second.snapshot().completed_rounds, 0);
         assert!(second.pending_review.is_none());
         assert!(first.pending_review.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enabling_sync_backfills_existing_history_and_its_later_deletion() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-existing-history-sync-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        first.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Existing work".into(),
+            },
+        ));
+        first.history.push(SessionRecord {
+            id: 1,
+            ended_at: first.wall,
+            kind: DomainKind::Focus,
+            outcome: SessionOutcome::Stopped,
+            planned_seconds: 1_500,
+            actual_seconds: 420,
+            task_id: Some(TaskId::new(1)),
+            task_title: Some("Existing work".into()),
+        });
+        first.next_event_id = 2;
+
+        first.handle(request(
+            Some("enable-first"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        second.handle(request(
+            Some("enable-second"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        assert_eq!(second.snapshot().recent_history.len(), 1);
+        assert_eq!(second.snapshot().recent_history[0].actual_seconds, 420);
+
+        first.handle(request(
+            Some("delete"),
+            Command::HistoryDelete { ids: vec![1] },
+        ));
+        first.handle(request(Some("export-delete"), Command::SyncNow));
+        second.handle(request(Some("import-delete"), Command::SyncNow));
+        assert!(second.snapshot().recent_history.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_history_keeps_the_global_identity_of_an_already_deleted_task() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-deleted-task-history-sync-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let deleted_task = first.tasks.create("Deleted work").expect("legacy Task");
+        first.history.push(SessionRecord {
+            id: 1,
+            ended_at: first.wall,
+            kind: DomainKind::Focus,
+            outcome: SessionOutcome::Stopped,
+            planned_seconds: 1_500,
+            actual_seconds: 300,
+            task_id: Some(deleted_task),
+            task_title: Some("Deleted work".into()),
+        });
+        first
+            .tasks
+            .delete(deleted_task, None)
+            .expect("delete legacy Task");
+        first.next_event_id = 2;
+        first.handle(request(
+            Some("enable-first"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        second.handle(request(
+            Some("enable-second"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        second.handle(request(Some("retry"), Command::SyncNow));
+        assert_eq!(second.history.records().len(), 1);
+        assert_eq!(second.history.records()[0].task_id, Some(TaskId::new(1)));
+        assert_eq!(
+            second.history.records()[0].task_title.as_deref(),
+            Some("Deleted work")
+        );
+        assert!(
+            second
+                .snapshot()
+                .tasks
+                .iter()
+                .all(|task| task.title != "Deleted work")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
