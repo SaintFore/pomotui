@@ -1,6 +1,6 @@
 use pomotui_sync::{
     ActivityProjection, Document, EntityId, MutationInstant, Record, RecordId, RecordPayload,
-    ReviewJudgment, SessionKind, SessionOutcome, TaskProjection, TaskStatus, plan_sync,
+    SessionKind, SessionOutcome, SessionReviewJudgment, TaskProjection, TaskStatus, plan_sync,
 };
 
 fn task_version(record: u128, entity: u128, mutation: i64, title: &str) -> Record {
@@ -15,7 +15,12 @@ fn task_version(record: u128, entity: u128, mutation: i64, title: &str) -> Recor
     )
 }
 
-fn review(record: u128, entity: u128, session: u128, judgment: ReviewJudgment) -> Record {
+fn session_review(
+    record: u128,
+    entity: u128,
+    session: u128,
+    judgment: SessionReviewJudgment,
+) -> Record {
     Record::new(
         RecordId::parse(&uuid::Uuid::from_u128(record).to_string()).expect("record identity"),
         EntityId::parse(&uuid::Uuid::from_u128(entity).to_string()).expect("review identity"),
@@ -28,7 +33,7 @@ fn review(record: u128, entity: u128, session: u128, judgment: ReviewJudgment) -
                 .expect("task identity"),
             task_title: "Snapshot".into(),
             actual_seconds: 731,
-            reflection: (judgment == ReviewJudgment::Failed).then(|| "Learned".into()),
+            reflection: (judgment == SessionReviewJudgment::Failed).then(|| "Learned".into()),
             chain_entry_title: None,
         },
     )
@@ -217,8 +222,8 @@ fn reviews_project_by_session_end_then_identity_independent_of_arrival_order() {
     if let RecordPayload::SessionEnded { ended_at, .. } = &mut second_session.payload {
         *ended_at = 200;
     }
-    let success = review(5, 50, 30, ReviewJudgment::Successful);
-    let late_failure = review(4, 40, 20, ReviewJudgment::Failed);
+    let success = session_review(5, 50, 30, SessionReviewJudgment::Successful);
+    let late_failure = session_review(4, 40, 20, SessionReviewJudgment::Failed);
     let forward = plan_sync(
         &[],
         &[
@@ -236,10 +241,24 @@ fn reviews_project_by_session_end_then_identity_independent_of_arrival_order() {
     )
     .expect("same records in reverse order");
 
-    assert_eq!(forward.review_projection(), reversed.review_projection());
-    assert_eq!(forward.review_projection().ended_chains.len(), 1);
-    assert!(forward.review_projection().ended_chains[0].links.is_empty());
-    assert_eq!(forward.review_projection().current_chain.links.len(), 1);
+    assert_eq!(
+        forward.session_review_projection(),
+        reversed.session_review_projection()
+    );
+    assert_eq!(forward.session_review_projection().ended_chains.len(), 1);
+    assert!(
+        forward.session_review_projection().ended_chains[0]
+            .links
+            .is_empty()
+    );
+    assert_eq!(
+        forward
+            .session_review_projection()
+            .current_chain
+            .links
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -247,8 +266,9 @@ fn equal_session_end_times_use_review_identity_as_the_tie_breaker() {
     let task = task_version(1, 16, 1_000, "Snapshot");
     let first_session = ended_session(2, 20, Some(16));
     let second_session = ended_session(3, 30, Some(16));
-    let earlier_review_identity = review(4, 40, 30, ReviewJudgment::Successful);
-    let later_review_identity = review(5, 50, 20, ReviewJudgment::Failed);
+    // Record identity deliberately orders opposite to Session Review identity.
+    let earlier_review_identity = session_review(5, 40, 30, SessionReviewJudgment::Successful);
+    let later_review_identity = session_review(4, 50, 20, SessionReviewJudgment::Failed);
     let plan = plan_sync(
         &[],
         &[
@@ -261,8 +281,16 @@ fn equal_session_end_times_use_review_identity_as_the_tie_breaker() {
     )
     .expect("equal timestamps remain orderable");
 
-    assert_eq!(plan.review_projection().ended_chains[0].links.len(), 1);
-    assert!(plan.review_projection().current_chain.links.is_empty());
+    assert_eq!(
+        plan.session_review_projection().ended_chains[0].links.len(),
+        1
+    );
+    assert!(
+        plan.session_review_projection()
+            .current_chain
+            .links
+            .is_empty()
+    );
 }
 
 #[test]
@@ -270,14 +298,17 @@ fn retry_is_idempotent_and_a_second_review_for_one_session_is_rejected() {
     let records = vec![
         task_version(1, 16, 1_000, "Snapshot"),
         ended_session(2, 20, Some(16)),
-        review(3, 30, 20, ReviewJudgment::Successful),
+        session_review(3, 30, 20, SessionReviewJudgment::Successful),
     ];
     let first = plan_sync(&[], &records).expect("first import");
     let retry = plan_sync(first.retained_records(), &records).expect("retry");
     assert_eq!(first.retained_records(), retry.retained_records());
-    assert_eq!(first.review_projection(), retry.review_projection());
+    assert_eq!(
+        first.session_review_projection(),
+        retry.session_review_projection()
+    );
 
-    let duplicate = review(4, 40, 20, ReviewJudgment::Failed);
+    let duplicate = session_review(4, 40, 20, SessionReviewJudgment::Failed);
     let error = plan_sync(&records, &[duplicate]).expect_err("one immutable Review per Session");
     assert!(
         error.contains("more than one Review"),

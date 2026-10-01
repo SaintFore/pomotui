@@ -16,9 +16,9 @@ use pomotui_protocol::{
 };
 use pomotui_sync::{
     ActivityProjection, Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION,
-    MutationInstant, Record as SyncRecord, RecordId, RecordPayload, ReviewJudgment,
-    ReviewProjection, SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome,
-    SyncPlan, TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
+    MutationInstant, Record as SyncRecord, RecordId, RecordPayload, SessionKind as SyncSessionKind,
+    SessionOutcome as SyncSessionOutcome, SessionReviewJudgment, SessionReviewProjection, SyncPlan,
+    TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -159,7 +159,7 @@ struct SyncState {
     #[serde(default)]
     session_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default)]
-    review_entries: std::collections::BTreeMap<EntityId, u64>,
+    session_review_entries: std::collections::BTreeMap<EntityId, u64>,
     last_attempt: Option<i64>,
     last_success: Option<i64>,
     last_error: Option<String>,
@@ -208,6 +208,18 @@ struct ChainBreakState {
     task_title: String,
     actual_seconds: u64,
     reflection: String,
+    chain_entry_title: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SubmittedSessionReviewSync {
+    entry_id: u64,
+    session_id: u64,
+    task_id: u64,
+    task_title: String,
+    actual_seconds: u64,
+    judgment: SessionReviewJudgment,
+    reflection: Option<String>,
     chain_entry_title: Option<String>,
 }
 
@@ -388,7 +400,7 @@ impl Service {
             .apply_task_projections(plan.task_projections())
             .and_then(|()| {
                 self.apply_activity_projections(plan.activity_projections());
-                self.apply_review_projection(plan.review_projection())?;
+                self.apply_session_review_projection(plan.session_review_projection())?;
                 self.set_clock_warning(plan.retained_records());
                 self.persist(None)
             })
@@ -860,16 +872,16 @@ impl Service {
             reflection: review_reflection.clone(),
             chain_entry_title: chain_entry_title.clone(),
         });
-        self.record_submitted_review(
-            self.next_chain_entry_id,
-            review.session_id,
+        self.record_submitted_session_review(SubmittedSessionReviewSync {
+            entry_id: self.next_chain_entry_id,
+            session_id: review.session_id,
             task_id,
             task_title,
-            review.actual_seconds,
-            ReviewJudgment::Successful,
-            review_reflection,
+            actual_seconds: review.actual_seconds,
+            judgment: SessionReviewJudgment::Successful,
+            reflection: review_reflection,
             chain_entry_title,
-        )?;
+        })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.current_chain_length = self.current_chain_length.saturating_add(1);
         self.unlock_eligible_rewards();
@@ -970,16 +982,16 @@ impl Service {
             reflection: reflection.clone(),
             chain_entry_title: chain_entry_title.clone(),
         };
-        self.record_submitted_review(
-            self.next_chain_entry_id,
-            review_session_id,
-            review_task_id,
-            review_task_title,
-            review_actual_seconds,
-            ReviewJudgment::Failed,
-            Some(reflection),
-            chain_entry_title.clone(),
-        )?;
+        self.record_submitted_session_review(SubmittedSessionReviewSync {
+            entry_id: self.next_chain_entry_id,
+            session_id: review_session_id,
+            task_id: review_task_id,
+            task_title: review_task_title,
+            actual_seconds: review_actual_seconds,
+            judgment: SessionReviewJudgment::Failed,
+            reflection: Some(reflection),
+            chain_entry_title: chain_entry_title.clone(),
+        })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.ended_chains.push(EndedChainState {
             id: self.current_chain_id,
@@ -1174,44 +1186,36 @@ impl Service {
         self.sync.records.sort();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn record_submitted_review(
+    fn record_submitted_session_review(
         &mut self,
-        entry_id: u64,
-        session_id: u64,
-        task_id: u64,
-        task_title: String,
-        actual_seconds: u64,
-        judgment: ReviewJudgment,
-        reflection: Option<String>,
-        chain_entry_title: Option<String>,
+        review: SubmittedSessionReviewSync,
     ) -> Result<(), String> {
         let session_entity_id = self
             .sync
             .session_entities
-            .get(&session_id)
+            .get(&review.session_id)
             .cloned()
-            .ok_or_else(|| "submitted Review Session has no global identity".to_owned())?;
-        if !self.sync.task_entities.contains_key(&task_id) {
-            self.record_task_creation(task_id, &task_title);
+            .ok_or_else(|| "submitted Session Review source has no global identity".to_owned())?;
+        if !self.sync.task_entities.contains_key(&review.task_id) {
+            self.record_task_creation(review.task_id, &review.task_title);
         }
-        let task_entity_id = self.sync.task_entities[&task_id].clone();
+        let task_entity_id = self.sync.task_entities[&review.task_id].clone();
         let review_entity_id = EntityId::random();
         self.sync
-            .review_entries
-            .insert(review_entity_id.clone(), entry_id);
+            .session_review_entries
+            .insert(review_entity_id.clone(), review.entry_id);
         self.sync.records.push(SyncRecord::new(
             RecordId::random(),
             review_entity_id,
             self.next_sync_mutation_time(),
             RecordPayload::SessionReviewed {
                 session_entity_id,
-                judgment,
+                judgment: review.judgment,
                 task_entity_id,
-                task_title,
-                actual_seconds,
-                reflection,
-                chain_entry_title,
+                task_title: review.task_title,
+                actual_seconds: review.actual_seconds,
+                reflection: review.reflection,
+                chain_entry_title: review.chain_entry_title,
             },
         ));
         self.sync.records.sort();
@@ -1259,7 +1263,7 @@ impl Service {
         }
         let known_entries = self
             .sync
-            .review_entries
+            .session_review_entries
             .values()
             .copied()
             .collect::<std::collections::HashSet<_>>();
@@ -1270,58 +1274,47 @@ impl Service {
                 chain
                     .links
                     .iter()
-                    .map(|entry| {
-                        (
-                            entry.id,
-                            entry.session_id,
-                            entry.task_id,
-                            entry.task_title.clone(),
-                            entry.actual_seconds,
-                            ReviewJudgment::Successful,
-                            entry.reflection.clone(),
-                            entry.chain_entry_title.clone(),
-                        )
+                    .map(|entry| SubmittedSessionReviewSync {
+                        entry_id: entry.id,
+                        session_id: entry.session_id,
+                        task_id: entry.task_id,
+                        task_title: entry.task_title.clone(),
+                        actual_seconds: entry.actual_seconds,
+                        judgment: SessionReviewJudgment::Successful,
+                        reflection: entry.reflection.clone(),
+                        chain_entry_title: entry.chain_entry_title.clone(),
                     })
-                    .chain(std::iter::once((
-                        chain.chain_break.id,
-                        chain.chain_break.session_id,
-                        chain.chain_break.task_id,
-                        chain.chain_break.task_title.clone(),
-                        chain.chain_break.actual_seconds,
-                        ReviewJudgment::Failed,
-                        Some(chain.chain_break.reflection.clone()),
-                        chain.chain_break.chain_entry_title.clone(),
-                    )))
+                    .chain(std::iter::once(SubmittedSessionReviewSync {
+                        entry_id: chain.chain_break.id,
+                        session_id: chain.chain_break.session_id,
+                        task_id: chain.chain_break.task_id,
+                        task_title: chain.chain_break.task_title.clone(),
+                        actual_seconds: chain.chain_break.actual_seconds,
+                        judgment: SessionReviewJudgment::Failed,
+                        reflection: Some(chain.chain_break.reflection.clone()),
+                        chain_entry_title: chain.chain_break.chain_entry_title.clone(),
+                    }))
                     .collect::<Vec<_>>()
             })
-            .chain(self.chain_links.iter().map(|entry| {
-                (
-                    entry.id,
-                    entry.session_id,
-                    entry.task_id,
-                    entry.task_title.clone(),
-                    entry.actual_seconds,
-                    ReviewJudgment::Successful,
-                    entry.reflection.clone(),
-                    entry.chain_entry_title.clone(),
-                )
-            }))
-            .filter(|(id, ..)| !known_entries.contains(id))
+            .chain(
+                self.chain_links
+                    .iter()
+                    .map(|entry| SubmittedSessionReviewSync {
+                        entry_id: entry.id,
+                        session_id: entry.session_id,
+                        task_id: entry.task_id,
+                        task_title: entry.task_title.clone(),
+                        actual_seconds: entry.actual_seconds,
+                        judgment: SessionReviewJudgment::Successful,
+                        reflection: entry.reflection.clone(),
+                        chain_entry_title: entry.chain_entry_title.clone(),
+                    }),
+            )
+            .filter(|review| !known_entries.contains(&review.entry_id))
             .collect::<Vec<_>>();
-        missing_reviews.sort_by_key(|(id, ..)| *id);
-        for (id, session_id, task_id, title, actual, judgment, reflection, entry_title) in
-            missing_reviews
-        {
-            self.record_submitted_review(
-                id,
-                session_id,
-                task_id,
-                title,
-                actual,
-                judgment,
-                reflection,
-                entry_title,
-            )?;
+        missing_reviews.sort_by_key(|review| review.entry_id);
+        for review in missing_reviews {
+            self.record_submitted_session_review(review)?;
         }
         Ok(())
     }
@@ -1362,7 +1355,7 @@ impl Service {
         self.sync.records = plan.retained_records().to_vec();
         self.apply_task_projections(plan.task_projections())?;
         self.apply_activity_projections(plan.activity_projections());
-        self.apply_review_projection(plan.review_projection())?;
+        self.apply_session_review_projection(plan.session_review_projection())?;
         self.set_clock_warning(plan.retained_records());
         self.persist(None)?;
         let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
@@ -1515,7 +1508,10 @@ impl Service {
         self.history = History::restore(records);
     }
 
-    fn apply_review_projection(&mut self, projection: &ReviewProjection) -> Result<(), String> {
+    fn apply_session_review_projection(
+        &mut self,
+        projection: &SessionReviewProjection,
+    ) -> Result<(), String> {
         let mut next_entry_id = self.next_chain_entry_id;
         let mut entry_id =
             |entity_id: &EntityId, mappings: &mut std::collections::BTreeMap<EntityId, u64>| {
@@ -1529,7 +1525,7 @@ impl Service {
                 }
             };
         let mut build_link =
-            |review: &pomotui_sync::ProjectedReview| -> Result<ChainLinkState, String> {
+            |review: &pomotui_sync::ProjectedSessionReview| -> Result<ChainLinkState, String> {
                 let session_id = self
                     .sync
                     .session_entities
@@ -1537,7 +1533,9 @@ impl Service {
                     .find_map(|(local, global)| {
                         (global == &review.session_entity_id).then_some(*local)
                     })
-                    .ok_or_else(|| "projected Review source Session is not local".to_owned())?;
+                    .ok_or_else(|| {
+                        "projected Session Review source Session is not local".to_owned()
+                    })?;
                 let task_id = self
                     .sync
                     .task_entities
@@ -1545,7 +1543,7 @@ impl Service {
                     .find_map(|(local, global)| {
                         (global == &review.task_entity_id).then_some(*local)
                     })
-                    .ok_or_else(|| "projected Review Task is not local".to_owned())?;
+                    .ok_or_else(|| "projected Session Review Task is not local".to_owned())?;
                 if self
                     .history
                     .records()
@@ -1558,7 +1556,10 @@ impl Service {
                         .map_err(str::to_owned)?;
                 }
                 Ok(ChainLinkState {
-                    id: entry_id(&review.review_entity_id, &mut self.sync.review_entries),
+                    id: entry_id(
+                        &review.review_entity_id,
+                        &mut self.sync.session_review_entries,
+                    ),
                     session_id,
                     task_id,
                     task_title: review.task_title.clone(),
@@ -4703,7 +4704,54 @@ mod tests {
     }
 
     #[test]
-    fn review_records_and_projected_chains_roll_back_as_one_sync_commit() {
+    fn submitted_session_review_and_projected_chain_survive_sqlite_restart() {
+        let path = database_path().with_extension("session-review-restart.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut service = Service::open(&path).expect("service");
+            service.handle(request(
+                Some("create-review-task"),
+                Command::TaskCreate {
+                    title: "Restart Review".into(),
+                },
+            ));
+            service.handle(request(
+                Some("start-reviewed-session"),
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: Some(1),
+                },
+            ));
+            service.handle(request(Some("stop-for-review"), Command::StopReview));
+            assert!(matches!(
+                service.handle(request(
+                    Some("submit-session-review"),
+                    Command::ReviewSuccess {
+                        reflection: Some("Restarted cleanly".into()),
+                    },
+                )),
+                Response::Snapshot { .. }
+            ));
+            assert_eq!(service.chain_links.len(), 1);
+            assert_eq!(service.sync.session_review_entries.len(), 1);
+        }
+
+        let restarted = Service::open(&path).expect("restarted service");
+        assert_eq!(restarted.chain_links.len(), 1);
+        assert_eq!(restarted.sync.session_review_entries.len(), 1);
+        assert_eq!(restarted.current_chain_length, 1);
+        assert!(
+            restarted
+                .sync
+                .records
+                .iter()
+                .any(|record| matches!(record.payload, RecordPayload::SessionReviewed { .. }))
+        );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn session_review_records_and_projected_chains_roll_back_in_sqlite_together() {
         let identity = |value: u128| {
             EntityId::parse(&format!("00000000-0000-0000-0000-{value:012x}"))
                 .expect("entity identity")
@@ -4744,7 +4792,7 @@ mod tests {
                 MutationInstant::from_millis(3_000).expect("instant"),
                 RecordPayload::SessionReviewed {
                     session_entity_id: session,
-                    judgment: ReviewJudgment::Successful,
+                    judgment: SessionReviewJudgment::Successful,
                     task_entity_id: task,
                     task_title: "Atomic Review".into(),
                     actual_seconds: 300,
@@ -4754,17 +4802,20 @@ mod tests {
             ),
         ];
         let plan = plan_sync(&[], &incoming).expect("valid incoming Review");
-        let mut service = Service::new();
-        let path = std::path::PathBuf::from("atomic-review.sync");
-        service.sync.path = Some(path.clone());
+        let database = database_path().with_extension("atomic-session-review.sqlite3");
+        let _ = std::fs::remove_file(&database);
+        let mut service = Service::open(&database).expect("service");
+        let sync_path = std::path::PathBuf::from("atomic-session-review.sync");
+        service.sync.path = Some(sync_path.clone());
+        service.persist(None).expect("persist synchronization path");
         service.repository = Some(Box::new(FailingRepository {
             successful_writes_remaining: 0,
-            inner: None,
+            inner: Some(SqliteRepository::open(&database).expect("SQLite repository")),
         }));
 
         assert!(
             service
-                .apply_sync_plan(&path, &plan, incoming.len())
+                .apply_sync_plan(&sync_path, &plan, incoming.len())
                 .is_err()
         );
         assert!(service.sync.records.is_empty());
@@ -4772,6 +4823,15 @@ mod tests {
         assert!(service.chain_links.is_empty());
         assert!(service.ended_chains.is_empty());
         assert_eq!(service.current_chain_length, 0);
+        drop(service);
+
+        let restarted = Service::open(&database).expect("restarted service");
+        assert!(restarted.sync.records.is_empty());
+        assert!(restarted.history.records().is_empty());
+        assert!(restarted.chain_links.is_empty());
+        assert!(restarted.ended_chains.is_empty());
+        assert_eq!(restarted.current_chain_length, 0);
+        std::fs::remove_file(database).expect("cleanup");
     }
 
     struct FailingRepository {
