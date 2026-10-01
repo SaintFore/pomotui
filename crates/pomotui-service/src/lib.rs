@@ -15,9 +15,10 @@ use pomotui_protocol::{
     Snapshot, SyncStatus, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use pomotui_sync::{
-    Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant,
-    Record as SyncRecord, RecordId, RecordPayload, SyncPlan, TaskProjection,
-    TaskStatus as SyncTaskStatus, plan_sync,
+    ActivityProjection, Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION,
+    MutationInstant, Record as SyncRecord, RecordId, RecordPayload, SessionKind as SyncSessionKind,
+    SessionOutcome as SyncSessionOutcome, SyncPlan, TaskProjection, TaskStatus as SyncTaskStatus,
+    plan_sync,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -155,6 +156,8 @@ struct SyncState {
     path: Option<std::path::PathBuf>,
     records: Vec<SyncRecord>,
     task_entities: std::collections::BTreeMap<u64, EntityId>,
+    #[serde(default)]
+    session_entities: std::collections::BTreeMap<u64, EntityId>,
     last_attempt: Option<i64>,
     last_success: Option<i64>,
     last_error: Option<String>,
@@ -370,14 +373,19 @@ impl Service {
         }
         let old_sync = self.sync.clone();
         let old_tasks = self.tasks.clone();
+        let old_history = self.history.clone();
+        let old_next_event_id = self.next_event_id;
         self.sync.records = plan.retained_records().to_vec();
         self.sync.file_record_count = Some(file_record_count);
         if let Err(error) = self
             .apply_task_projections(plan.task_projections())
+            .and_then(|()| self.apply_activity_projections(plan.activity_projections()))
             .and_then(|()| self.persist(None))
         {
             self.sync = old_sync;
             self.tasks = old_tasks;
+            self.history = old_history;
+            self.next_event_id = old_next_event_id;
             return Err(error);
         }
         Ok(self.sync.records.clone())
@@ -754,6 +762,7 @@ impl Service {
                 });
             }
             self.history.push(record);
+            self.record_ended_session(self.next_event_id);
             self.next_event_id = self.next_event_id.saturating_add(1);
         }
     }
@@ -1088,6 +1097,40 @@ impl Service {
         Ok(())
     }
 
+    fn record_ended_session(&mut self, session_id: u64) {
+        let Some(record) = self
+            .history
+            .records()
+            .iter()
+            .find(|record| record.id == session_id)
+            .cloned()
+        else {
+            return;
+        };
+        let entity_id = EntityId::random();
+        self.sync
+            .session_entities
+            .insert(session_id, entity_id.clone());
+        let task_entity_id = record
+            .task_id
+            .and_then(|id| self.sync.task_entities.get(&id.get()).cloned());
+        self.sync.records.push(SyncRecord::new(
+            RecordId::random(),
+            entity_id,
+            self.next_sync_mutation_time(),
+            RecordPayload::SessionEnded {
+                ended_at: record.ended_at,
+                kind: sync_kind(record.kind),
+                outcome: sync_outcome(record.outcome),
+                planned_seconds: record.planned_seconds,
+                actual_seconds: record.actual_seconds,
+                task_entity_id,
+                task_title: record.task_title.clone(),
+            },
+        ));
+        self.sync.records.sort();
+    }
+
     fn finish_task_mutation(&mut self, key: Option<&str>) -> Response {
         match self.persist(key) {
             Ok(()) => {
@@ -1123,6 +1166,7 @@ impl Service {
         let plan = plan_sync(&self.sync.records, &incoming)?;
         self.sync.records = plan.retained_records().to_vec();
         self.apply_task_projections(plan.task_projections())?;
+        self.apply_activity_projections(plan.activity_projections())?;
         self.persist(None)?;
         let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
         replace_sync_file(&path, &serialized)?;
@@ -1198,6 +1242,84 @@ impl Service {
         Ok(())
     }
 
+    fn apply_activity_projections(
+        &mut self,
+        projections: &[ActivityProjection],
+    ) -> Result<(), String> {
+        for projection in projections {
+            match projection {
+                ActivityProjection::Deleted { entity_id } => {
+                    if let Some(local_id) = self
+                        .sync
+                        .session_entities
+                        .iter()
+                        .find_map(|(local_id, mapped)| (mapped == entity_id).then_some(*local_id))
+                    {
+                        self.history.delete(&[local_id]);
+                    }
+                }
+                ActivityProjection::Session {
+                    entity_id,
+                    ended_at,
+                    kind,
+                    outcome,
+                    planned_seconds,
+                    actual_seconds,
+                    task_entity_id,
+                    task_title,
+                } => {
+                    if self
+                        .sync
+                        .session_entities
+                        .values()
+                        .any(|mapped| mapped == entity_id)
+                    {
+                        continue;
+                    }
+                    let task_id = task_entity_id.as_ref().and_then(|global_id| {
+                        self.sync
+                            .task_entities
+                            .iter()
+                            .find_map(|(local_id, mapped)| {
+                                (mapped == global_id).then_some(TaskId::new(*local_id))
+                            })
+                    });
+                    if task_entity_id.is_some() && task_id.is_none() {
+                        return Err(
+                            "synchronized Session references an unknown Task identity".into()
+                        );
+                    }
+                    let local_id = self.next_event_id;
+                    self.next_event_id = self.next_event_id.saturating_add(1);
+                    self.history.push(SessionRecord {
+                        id: local_id,
+                        ended_at: *ended_at,
+                        kind: domain_sync_kind(*kind),
+                        outcome: domain_sync_outcome(*outcome),
+                        planned_seconds: *planned_seconds,
+                        actual_seconds: *actual_seconds,
+                        task_id,
+                        task_title: task_title.clone(),
+                    });
+                    self.sync
+                        .session_entities
+                        .insert(local_id, entity_id.clone());
+                }
+            }
+        }
+        let session_entities = &self.sync.session_entities;
+        let mut records = self.history.records().to_vec();
+        records.sort_by(|left, right| {
+            left.ended_at.cmp(&right.ended_at).then_with(|| {
+                session_entities
+                    .get(&left.id)
+                    .cmp(&session_entities.get(&right.id))
+            })
+        });
+        self.history = History::restore(records);
+        Ok(())
+    }
+
     fn apply_deferred_task_deletions(&mut self) -> Result<(), String> {
         let deleted_entities = self
             .sync
@@ -1228,7 +1350,7 @@ impl Service {
     fn sync_status(&self) -> serde_json::Value {
         serde_json::to_value(SyncStatus {
             stability: "experimental".into(),
-            capabilities: vec!["task_lifecycle".into()],
+            capabilities: vec!["task_lifecycle".into(), "session_history".into()],
             enabled: self.sync.path.is_some(),
             path: self.sync.path.clone(),
             format_version: SYNC_FORMAT_VERSION,
@@ -1469,7 +1591,11 @@ impl Handler for Service {
                 }
                 let task_id = match self.tasks.resolve_title(&title) {
                     Ok(id) => Ok(id),
-                    Err(pomotui_domain::TaskError::TitleNotFound(_)) => self.tasks.create(title),
+                    Err(pomotui_domain::TaskError::TitleNotFound(_)) => {
+                        self.tasks.create(&title).inspect(|id| {
+                            self.record_task_creation(id.get(), &title);
+                        })
+                    }
                     Err(error) => Err(error),
                 };
                 match task_id {
@@ -1736,9 +1862,24 @@ impl Handler for Service {
                     .is_some_and(|review| ids.contains(&review.session_id))
                 {
                     Err("Session History with Pending Review cannot be deleted".into())
-                } else if self.history.delete(&ids) == 0 {
+                } else if !ids
+                    .iter()
+                    .any(|id| self.history.records().iter().any(|record| record.id == *id))
+                {
                     Err("Selected Session History entries no longer exist".into())
                 } else {
+                    for id in &ids {
+                        if let Some(entity_id) = self.sync.session_entities.get(id).cloned() {
+                            self.sync.records.push(SyncRecord::new(
+                                RecordId::random(),
+                                entity_id,
+                                self.next_sync_mutation_time(),
+                                RecordPayload::SessionDeleted,
+                            ));
+                        }
+                    }
+                    self.sync.records.sort();
+                    self.history.delete(&ids);
                     Ok(())
                 }
             }
@@ -2331,6 +2472,38 @@ const fn domain_kind_name(kind: DomainKind) -> &'static str {
     }
 }
 
+const fn sync_kind(kind: DomainKind) -> SyncSessionKind {
+    match kind {
+        DomainKind::Focus => SyncSessionKind::Focus,
+        DomainKind::ShortBreak => SyncSessionKind::ShortBreak,
+        DomainKind::LongBreak => SyncSessionKind::LongBreak,
+    }
+}
+
+const fn domain_sync_kind(kind: SyncSessionKind) -> DomainKind {
+    match kind {
+        SyncSessionKind::Focus => DomainKind::Focus,
+        SyncSessionKind::ShortBreak => DomainKind::ShortBreak,
+        SyncSessionKind::LongBreak => DomainKind::LongBreak,
+    }
+}
+
+const fn sync_outcome(outcome: SessionOutcome) -> SyncSessionOutcome {
+    match outcome {
+        SessionOutcome::Completed => SyncSessionOutcome::Completed,
+        SessionOutcome::Stopped => SyncSessionOutcome::Stopped,
+        SessionOutcome::Skipped => SyncSessionOutcome::Skipped,
+    }
+}
+
+const fn domain_sync_outcome(outcome: SyncSessionOutcome) -> SessionOutcome {
+    match outcome {
+        SyncSessionOutcome::Completed => SessionOutcome::Completed,
+        SyncSessionOutcome::Stopped => SessionOutcome::Stopped,
+        SyncSessionOutcome::Skipped => SessionOutcome::Skipped,
+    }
+}
+
 fn parse_kind(value: &str) -> Result<DomainKind, String> {
     match value {
         "focus" => Ok(DomainKind::Focus),
@@ -2444,7 +2617,7 @@ mod tests {
         assert_eq!(rendered["value"]["stability"], "experimental");
         assert_eq!(
             rendered["value"]["capabilities"],
-            serde_json::json!(["task_lifecycle"])
+            serde_json::json!(["task_lifecycle", "session_history"])
         );
         second.handle(request(Some("sync-second-again"), Command::SyncNow));
 
@@ -2472,7 +2645,7 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&document).expect("valid JSON");
         assert_eq!(json["format"], "pomotui.sync");
-        assert_eq!(json["version"], 2);
+        assert_eq!(json["version"], 3);
         assert_eq!(json["integrity"]["record_count"], 1);
         assert_eq!(
             json["integrity"]["records_sha256"]
@@ -2948,6 +3121,178 @@ mod tests {
             );
         }
         std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn session_history_syncs_by_global_identity_without_touching_local_cycle() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-session-sync-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        second.handle(request(
+            Some("local-task"),
+            Command::TaskCreate {
+                title: "Local".into(),
+            },
+        ));
+        for (service, key) in [(&mut first, "enable-first"), (&mut second, "enable-second")] {
+            service.handle(request(
+                Some(key),
+                Command::SyncEnable {
+                    path: sync_path.clone(),
+                },
+            ));
+        }
+        first.handle(request(
+            Some("shared-task"),
+            Command::TaskCreate {
+                title: "Shared".into(),
+            },
+        ));
+        second.handle(request(Some("import-task"), Command::SyncNow));
+        let imported_task = second
+            .snapshot()
+            .tasks
+            .iter()
+            .find(|task| task.title == "Shared")
+            .expect("imported Task")
+            .id;
+        assert_ne!(
+            imported_task, 1,
+            "local numeric identities intentionally differ"
+        );
+
+        let planned = first.timer.planned_seconds();
+        let transition = first.timer.start(first.now, Some(TaskId::new(1)));
+        first
+            .apply_transition(transition, planned)
+            .expect("start Focus Session");
+        first.now = first.now.saturating_add(37);
+        first.wall = first.wall.saturating_add(37);
+        let transition = first.timer.stop(first.now);
+        first
+            .apply_transition(transition, planned)
+            .expect("stop Focus Session");
+        first.handle(request(Some("export-history"), Command::SyncNow));
+
+        let local_before = second.snapshot();
+        second.handle(request(Some("import-history"), Command::SyncNow));
+        second.handle(request(Some("retry-history"), Command::SyncNow));
+        let snapshot = second.snapshot();
+        assert_eq!(
+            snapshot.recent_history.len(),
+            1,
+            "retry must not double count"
+        );
+        assert_eq!(snapshot.recent_history[0].actual_seconds, 37);
+        assert_eq!(
+            snapshot.recent_history[0].task_title.as_deref(),
+            Some("Shared")
+        );
+        assert_eq!(
+            second.history.records()[0].task_id,
+            Some(TaskId::new(imported_task))
+        );
+        assert_eq!(snapshot.today.focus_seconds, 37);
+        assert_eq!(snapshot.completed_rounds, local_before.completed_rounds);
+        assert_eq!(snapshot.state, local_before.state);
+        assert_eq!(snapshot.kind, local_before.kind);
+
+        let source_id = first.snapshot().recent_history[0].id;
+        first.handle(request(
+            Some("delete-history"),
+            Command::HistoryDelete {
+                ids: vec![source_id],
+            },
+        ));
+        first.handle(request(Some("export-deletion"), Command::SyncNow));
+        second.handle(request(Some("import-deletion"), Command::SyncNow));
+        assert!(second.snapshot().recent_history.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_ended_session_shape_converges_while_pending_review_stays_local() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-all-session-sync-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        for (service, key) in [(&mut first, "enable-first"), (&mut second, "enable-second")] {
+            service.handle(request(
+                Some(key),
+                Command::SyncEnable {
+                    path: sync_path.clone(),
+                },
+            ));
+        }
+        first.handle(request(
+            Some("task"),
+            Command::TaskCreate {
+                title: "Attributed".into(),
+            },
+        ));
+        let ended_at = first.wall;
+        let shapes = [
+            (DomainKind::Focus, SessionOutcome::Completed, 60, 60, true),
+            (DomainKind::Focus, SessionOutcome::Stopped, 60, 31, true),
+            (DomainKind::Focus, SessionOutcome::Skipped, 60, 0, false),
+            (
+                DomainKind::ShortBreak,
+                SessionOutcome::Completed,
+                10,
+                10,
+                false,
+            ),
+            (DomainKind::LongBreak, SessionOutcome::Stopped, 20, 4, false),
+        ];
+        for (index, (kind, outcome, planned, actual, attributed)) in shapes.into_iter().enumerate()
+        {
+            let id = u64::try_from(index).expect("small index") + 1;
+            first.history.push(SessionRecord {
+                id,
+                ended_at: ended_at + i64::try_from(index).expect("small index"),
+                kind,
+                outcome,
+                planned_seconds: planned,
+                actual_seconds: actual,
+                task_id: attributed.then_some(TaskId::new(1)),
+                task_title: attributed.then(|| "Attributed".into()),
+            });
+            first.record_ended_session(id);
+        }
+        first.next_event_id = 6;
+        first.pending_review = Some(PendingReviewState {
+            session_id: 1,
+            actual_seconds: 60,
+            task_id: Some(1),
+            task_title: Some("Attributed".into()),
+        });
+        first.handle(request(Some("export"), Command::SyncNow));
+        second.handle(request(Some("import"), Command::SyncNow));
+
+        assert_eq!(second.history.records().len(), 5);
+        assert_eq!(second.snapshot().today.focus_seconds, 91);
+        assert_eq!(second.snapshot().today.completed_rounds, 1);
+        assert_eq!(second.snapshot().completed_rounds, 0);
+        assert!(second.pending_review.is_none());
+        assert!(first.pending_review.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

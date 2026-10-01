@@ -1,6 +1,6 @@
 use pomotui_sync::{
-    Document, EntityId, MutationInstant, Record, RecordId, RecordPayload, TaskProjection,
-    TaskStatus, plan_sync,
+    ActivityProjection, Document, EntityId, MutationInstant, Record, RecordId, RecordPayload,
+    SessionKind, SessionOutcome, TaskProjection, TaskStatus, plan_sync,
 };
 
 fn task_version(record: u128, entity: u128, mutation: i64, title: &str) -> Record {
@@ -11,6 +11,25 @@ fn task_version(record: u128, entity: u128, mutation: i64, title: &str) -> Recor
         RecordPayload::TaskVersion {
             title: title.into(),
             status: TaskStatus::Open,
+        },
+    )
+}
+
+fn ended_session(record: u128, session: u128, task: Option<u128>) -> Record {
+    Record::new(
+        RecordId::parse(&uuid::Uuid::from_u128(record).to_string()).expect("record identity"),
+        EntityId::parse(&uuid::Uuid::from_u128(session).to_string()).expect("session identity"),
+        MutationInstant::from_millis(3_000).expect("mutation instant"),
+        RecordPayload::SessionEnded {
+            ended_at: 1_700_000_000,
+            kind: SessionKind::Focus,
+            outcome: SessionOutcome::Stopped,
+            planned_seconds: 1_500,
+            actual_seconds: 731,
+            task_entity_id: task.map(|value| {
+                EntityId::parse(&uuid::Uuid::from_u128(value).to_string()).expect("task identity")
+            }),
+            task_title: task.map(|_| "Snapshot".into()),
         },
     )
 }
@@ -34,7 +53,7 @@ fn valid_task_records_have_byte_stable_round_trips() {
 fn task_deletion_cannot_contain_version_state() {
     let source = r#"{
       "format":"pomotui.sync",
-      "version":2,
+      "version":3,
       "integrity":{"record_count":1,"records_sha256":"ignored"},
       "records":[{
         "id":"00000000-0000-0000-0000-000000000001",
@@ -114,6 +133,41 @@ fn sync_engine_plans_the_retained_union_and_task_projection_together() {
             record_id: RecordId::parse("00000000-0000-0000-0000-000000000002").expect("record"),
             title: "Remote".into(),
             status: TaskStatus::Open,
+        }]
+    );
+}
+
+#[test]
+fn ended_sessions_project_once_and_a_tombstone_permanently_hides_them() {
+    let session = ended_session(20, 30, Some(16));
+    let plan = plan_sync(&[], std::slice::from_ref(&session)).expect("valid Session record");
+    assert_eq!(
+        plan.activity_projections(),
+        &[ActivityProjection::Session {
+            entity_id: EntityId::parse("00000000-0000-0000-0000-00000000001e").expect("entity"),
+            ended_at: 1_700_000_000,
+            kind: SessionKind::Focus,
+            outcome: SessionOutcome::Stopped,
+            planned_seconds: 1_500,
+            actual_seconds: 731,
+            task_entity_id: Some(
+                EntityId::parse("00000000-0000-0000-0000-000000000010").expect("task entity")
+            ),
+            task_title: Some("Snapshot".into()),
+        }]
+    );
+
+    let deletion = Record::new(
+        RecordId::parse("00000000-0000-0000-0000-000000000021").expect("record"),
+        EntityId::parse("00000000-0000-0000-0000-00000000001e").expect("entity"),
+        MutationInstant::from_millis(4_000).expect("mutation instant"),
+        RecordPayload::SessionDeleted,
+    );
+    let plan = plan_sync(&[session], &[deletion]).expect("valid tombstone");
+    assert_eq!(
+        plan.activity_projections(),
+        &[ActivityProjection::Deleted {
+            entity_id: EntityId::parse("00000000-0000-0000-0000-00000000001e").expect("entity")
         }]
     );
 }

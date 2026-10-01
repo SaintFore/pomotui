@@ -4,14 +4,14 @@
 
 **Blocked by:** 07 / Automate, isolate, and rebuild synchronization.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Completed, Stopped, and Skipped Focus Sessions and ended Break Sessions become globally identified Shared Activity records.
-- [ ] Imported Session History preserves planned duration, exact actual duration, outcome, source Task identity, and Task title snapshot.
-- [ ] Attributed Sessions resolve through synchronized global Task identity even when each database uses different local numeric identifiers.
-- [ ] Total focus time, daily summaries, per-Task totals, and Completed Round statistics converge without merging mutable counters or double-counting repeated imports.
-- [ ] Imported Completed Rounds do not advance or reset the importing Device's Focus Cycle and do not replace its Current Session or Pending Session.
-- [ ] An ended Focus Session can synchronize while its Pending Review remains local to the source Device.
-- [ ] Session History deletion is represented by a tombstone and preserves the existing rule that related Action Chain history is not deleted.
-- [ ] Two-database scenarios cover all Session outcomes, Break Sessions, attributed and unattributed history, deletion, retry, and local Focus Cycle isolation.
-- [ ] Existing history, summary, TUI, CLI, tray, and Waybar behavior remains compatible with imported records.
+- [x] Completed, Stopped, and Skipped Focus Sessions and ended Break Sessions become globally identified Shared Activity records.
+- [x] Imported Session History preserves planned duration, exact actual duration, outcome, source Task identity, and Task title snapshot.
+- [x] Attributed Sessions resolve through synchronized global Task identity even when each database uses different local numeric identifiers.
+- [x] Total focus time, daily summaries, per-Task totals, and Completed Round statistics converge without merging mutable counters or double-counting repeated imports.
+- [x] Imported Completed Rounds do not advance or reset the importing Device's Focus Cycle and do not replace its Current Session or Pending Session.
+- [x] An ended Focus Session can synchronize while its Pending Review remains local to the source Device.
+- [x] Session History deletion is represented by a tombstone and preserves the existing rule that related Action Chain history is not deleted.
+- [x] Two-database scenarios cover all Session outcomes, Break Sessions, attributed and unattributed history, deletion, retry, and local Focus Cycle isolation.
+- [x] Existing history, summary, TUI, CLI, tray, and Waybar behavior remains compatible with imported records.

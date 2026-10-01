@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -84,11 +84,40 @@ pub enum TaskStatus {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Focus,
+    ShortBreak,
+    LongBreak,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOutcome {
+    Completed,
+    Stopped,
+    Skipped,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RecordPayload {
-    TaskVersion { title: String, status: TaskStatus },
+    TaskVersion {
+        title: String,
+        status: TaskStatus,
+    },
     TaskDeleted,
+    SessionEnded {
+        ended_at: i64,
+        kind: SessionKind,
+        outcome: SessionOutcome,
+        planned_seconds: u64,
+        actual_seconds: u64,
+        task_entity_id: Option<EntityId>,
+        task_title: Option<String>,
+    },
+    SessionDeleted,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -221,6 +250,7 @@ pub struct SyncPlan {
     base_records: Vec<Record>,
     retained_records: Vec<Record>,
     task_projections: Vec<TaskProjection>,
+    activity_projections: Vec<ActivityProjection>,
 }
 
 impl SyncPlan {
@@ -238,16 +268,40 @@ impl SyncPlan {
     pub fn task_projections(&self) -> &[TaskProjection] {
         &self.task_projections
     }
+
+    #[must_use]
+    pub fn activity_projections(&self) -> &[ActivityProjection] {
+        &self.activity_projections
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActivityProjection {
+    Session {
+        entity_id: EntityId,
+        ended_at: i64,
+        kind: SessionKind,
+        outcome: SessionOutcome,
+        planned_seconds: u64,
+        actual_seconds: u64,
+        task_entity_id: Option<EntityId>,
+        task_title: Option<String>,
+    },
+    Deleted {
+        entity_id: EntityId,
+    },
 }
 
 /// Produces the retained record union and its deterministic projections.
 pub fn plan_sync(local: &[Record], incoming: &[Record]) -> Result<SyncPlan, String> {
     let retained_records = union(local, incoming)?;
     let task_projections = project_tasks(&retained_records);
+    let activity_projections = project_activity(&retained_records);
     Ok(SyncPlan {
         base_records: local.to_vec(),
         retained_records,
         task_projections,
+        activity_projections,
     })
 }
 
@@ -275,14 +329,66 @@ pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
                     RecordPayload::TaskVersion { title, status } => {
                         Some((record.mutation_time, &record.id, title, *status))
                     }
-                    RecordPayload::TaskDeleted => None,
+                    RecordPayload::TaskDeleted
+                    | RecordPayload::SessionEnded { .. }
+                    | RecordPayload::SessionDeleted => None,
                 })
                 .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
                 .map(|(_, record_id, title, status)| TaskProjection::Version {
-                    entity_id,
+                    entity_id: entity_id.clone(),
                     record_id: record_id.clone(),
                     title: title.clone(),
                     status,
+                })
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn project_activity(records: &[Record]) -> Vec<ActivityProjection> {
+    let mut by_entity = BTreeMap::<EntityId, Vec<&Record>>::new();
+    for record in records {
+        if matches!(
+            record.payload,
+            RecordPayload::SessionEnded { .. } | RecordPayload::SessionDeleted
+        ) {
+            by_entity
+                .entry(record.entity_id.clone())
+                .or_default()
+                .push(record);
+        }
+    }
+    by_entity
+        .into_iter()
+        .filter_map(|(entity_id, records)| {
+            if records
+                .iter()
+                .any(|record| matches!(record.payload, RecordPayload::SessionDeleted))
+            {
+                return Some(ActivityProjection::Deleted { entity_id });
+            }
+            records
+                .into_iter()
+                .find_map(|record| match &record.payload {
+                    RecordPayload::SessionEnded {
+                        ended_at,
+                        kind,
+                        outcome,
+                        planned_seconds,
+                        actual_seconds,
+                        task_entity_id,
+                        task_title,
+                    } => Some(ActivityProjection::Session {
+                        entity_id: entity_id.clone(),
+                        ended_at: *ended_at,
+                        kind: *kind,
+                        outcome: *outcome,
+                        planned_seconds: *planned_seconds,
+                        actual_seconds: *actual_seconds,
+                        task_entity_id: task_entity_id.clone(),
+                        task_title: task_title.clone(),
+                    }),
+                    _ => None,
                 })
         })
         .collect()
@@ -294,9 +400,61 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
         return Err("duplicate synchronization record identity".into());
     }
     for record in records {
-        if let RecordPayload::TaskVersion { title, .. } = &record.payload {
-            pomotui_domain::TaskTitle::parse(title)
-                .map_err(|error| format!("invalid synchronized Task: {error}"))?;
+        match &record.payload {
+            RecordPayload::TaskVersion { title, .. } => {
+                pomotui_domain::TaskTitle::parse(title)
+                    .map_err(|error| format!("invalid synchronized Task: {error}"))?;
+            }
+            RecordPayload::SessionEnded {
+                ended_at,
+                kind,
+                outcome,
+                planned_seconds,
+                actual_seconds,
+                task_entity_id,
+                task_title,
+            } => {
+                chrono::DateTime::from_timestamp(*ended_at, 0)
+                    .ok_or_else(|| format!("invalid Session end time {ended_at}"))?;
+                if task_entity_id.is_some() != task_title.is_some() {
+                    return Err(
+                        "synchronized Session Task identity and title must appear together".into(),
+                    );
+                }
+                if !matches!(kind, SessionKind::Focus) && task_entity_id.is_some() {
+                    return Err("synchronized Break Session cannot be attributed to a Task".into());
+                }
+                if matches!(outcome, SessionOutcome::Skipped) && *actual_seconds != 0 {
+                    return Err(
+                        "skipped synchronized Session must have zero actual duration".into(),
+                    );
+                }
+                if matches!(outcome, SessionOutcome::Completed) && actual_seconds < planned_seconds
+                {
+                    return Err(
+                        "completed synchronized Session cannot be shorter than planned".into(),
+                    );
+                }
+            }
+            RecordPayload::TaskDeleted | RecordPayload::SessionDeleted => {}
+        }
+    }
+    let mut entity_kinds = BTreeMap::<&EntityId, (&'static str, usize)>::new();
+    for record in records {
+        let (kind, immutable_fact) = match record.payload {
+            RecordPayload::TaskVersion { .. } | RecordPayload::TaskDeleted => ("Task", false),
+            RecordPayload::SessionEnded { .. } => ("Session", true),
+            RecordPayload::SessionDeleted => ("Session", false),
+        };
+        let entry = entity_kinds.entry(&record.entity_id).or_insert((kind, 0));
+        if entry.0 != kind {
+            return Err("synchronization entity mixes Task and Session records".into());
+        }
+        if immutable_fact {
+            entry.1 += 1;
+            if entry.1 > 1 {
+                return Err("synchronized Session has more than one ended fact".into());
+            }
         }
     }
     Ok(())
