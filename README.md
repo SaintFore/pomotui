@@ -236,20 +236,46 @@ The module exposes Session state and kind as CSS classes. Example styling:
 
 Pomotui converges Tasks, ended Session History, submitted Session Reviews,
 Action Chains, Reward Milestones, unlocks, and claims through one
-provider-neutral file. Put that file in a directory carried by the file-copy
-tool you already use, then enable it independently on each computer:
+provider-neutral file. Pomotui reads and writes the local file; a file-copy
+tool such as Syncthing, Dropbox, iCloud Drive, or Nextcloud carries it between
+computers.
+
+To start a new synchronization set, choose the computer with the most complete
+local history, enable a path inside the replicated directory, and build the
+first valid exchange document:
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync rebuild
+pomotui --json sync status
+```
+
+Run `sync rebuild` only once when creating a new set, and only on the computer
+whose database should seed it. After the copy tool delivers `pomotui.sync` to
+another computer, enable that computer's local path and merge it:
 
 ```sh
 pomotui sync enable "$HOME/Sync/pomotui.sync"
 pomotui sync now
-pomotui sync status
+pomotui --json sync status
 ```
 
-The local path may differ between computers. Work can continue offline; after
-the replication tool transfers the file, run `pomotui sync now` on each side to
-merge changes. Same-titled Tasks retain distinct identities, concurrent edits
-resolve deterministically, and deletions do not invalidate a Task used by the
-local Current Session.
+The local path may differ between computers. `sync now` performs a two-way
+merge on the current computer: records found only in its SQLite database are
+written to the local `.sync` file, while records found only in that file are
+imported into SQLite. It does not contact another computer or upload the file.
+Wait for the copy tool to transfer the updated file, then let the other
+computer merge it.
+
+While the Timer Service is running, Pomotui requests this merge automatically
+at startup, after relevant durable changes, and every 30 seconds. `sync now`
+requests one immediately; because the work runs in the background, use
+`pomotui --json sync status` to confirm that `in_progress` is `false`,
+`last_success` is set, and `last_error` is `null`.
+
+Work can continue offline. Same-titled Tasks retain distinct identities,
+concurrent edits resolve deterministically, and deletions do not invalidate a
+Task used by the local Current Session.
 
 > [!IMPORTANT]
 > Current Sessions, Focus Cycle progress, Pending Reviews, Session Durations,

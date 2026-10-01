@@ -217,19 +217,41 @@ pkill -SIGUSR2 waybar
 ## 在多台电脑之间同步共享活动
 
 Pomotui 通过一个与提供商无关的文件，收敛任务、已结束的会话历史、已提交的
-会话复盘、行动链条、奖励里程碑、解锁和领取记录。把这个文件放进你已有的
-文件复制工具（Syncthing、Dropbox、iCloud Drive、Nextcloud 等）管理的目录，
-然后在每台电脑上分别启用：
+会话复盘、行动链条、奖励里程碑、解锁和领取记录。Pomotui 只读写本地文件；
+Syncthing、Dropbox、iCloud Drive、Nextcloud 等文件复制工具负责在电脑之间
+传输它。
+
+首次建立一组新的同步数据时，先选择本地历史最完整的电脑，把同步路径指向
+复制工具管理的目录，然后生成第一个有效的交换文档：
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync rebuild
+pomotui --json sync status
+```
+
+创建新同步集时只在一台电脑上执行一次 `sync rebuild`，并以这台电脑的数据库
+作为初始数据来源。等复制工具把 `pomotui.sync` 传到另一台电脑后，再在那台
+电脑上启用其本地路径并合并：
 
 ```sh
 pomotui sync enable "$HOME/Sync/pomotui.sync"
 pomotui sync now
-pomotui sync status
+pomotui --json sync status
 ```
 
-不同电脑可以使用不同的本地路径。离线时可以继续工作；文件复制工具传输完成
-后，在两边分别执行 `pomotui sync now` 即可合并。标题相同的任务仍保持不同
-身份，并发编辑会确定性解决；删除不会使本机当前会话正在使用的任务失效。
+不同电脑可以使用不同的本地路径。`sync now` 会在当前电脑上执行双向合并：
+仅存在于本机 SQLite 数据库中的记录会写入本地 `.sync` 文件，仅存在于该文件
+中的记录会导入 SQLite。它不会连接其他电脑，也不会上传文件；应先等待复制
+工具传输更新后的文件，再由另一台电脑执行合并。
+
+Timer Service 运行期间，Pomotui 会在服务启动、发生相关持久化变更后以及每
+30 秒自动请求一次合并。`sync now` 只是立即请求一次后台合并；请通过
+`pomotui --json sync status` 确认 `in_progress` 为 `false`、`last_success`
+已有时间戳且 `last_error` 为 `null`。
+
+离线时可以继续工作。标题相同的任务仍保持不同身份，并发编辑会确定性解决；
+删除不会使本机当前会话正在使用的任务失效。
 
 > [!IMPORTANT]
 > 当前会话、专注循环进度、待复盘、会话时长设置和界面偏好仍保留在各自的
