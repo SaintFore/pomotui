@@ -1170,6 +1170,8 @@ impl Service {
 
     fn sync_status(&self) -> serde_json::Value {
         serde_json::to_value(SyncStatus {
+            stability: "experimental".into(),
+            capabilities: vec!["task_lifecycle".into()],
             enabled: self.sync.path.is_some(),
             path: self.sync.path.clone(),
             format_version: SYNC_FORMAT_VERSION,
@@ -2304,13 +2306,16 @@ mod tests {
         assert!(
             render_cli(&sync_response, false, false)
                 .expect("human sync status")
-                .starts_with("sync enabled")
+                .contains("experimental")
         );
-        assert!(
-            serde_json::from_str::<serde_json::Value>(
-                &render_cli(&sync_response, true, false).expect("JSON sync status")
-            )
-            .is_ok()
+        let rendered: serde_json::Value = serde_json::from_str(
+            &render_cli(&sync_response, true, false).expect("JSON sync status"),
+        )
+        .expect("structured JSON status");
+        assert_eq!(rendered["value"]["stability"], "experimental");
+        assert_eq!(
+            rendered["value"]["capabilities"],
+            serde_json::json!(["task_lifecycle"])
         );
         second.handle(request(Some("sync-second-again"), Command::SyncNow));
 

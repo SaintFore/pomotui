@@ -178,8 +178,10 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
         Response::Data { value }
             if value.get("format_version").is_some()
                 && value.get("local_record_count").is_some() => Ok(format!(
-            "sync {} · path {} · format v{} · local records {} · file records {}{}",
+            "sync {} · {} · capabilities {} · path {} · format v{} · local records {} · file records {}{}",
             if value["enabled"].as_bool().unwrap_or(false) { "enabled" } else { "disabled" },
+            value["stability"].as_str().unwrap_or("unknown stability"),
+            value["capabilities"].as_array().map_or_else(|| "none".into(), |items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(",")),
             value["path"].as_str().unwrap_or("not configured"),
             value["format_version"],
             value["local_record_count"],

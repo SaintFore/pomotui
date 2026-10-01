@@ -154,6 +154,8 @@ pub struct SyncIntegrity {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SyncStatus {
+    pub stability: String,
+    pub capabilities: Vec<String>,
     pub enabled: bool,
     pub path: Option<std::path::PathBuf>,
     pub format_version: u16,
