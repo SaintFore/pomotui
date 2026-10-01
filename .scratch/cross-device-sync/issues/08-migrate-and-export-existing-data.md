@@ -2,7 +2,7 @@
 
 **What to build:** Let an existing Pomotui installation enable synchronization without losing or reinterpreting its current database, and export all previously durable Shared Activity into the new mergeable format.
 
-**Blocked by:** 05 / Sync chain maintenance; 06 / Sync rewards.
+**Blocked by:** 09 / Verify convergence and document synchronization.
 
 **Status:** needs-triage
 

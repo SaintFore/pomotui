@@ -5,3 +5,5 @@ Before Pomotui's first stable release, database and synchronization-format upgra
 ## Consequences
 
 Pre-release builds must label synchronization as experimental and clearly announce destructive upgrade steps. An incompatible database must fail explicitly instead of being ignored or deleted automatically, and reset requires a deliberate user command. Partial preservation of Tasks, Session History, Action Chains, or Rewards is not offered: an incompatible upgrade resets all local domain data together.
+
+The offline maintenance command is `pomotui reset --all-data --confirm`. It refuses to run while the Timer Service is reachable, creates a timestamped backup beside the database, removes the database and its SQLite sidecars, preserves configuration, and never deletes the user-selected synchronization file.

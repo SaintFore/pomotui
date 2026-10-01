@@ -2,7 +2,7 @@
 
 **What to build:** Prove the complete feature across real processes and give users enough provider-neutral guidance to configure, recover, and safely reason about the single sync file.
 
-**Blocked by:** 05 / Sync chain maintenance; 06 / Sync rewards; 07 / Automate, isolate, and rebuild synchronization; 08 / Migrate and export existing data safely.
+**Blocked by:** 05 / Sync chain maintenance; 06 / Sync rewards; 07 / Automate, isolate, and rebuild synchronization; 11 / Diagnose stale packaged services.
 
 **Status:** ready-for-agent
 

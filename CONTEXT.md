@@ -24,6 +24,10 @@ _Avoid_: Account, client, computer name
 The converged collection of ended Session facts and submitted Session Reviews from all of the user's Devices. It is the source for cross-device Session History, statistics, Action Chains, and Reward Milestones; live Current Sessions, Focus Cycle progress, and unsubmitted Pending Reviews are not part of it.
 _Avoid_: Synced database, cloud state, backup
 
+**Synchronization Record**:
+A globally identified immutable fact exchanged between Devices and retained by every Device that observes it. Its kind determines one valid payload shape, and a deterministic projection turns a set of records into Shared Activity and synchronized Task state.
+_Avoid_: Database row, mutable event, service snapshot
+
 **Review Order**:
 The deterministic cross-device order of submitted Session Reviews in Shared Activity. It decides Action Chain membership and reward progress and may be revised when an older offline review arrives, without changing the immutable content of any review.
 _Avoid_: File order, sync order, device order
