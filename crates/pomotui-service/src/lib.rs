@@ -2496,6 +2496,134 @@ mod tests {
     }
 
     #[test]
+    fn offline_task_versions_converge_deterministically_and_keep_same_titles_distinct() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-task-conflict-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let first_file = root.join("first.sync");
+        let second_file = root.join("second.sync");
+        let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
+        let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
+        first.handle(request(
+            Some("enable-first"),
+            Command::SyncEnable {
+                path: first_file.clone(),
+            },
+        ));
+        second.handle(request(
+            Some("enable-second"),
+            Command::SyncEnable {
+                path: second_file.clone(),
+            },
+        ));
+        for (service, key) in [(&mut first, "create-first"), (&mut second, "create-second")] {
+            service.handle(request(
+                Some(key),
+                Command::TaskCreate {
+                    title: "Same title".into(),
+                },
+            ));
+        }
+
+        std::fs::copy(&first_file, &second_file).expect("transport first file");
+        second.handle(request(Some("merge-creates-second"), Command::SyncNow));
+        std::fs::copy(&second_file, &first_file).expect("transport merged file");
+        first.handle(request(Some("merge-creates-first"), Command::SyncNow));
+        for service in [&mut first, &mut second] {
+            let Response::Data { value: tasks } = service.handle(request(None, Command::TaskList))
+            else {
+                panic!("Task list response");
+            };
+            assert_eq!(
+                tasks
+                    .as_array()
+                    .expect("tasks")
+                    .iter()
+                    .filter(|task| task["title"] == "Same title")
+                    .count(),
+                2
+            );
+        }
+
+        first.handle(request(
+            Some("rename-first"),
+            Command::TaskRename {
+                id: 1,
+                title: "First edit".into(),
+            },
+        ));
+        second.handle(request(
+            Some("rename-second"),
+            Command::TaskRename {
+                id: 2,
+                title: "Second edit".into(),
+            },
+        ));
+        std::fs::copy(&first_file, &second_file).expect("transport conflicting file");
+        second.handle(request(Some("merge-conflict-second"), Command::SyncNow));
+        std::fs::copy(&second_file, &first_file).expect("transport resolved file");
+        first.handle(request(Some("merge-conflict-first"), Command::SyncNow));
+
+        let title = |service: &mut Service, id: u64| {
+            let Response::Data { value: tasks } = service.handle(request(None, Command::TaskList))
+            else {
+                panic!("Task list response");
+            };
+            tasks
+                .as_array()
+                .expect("tasks")
+                .iter()
+                .find(|task| task["id"] == id)
+                .and_then(|task| task["title"].as_str())
+                .expect("Task title")
+                .to_owned()
+        };
+        assert_eq!(title(&mut first, 1), title(&mut second, 2));
+
+        first.handle(request(
+            Some("correct-title"),
+            Command::TaskRename {
+                id: 1,
+                title: "Corrected later".into(),
+            },
+        ));
+        std::fs::copy(&first_file, &second_file).expect("transport correction");
+        second.handle(request(Some("merge-correction"), Command::SyncNow));
+        assert_eq!(title(&mut second, 2), "Corrected later");
+
+        first.handle(request(
+            Some("delete-offline"),
+            Command::TaskDelete { id: 1 },
+        ));
+        second.handle(request(
+            Some("stale-edit"),
+            Command::TaskRename {
+                id: 2,
+                title: "Must not resurrect".into(),
+            },
+        ));
+        std::fs::copy(&first_file, &second_file).expect("transport tombstone");
+        second.handle(request(Some("merge-tombstone-second"), Command::SyncNow));
+        std::fs::copy(&second_file, &first_file).expect("transport tombstone union");
+        first.handle(request(Some("merge-tombstone-first"), Command::SyncNow));
+        for service in [&mut first, &mut second] {
+            let Response::Data { value: tasks } = service.handle(request(None, Command::TaskList))
+            else {
+                panic!("Task list response");
+            };
+            assert!(!tasks.as_array().expect("tasks").iter().any(|task| {
+                task["title"] == "Corrected later" || task["title"] == "Must not resurrect"
+            }));
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn restart_recovers_tasks_current_session_history_and_idempotency() {
         let path = database_path();
         let _ = std::fs::remove_file(&path);
