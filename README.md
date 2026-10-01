@@ -12,7 +12,8 @@ Pomotui is a terminal Pomodoro timer with three frontends:
 One persistent Timer Service owns the Current Session, so closing the TUI or
 restarting Waybar does not stop time progression. Tasks, Session History, daily
 statistics, recovery after restart, desktop reminders, and completion sounds
-are stored and coordinated centrally.
+are stored and coordinated centrally. Tasks can also converge across computers
+through one file managed by the file-replication tool you already use.
 
 ![Pomotui TUI Dashboard](https://tree-1327913400.cos.ap-nanjing.myqcloud.com/world/20260731122427701.webp)
 
@@ -41,11 +42,19 @@ systemctl --user enable --now pomotui.socket
 The AUR packages install the executables in `/usr/bin`. The command above
 enables the systemd user socket and starts Pomotui immediately.
 
-During upgrades the package makes a best-effort attempt to reload and restart
-an already running Timer Service. If the package hook cannot access your user
-service manager, it prints the exact manual restart command. A newly installed
-CLI that reaches an older service also reports this version mismatch directly;
-run `systemctl --user restart pomotui.service` and retry the command.
+Update the git package and its VCS dependencies with:
+
+```sh
+paru -Syu --devel
+```
+
+The package makes a best-effort attempt to restart the Timer Service after an
+upgrade. If it prints a restart warning, run:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user restart pomotui.service
+```
 
 ### macOS (Homebrew)
 
@@ -147,12 +156,6 @@ Other commands include `start short-break`, `start long-break`, `skip`,
 `create/rename/complete/reopen/delete`. Use `--json` with status, history, and
 other commands when integrating with scripts.
 
-Experimental Task synchronization is available through `sync enable`, `sync
-now`, and `sync status`. Its pre-release data contract may still change; see
-the [user guide](docs/user-guide.md#experimental-cross-device-synchronization)
-before enabling it or using the explicit `reset --all-data --confirm` recovery
-command.
-
 Use `stop --review` to send an early Focus Session to Session Review, or
 `stop --no-review` to record it without affecting the Action Chain. A failed
 review requires a Reflection:
@@ -168,6 +171,32 @@ pomotui reward claim 1
 When a reviewed Session has no Task, assign one with `--task ID`, or use
 `--void "Chain Entry Title"`. Run a command with `--json` to obtain stable
 internal identities for editing entries or claiming rewards.
+
+## Sync Tasks across computers
+
+Pomotui can converge the complete Task lifecycle—creation, rename, completion,
+reopening, and deletion—through one provider-neutral file. Put that file in a
+directory already replicated by Syncthing, Dropbox, iCloud Drive, Nextcloud,
+or another file-copy tool, then enable it independently on each computer:
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync now
+pomotui sync status
+```
+
+The local path may differ between computers. Work can continue offline; after
+the replication tool transfers the file, run `pomotui sync now` on each side to
+merge changes. Same-titled Tasks retain distinct identities, concurrent edits
+resolve deterministically, and deletions do not invalidate a Task used by the
+local Current Session.
+
+Synchronization currently covers Tasks. Current Sessions, Focus Cycle
+progress, Pending Reviews, durations, and interface preferences remain local to
+each computer. The sync file is an exchange document, not a replacement for
+backing up the local SQLite database. See the
+[user guide](docs/user-guide.md#cross-device-task-synchronization) for
+recovery and troubleshooting details.
 
 ## Add Pomotui to Waybar
 

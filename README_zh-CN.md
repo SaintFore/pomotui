@@ -9,7 +9,7 @@ Pomotui 是一个终端番茄钟计时器，提供三种前端：
 - 可脚本化的命令行工具；
 - 轮询式 Waybar 模块。
 
-一个持久化的计时服务拥有当前会话，关闭 TUI 或重启 Waybar 不会停止计时。任务、会话历史、每日统计、重启恢复、桌面提醒和完成音效都集中存储和协调。
+一个持久化的计时服务拥有当前会话，关闭 TUI 或重启 Waybar 不会停止计时。任务、会话历史、每日统计、重启恢复、桌面提醒和完成音效都集中存储和协调。任务还可以通过一个文件，在多台电脑之间最终收敛；文件传输继续使用你已有的同步工具。
 
 ![Pomotui TUI 仪表盘](https://tree-1327913400.cos.ap-nanjing.myqcloud.com/world/20260731122427701.webp)
 
@@ -38,9 +38,18 @@ systemctl --user enable --now pomotui.socket
 AUR 软件包会将可执行文件安装到 `/usr/bin`。上述命令会启用 systemd 用户
 socket，并立即启动 Pomotui。
 
-升级时，软件包会尽力重新加载并重启正在运行的 Timer Service。如果安装 hook
-无法访问你的用户服务管理器，它会显示准确的手工重启命令。新 CLI 连接到旧服务时
-也会直接提示版本不匹配；请运行 `systemctl --user restart pomotui.service` 后重试。
+使用下面的命令更新 git 软件包及其他 VCS 依赖：
+
+```sh
+paru -Syu --devel
+```
+
+升级后，软件包会尽力重启 Timer Service。如果出现重启警告，请运行：
+
+```sh
+systemctl --user daemon-reload
+systemctl --user restart pomotui.service
+```
 
 ### macOS（Homebrew）
 
@@ -131,8 +140,6 @@ pomotui chain
 
 其他命令包括 `start short-break`、`start long-break`、`skip`、`history`、`summary` 以及完整的任务生命周期：`create/rename/complete/reopen/delete`。与脚本集成时使用 `--json`。
 
-实验性的任务同步可通过 `sync enable`、`sync now` 和 `sync status` 使用。预发布数据契约仍可能变化；启用前或使用显式恢复命令 `reset --all-data --confirm` 前，请先阅读[用户指南](docs/user-guide.md#experimental-cross-device-synchronization)。
-
 使用 `stop --review` 将提前结束的专注会话送去复盘，或 `stop --no-review` 记录但不影响行动链条。失败的复盘需要复盘内容：
 
 ```sh
@@ -144,6 +151,20 @@ pomotui reward claim 1
 ```
 
 当复盘的会话没有任务时，用 `--task ID` 分配，或用 `--void "链条条目标题"`。使用 `--json` 获取稳定的内部标识符。
+
+## 在多台电脑之间同步任务
+
+Pomotui 可以通过一个与提供商无关的文件，让任务创建、重命名、完成、重新打开和删除在多台电脑之间收敛。把这个文件放进 Syncthing、Dropbox、iCloud Drive、Nextcloud 或其他文件复制工具管理的目录，然后在每台电脑上分别启用：
+
+```sh
+pomotui sync enable "$HOME/Sync/pomotui.sync"
+pomotui sync now
+pomotui sync status
+```
+
+不同电脑可以使用不同的本地路径。离线时可以继续工作；文件同步工具传输完成后，在两边分别执行 `pomotui sync now` 即可合并。标题相同的任务仍保持不同身份，并发编辑会确定性解决；如果删除的任务正被本机当前会话使用，删除会延迟生效，不会破坏计时。
+
+目前同步范围是任务。当前会话、专注循环进度、待复盘、时长设置和界面偏好仍保留在各自电脑上。同步文件是交换文档，不能代替本地 SQLite 数据库备份。恢复和故障排查请参阅[用户指南](docs/user-guide.md#cross-device-task-synchronization)。
 
 ## 添加到 Waybar
 
