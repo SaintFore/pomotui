@@ -155,7 +155,23 @@ struct SyncState {
     last_attempt: Option<i64>,
     last_success: Option<i64>,
     last_error: Option<String>,
+    #[serde(default)]
+    last_error_stage: Option<String>,
+    #[serde(default)]
+    warning: Option<String>,
     file_record_count: Option<usize>,
+    #[serde(skip)]
+    in_progress: bool,
+    #[serde(skip)]
+    background: bool,
+}
+
+/// Immutable input captured by the synchronization worker while it briefly owns
+/// the Timer Service state lock.
+#[derive(Clone, Debug)]
+pub struct SyncWork {
+    pub path: std::path::PathBuf,
+    pub records: Vec<SyncRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -291,6 +307,97 @@ impl Service {
         }
         service.observe_time();
         Ok(service)
+    }
+
+    /// Makes sync commands schedule work instead of performing file I/O inline.
+    pub fn enable_background_sync(&mut self) {
+        self.sync.background = true;
+    }
+
+    /// Starts a worker attempt and captures the file-independent input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when synchronization is disabled.
+    pub fn begin_sync_work(&mut self) -> Result<SyncWork, String> {
+        let path = self
+            .sync
+            .path
+            .clone()
+            .ok_or_else(|| "synchronization is not enabled".to_owned())?;
+        self.observe_time();
+        self.sync.in_progress = true;
+        self.sync.last_attempt = Some(self.wall);
+        self.sync.last_error = None;
+        self.sync.last_error_stage = None;
+        self.sync.file_record_count = None;
+        let _ = self.persist(None);
+        Ok(SyncWork {
+            path,
+            records: self.sync.records.clone(),
+        })
+    }
+
+    /// Applies validated incoming records and returns the latest retained union.
+    /// The state is restored if its durable commit fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration changed, records conflict, projection
+    /// fails, or the resulting state cannot be committed.
+    pub fn apply_sync_import(
+        &mut self,
+        path: &Path,
+        incoming: &[SyncRecord],
+        file_record_count: usize,
+    ) -> Result<Vec<SyncRecord>, String> {
+        if self.sync.path.as_deref() != Some(path) {
+            return Err("synchronization configuration changed during the attempt".into());
+        }
+        let old_sync = self.sync.clone();
+        let old_tasks = self.tasks.clone();
+        self.sync.records = union(&self.sync.records, incoming)?;
+        self.sync.file_record_count = Some(file_record_count);
+        if let Err(error) = self
+            .project_tasks_from_sync_records()
+            .and_then(|()| self.persist(None))
+        {
+            self.sync = old_sync;
+            self.tasks = old_tasks;
+            return Err(error);
+        }
+        Ok(self.sync.records.clone())
+    }
+
+    /// Records a fully completed import and atomic replacement.
+    pub fn finish_sync_success(
+        &mut self,
+        path: &Path,
+        file_record_count: usize,
+        warning: Option<String>,
+    ) {
+        if self.sync.path.as_deref() != Some(path) {
+            return;
+        }
+        self.observe_time();
+        self.sync.in_progress = false;
+        self.sync.file_record_count = Some(file_record_count);
+        self.sync.last_success = Some(self.wall);
+        self.sync.last_error = None;
+        self.sync.last_error_stage = None;
+        self.sync.warning = warning;
+        let _ = self.persist(None);
+    }
+
+    /// Records a stage-specific sync failure without changing durable health.
+    pub fn finish_sync_failure(&mut self, path: &Path, stage: &str, error: String) {
+        if self.sync.path.as_deref() != Some(path) {
+            return;
+        }
+        self.sync.in_progress = false;
+        self.sync.last_error_stage = Some(stage.into());
+        self.sync.last_error = Some(error);
+        let _ = self.persist(None);
     }
 
     fn ensure_void_task(&mut self) -> Result<bool, String> {
@@ -971,6 +1078,7 @@ impl Service {
         match self.persist(key) {
             Ok(()) => {
                 if self.sync.path.is_some()
+                    && !self.sync.background
                     && let Err(error) = self.merge_sync_file()
                 {
                     self.sync.last_error = Some(error);
@@ -992,10 +1100,11 @@ impl Service {
             .clone()
             .ok_or_else(|| "synchronization is not enabled".to_owned())?;
         self.sync.last_attempt = Some(self.wall);
-        let incoming = match read_sync_file(&path)? {
-            Some(source) => SyncDocument::from_json(&source)?.into_records(),
-            None => Vec::new(),
-        };
+        let source = read_sync_file(&path)?.ok_or_else(|| {
+            "sync file does not exist; use `pomotui sync rebuild` to create it from local records"
+                .to_owned()
+        })?;
+        let incoming = SyncDocument::from_json(&source)?.into_records();
         self.sync.file_record_count = Some(incoming.len());
         self.sync.records = union(&self.sync.records, &incoming)?;
         self.project_tasks_from_sync_records()?;
@@ -1005,6 +1114,28 @@ impl Service {
         self.sync.file_record_count = Some(self.sync.records.len());
         self.sync.last_success = Some(self.wall);
         self.sync.last_error = None;
+        self.sync.last_error_stage = None;
+        self.sync.warning = None;
+        self.persist(None)?;
+        Ok(self.sync.records.len())
+    }
+
+    fn rebuild_sync_file(&mut self) -> Result<usize, String> {
+        let path = self
+            .sync
+            .path
+            .clone()
+            .ok_or_else(|| "synchronization is not enabled".to_owned())?;
+        self.sync.last_attempt = Some(self.wall);
+        let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
+        replace_sync_file(&path, &serialized)?;
+        self.sync.file_record_count = Some(self.sync.records.len());
+        self.sync.last_success = Some(self.wall);
+        self.sync.last_error = None;
+        self.sync.last_error_stage = None;
+        self.sync.warning = Some(
+            "rebuilt from locally known records; unseen remote records cannot be recovered".into(),
+        );
         self.persist(None)?;
         Ok(self.sync.records.len())
     }
@@ -1086,9 +1217,12 @@ impl Service {
             enabled: self.sync.path.is_some(),
             path: self.sync.path.clone(),
             format_version: SYNC_FORMAT_VERSION,
+            in_progress: self.sync.in_progress,
             last_attempt: self.sync.last_attempt,
             last_success: self.sync.last_success,
             last_error: self.sync.last_error.clone(),
+            last_error_stage: self.sync.last_error_stage.clone(),
+            warning: self.sync.warning.clone(),
             local_record_count: self.sync.records.len(),
             file_record_count: self.sync.file_record_count,
         })
@@ -1102,6 +1236,7 @@ impl Service {
             },
             Err(error) => {
                 self.sync.last_error = Some(error.clone());
+                self.sync.last_error_stage = Some("synchronize".into());
                 let _ = self.persist(None);
                 Self::rejected(error)
             }
@@ -1378,6 +1513,7 @@ impl Handler for Service {
                         match self.persist(mutation_key.as_deref()) {
                             Ok(()) => {
                                 if self.sync.path.is_some()
+                                    && !self.sync.background
                                     && let Err(error) = self.merge_sync_file()
                                 {
                                     self.sync.last_error = Some(error);
@@ -1412,13 +1548,59 @@ impl Handler for Service {
             }
             Command::SyncEnable { path } => {
                 self.sync.path = Some(path);
+                self.sync.warning = None;
                 if let Err(error) = self.persist(mutation_key.as_deref()) {
                     return self.durable_rejected(error);
                 }
+                if self.sync.background {
+                    return Response::Data {
+                        value: self.sync_status(),
+                    };
+                }
                 return self.merge_sync_response();
             }
+            Command::SyncDisable => {
+                self.sync.path = None;
+                self.sync.in_progress = false;
+                self.sync.warning = None;
+                return match self.persist(mutation_key.as_deref()) {
+                    Ok(()) => Response::Data {
+                        value: self.sync_status(),
+                    },
+                    Err(error) => self.durable_rejected(error),
+                };
+            }
             Command::SyncNow => {
+                if self.sync.path.is_none() {
+                    return Self::rejected("synchronization is not enabled");
+                }
+                if self.sync.background {
+                    return Response::Data {
+                        value: self.sync_status(),
+                    };
+                }
                 return self.merge_sync_response();
+            }
+            Command::SyncRebuild => {
+                if self.sync.path.is_none() {
+                    return Self::rejected("synchronization is not enabled");
+                }
+                if self.sync.background {
+                    return Response::Data {
+                        value: self.sync_status(),
+                    };
+                }
+                return match self.rebuild_sync_file() {
+                    Ok(_) => Response::Data {
+                        value: self.sync_status(),
+                    },
+                    Err(error) => {
+                        self.sync.last_error = Some(error.clone());
+                        self.sync.last_error_stage = Some("rebuild".into());
+                        let _ = self.persist(None);
+                        Self::rejected(error)
+                    }
+                };
             }
             Command::SyncStatus => {
                 return Response::Data {
@@ -2183,6 +2365,13 @@ mod tests {
         ))
     }
 
+    fn create_empty_sync_file(path: &Path) {
+        let document = SyncDocument::new(&[])
+            .and_then(|document| document.to_json())
+            .expect("empty sync document");
+        std::fs::write(path, document).expect("create sync document");
+    }
+
     #[test]
     fn one_task_converges_between_two_fresh_services_through_one_file() {
         let root = std::env::temp_dir().join(format!(
@@ -2193,6 +2382,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("test directory");
         let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
         let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
         let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
 
@@ -2282,6 +2472,87 @@ mod tests {
     }
 
     #[test]
+    fn disabling_preserves_records_and_rebuild_recovers_a_valid_local_union() {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-sync-rebuild-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("test directory");
+        let sync_path = root.join("path with spaces.sync");
+        create_empty_sync_file(&sync_path);
+        let mut service = Service::open(&root.join("service.sqlite3")).expect("service");
+        service.handle(request(
+            Some("enable"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        service.handle(request(
+            Some("create"),
+            Command::TaskCreate {
+                title: "Retained".into(),
+            },
+        ));
+        let local_records = service.sync.records.len();
+
+        service.handle(request(Some("disable"), Command::SyncDisable));
+        assert_eq!(service.sync.records.len(), local_records);
+        assert!(
+            !sync_status(&mut service)["enabled"]
+                .as_bool()
+                .unwrap_or(true)
+        );
+
+        std::fs::remove_file(&sync_path).expect("remove exchange file");
+        let missing = service.handle(request(
+            Some("enable-missing"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        assert!(matches!(missing, Response::Error { .. }));
+        assert!(
+            !sync_path.exists(),
+            "ordinary sync must not create a missing file"
+        );
+
+        std::fs::write(&sync_path, "truncated").expect("damage exchange file");
+        service.handle(request(
+            Some("enable-again"),
+            Command::SyncEnable {
+                path: sync_path.clone(),
+            },
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&sync_path).expect("unchanged invalid file"),
+            "truncated"
+        );
+        service.handle(request(Some("rebuild"), Command::SyncRebuild));
+        let rebuilt = std::fs::read_to_string(&sync_path).expect("rebuilt file");
+        let document = SyncDocument::from_json(&rebuilt).expect("valid rebuilt document");
+        assert_eq!(document.records().len(), local_records);
+        let status = sync_status(&mut service);
+        assert!(
+            status["warning"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unseen remote")
+        );
+        assert!(status["last_error"].is_null());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn sync_status(service: &mut Service) -> serde_json::Value {
+        let Response::Data { value } = service.handle(request(None, Command::SyncStatus)) else {
+            panic!("sync status response");
+        };
+        value
+    }
+
+    #[test]
     fn task_rename_completion_and_reopen_converge_between_services() {
         let root = std::env::temp_dir().join(format!(
             "pomotui-task-updates-{}-{:?}",
@@ -2291,6 +2562,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("test directory");
         let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
         let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
         let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
         first.handle(request(
@@ -2375,6 +2647,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("test directory");
         let sync_path = root.join("pomotui.sync");
+        create_empty_sync_file(&sync_path);
         let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
         let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
         for (service, key) in [(&mut first, "enable-first"), (&mut second, "enable-second")] {
@@ -2469,6 +2742,8 @@ mod tests {
         std::fs::create_dir_all(&root).expect("test directory");
         let first_file = root.join("first.sync");
         let second_file = root.join("second.sync");
+        create_empty_sync_file(&first_file);
+        create_empty_sync_file(&second_file);
         let mut first = Service::open(&root.join("first.sqlite3")).expect("first service");
         let mut second = Service::open(&root.join("second.sqlite3")).expect("second service");
         first.handle(request(

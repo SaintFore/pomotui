@@ -118,7 +118,9 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
             unlock_id: parse_id(id)?,
         },
         ["sync", "enable", path] => Command::SyncEnable { path: (*path).into() },
+        ["sync", "disable"] => Command::SyncDisable,
         ["sync", "now"] => Command::SyncNow,
+        ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
         _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|waybar".into()),
     };
@@ -178,15 +180,17 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
         Response::Data { value }
             if value.get("format_version").is_some()
                 && value.get("local_record_count").is_some() => Ok(format!(
-            "sync {} · {} · capabilities {} · path {} · format v{} · local records {} · file records {}{}",
+            "sync {}{} · {} · capabilities {} · path {} · format v{} · local records {} · file records {}{}{}",
             if value["enabled"].as_bool().unwrap_or(false) { "enabled" } else { "disabled" },
+            if value["in_progress"].as_bool().unwrap_or(false) { " (in progress)" } else { "" },
             value["stability"].as_str().unwrap_or("unknown stability"),
             value["capabilities"].as_array().map_or_else(|| "none".into(), |items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(",")),
             value["path"].as_str().unwrap_or("not configured"),
             value["format_version"],
             value["local_record_count"],
             value["file_record_count"].as_u64().map_or_else(|| "unknown".into(), |count| count.to_string()),
-            value["last_error"].as_str().map_or_else(String::new, |error| format!(" · error: {error}")),
+            value["last_error"].as_str().map_or_else(String::new, |error| format!(" · {} error: {error}", value["last_error_stage"].as_str().unwrap_or("sync"))),
+            value["warning"].as_str().map_or_else(String::new, |warning| format!(" · warning: {warning}")),
         )),
         Response::Data { value } => Ok(value.to_string()),
         Response::Accepted => Ok("accepted".into()),
@@ -206,10 +210,14 @@ fn stale_sync_service(message: &str) -> bool {
     message.contains("unknown variant")
         && [
             "SyncEnable",
+            "SyncDisable",
             "SyncNow",
+            "SyncRebuild",
             "SyncStatus",
             "sync_enable",
+            "sync_disable",
             "sync_now",
+            "sync_rebuild",
             "sync_status",
         ]
         .iter()
@@ -366,6 +374,30 @@ mod tests {
             }
         );
         assert!(!json);
+        assert_eq!(
+            parse(&["sync".into(), "disable".into()])
+                .expect("sync disable")
+                .0,
+            Command::SyncDisable
+        );
+        assert_eq!(
+            parse(&["sync".into(), "rebuild".into()])
+                .expect("sync rebuild")
+                .0,
+            Command::SyncRebuild
+        );
+        assert_eq!(
+            parse(&[
+                "sync".into(),
+                "enable".into(),
+                "/tmp/path with spaces/pomotui.sync".into(),
+            ])
+            .expect("sync path with spaces")
+            .0,
+            Command::SyncEnable {
+                path: "/tmp/path with spaces/pomotui.sync".into()
+            }
+        );
         let (_, json, _) =
             parse(&["--json".into(), "sync".into(), "status".into()]).expect("JSON sync status");
         assert!(json);

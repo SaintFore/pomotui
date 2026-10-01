@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
@@ -108,7 +108,9 @@ pub enum Command {
     SyncEnable {
         path: std::path::PathBuf,
     },
+    SyncDisable,
     SyncNow,
+    SyncRebuild,
     SyncStatus,
 }
 
@@ -119,9 +121,12 @@ pub struct SyncStatus {
     pub enabled: bool,
     pub path: Option<std::path::PathBuf>,
     pub format_version: u16,
+    pub in_progress: bool,
     pub last_attempt: Option<i64>,
     pub last_success: Option<i64>,
     pub last_error: Option<String>,
+    pub last_error_stage: Option<String>,
+    pub warning: Option<String>,
     pub local_record_count: usize,
     pub file_record_count: Option<usize>,
 }
