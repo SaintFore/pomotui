@@ -557,3 +557,18 @@ fn legacy_json(current: &str, version: u16) -> String {
     .into();
     serde_json::to_string(&value).unwrap()
 }
+
+#[test]
+fn all_supported_legacy_formats_share_genesis_and_preserve_record_identity() {
+    let record = task_version(1, 9, 1_000, "legacy");
+    let current = Document::new(&[record.clone()]).unwrap().to_json().unwrap();
+    for version in [4, 5, 6] {
+        let normalized = Document::from_json(&legacy_json(&current, version)).unwrap();
+        assert_eq!(normalized.records(), &[record.clone()]);
+        assert_eq!(normalized.beginning(), &pomotui_sync::Beginning::default());
+        assert_eq!(
+            Document::from_json(&normalized.to_json().unwrap()).unwrap(),
+            normalized
+        );
+    }
+}
