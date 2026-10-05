@@ -532,3 +532,13 @@ fn ended_chain_tombstone_cannot_span_an_already_known_intervening_chain() {
     let error = plan_sync(&[], &records).expect_err("cannot delete across another known chain");
     assert!(error.contains("not adjacent"), "{error}");
 }
+
+#[test]
+fn conflicting_record_identity_reports_each_changed_field() {
+    let original = task_version(1, 2, 1000, "Original");
+    let contradictory = task_version(1, 3, 2000, "Different");
+    let error = pomotui_sync::union(&[original], &[contradictory]).unwrap_err();
+    assert!(error.contains("entity_id"), "{error}");
+    assert!(error.contains("mutation"), "{error}");
+    assert!(error.contains("payload"), "{error}");
+}

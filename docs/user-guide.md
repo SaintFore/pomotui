@@ -186,6 +186,22 @@ coalesced into one later run. `pomotui sync now` requests the same merge
 immediately when diagnosing or coordinating file transfer; it is not required
 after every local command.
 
+Timer Service also discovers Syncthing conflict siblings of the configured filename.
+For `pomotui.sync`, the supported spelling is
+`pomotui.sync-conflict-YYYYMMDD-HHMMSS-DEVICE.sync`; custom filenames use the
+same stem and extension rule. Other neighboring files are ignored. Each attempt
+scans at most 4096 directory entries and imports at most 32 candidates, rotating
+through larger sets on subsequent attempts. Files are limited to 8 MiB; symbolic
+links and nonregular objects are rejected. Valid copies are durably merged before
+publishing the main exchange file. Copies remain available for recovery.
+
+`sync status` distinguishes discovery failures (`discover`), invalid copies
+(`candidate-validate`), contradictory record identities (`candidate-integrity`
+or `import`), and publication failures (`replace`). A contradictory identity
+reports the record ID and differing fields. Keep these artifacts and resolve the
+reported invalid or contradictory input before retrying; local timer controls
+remain available during transport failures.
+
 Concurrent edits resolve without an interactive conflict screen. Immutable
 facts from both sides are retained. Versions of mutable data use their UTC
 mutation time and then a stable global identity as a deterministic tie-breaker;

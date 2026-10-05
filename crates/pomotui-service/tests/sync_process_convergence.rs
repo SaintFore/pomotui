@@ -443,3 +443,51 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     second.stop();
     std::fs::remove_dir_all(root).expect("remove test root");
 }
+
+#[test]
+fn separate_replica_directories_recover_conflict_records_and_replay() {
+    let root = test_root().with_extension("conflict");
+    let mut first = TimerService::start(root.join("first"), 4);
+    let second = TimerService::start(root.join("second"), 7);
+    let first_path = root.join("first/transport/custom.sync");
+    let second_path = root.join("second/transport/custom.sync");
+    let task = create_task(&first, "Offline first");
+    stopped_review(&first, task, "first review");
+    let task = create_task(&second, "Offline second");
+    stopped_review(&second, task, "second review");
+    enable(&first, &first_path);
+    rebuild(&first);
+    enable(&second, &second_path);
+    rebuild(&second);
+    let first_bytes = std::fs::read(&first_path).expect("first document");
+    let second_bytes = std::fs::read(&second_path).expect("second document");
+    let sibling = first_path.with_file_name("custom.sync-conflict-20261005-120000-ABCDEFG.sync");
+    std::fs::write(&sibling, &second_bytes).expect("deliver conflict copy");
+    sync_now(&first);
+    assert_eq!(
+        first.data(Command::ActionChainCurrent)["links"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(sibling.exists(), "ticket 3 preserves candidates");
+    let merged = std::fs::read(&first_path).expect("merged document");
+    std::fs::write(&second_path, &merged).expect("deliver union");
+    sync_now(&second);
+    assert_eq!(
+        normalized_shared_state(&first),
+        normalized_shared_state(&second)
+    );
+    first.stop();
+    std::fs::write(&first_path, first_bytes).expect("replay stale main");
+    first = TimerService::start(root.join("first"), 4);
+    sync_now(&first);
+    assert_eq!(
+        normalized_shared_state(&first),
+        normalized_shared_state(&second)
+    );
+    first.stop();
+    drop(second);
+    let _ = std::fs::remove_dir_all(root);
+}
