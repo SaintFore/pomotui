@@ -128,3 +128,31 @@ The old binary's diagnostic was:
 `unsupported sync document version 7`. Its old advice to reset pre-release data
 is not upgrade guidance for current users: upgrade all devices and preserve
 backups instead.
+
+## Final review and verification
+
+The reviewed integration commit `152bdf5669ce2d498dbb16c3a54e71eefc207515`
+passed formatting, strict workspace Clippy, the full all-targets/all-features
+test suite, debug and release builds, and `tests/e2e.sh`. All nine real scenarios
+also passed again with the same old binary and logs retained at
+`/tmp/pomotui-real-acceptance-reviewed`.
+
+The Standards review has zero unresolved findings after naming the file identity
+fields, sharing conflict filename recognition, and removing unused computation.
+The Spec review found and fixed a reward eligibility error: ordinary or late
+Chain Breaks must not reopen an unclaimed Ended Chain reward, and a claim must
+snapshot its own eligible current chain. Four regression combinations cover an
+empty/nonempty current chain after ordinary/late breaks.
+
+One **P1 Spec finding remains unresolved**. The accepted spec says “No unobserved
+candidate content may be destroyed.” The cleanup implementation verifies a
+quarantined inode before unlinking it, but an already-open writable descriptor
+can modify that inode after verification. An executable platform test demonstrates
+this limit. The passing Syncthing scenarios establish the documented immutable
+copy/atomic-replacement contract, not the stronger unconditional guarantee.
+
+The user has been asked whether to accept that supported transport contract or
+require conservative retention whenever writer exclusion cannot be proved. No
+answer has been assumed. Full specification completion is not certified, and
+spec/ticket closure is deferred until this finding is resolved. No production
+profiles or data were modified.
