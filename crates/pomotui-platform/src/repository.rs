@@ -396,6 +396,9 @@ impl SqliteRepository {
     }
 
     /// Atomically replaces all business state and cancels retired reminder effects.
+    /// # Errors
+    ///
+    /// Returns an error if the reset transaction cannot be committed.
     pub fn save_fresh_start(
         &mut self,
         payload: &str,

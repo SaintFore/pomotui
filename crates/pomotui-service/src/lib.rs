@@ -177,6 +177,7 @@ pub struct Service {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent persisted lifecycle flags.
 struct SyncState {
     #[serde(default)]
     beginning: pomotui_sync::Beginning,
@@ -410,6 +411,11 @@ impl Service {
         Ok(SyncWork { path })
     }
 
+    /// Captures the current beginning and its retained records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path changed or records cannot form a valid document.
     pub fn sync_document_for(&self, path: &Path) -> Result<pomotui_sync::Document, String> {
         pomotui_sync::Document::with_beginning(
             self.sync.beginning.clone(),
@@ -417,6 +423,11 @@ impl Service {
         )
     }
 
+    /// Adopts a newer beginning or merges records in the current beginning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration changed, projection fails, or persistence fails.
     pub fn apply_sync_document(
         &mut self,
         path: &Path,
@@ -448,7 +459,7 @@ impl Service {
         replacement.wall = self.wall;
         replacement.reminders_enabled = self.reminders_enabled;
         replacement.sound_enabled = self.sound_enabled;
-        replacement.sync.path = self.sync.path.clone();
+        replacement.sync.path.clone_from(&self.sync.path);
         replacement.sync.background = self.sync.background;
         replacement.sync.beginning = document.beginning().clone();
         replacement.sync.legacy_export_completed = true;
@@ -459,11 +470,9 @@ impl Service {
         let plan = plan_sync(&[], document.records())?;
         replacement.apply_task_projections(plan.task_projections())?;
         replacement.apply_activity_projections(plan.activity_projections());
+        replacement.ensure_void_task()?;
         replacement.apply_session_review_projection(plan.session_review_projection())?;
         replacement.apply_reward_projection(plan.reward_projection());
-        if replacement.void_task_id.is_none() {
-            replacement.ensure_void_task()?;
-        }
         if let Some(key) = key {
             replacement.applied_keys.insert(key.into());
         }
