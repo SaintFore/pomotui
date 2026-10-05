@@ -16,6 +16,8 @@ jobs:
         run: rustup toolchain install
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Check AUR upgrade hooks
+        run: sh packaging/tests/aur-install.sh
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test

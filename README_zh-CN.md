@@ -65,7 +65,8 @@ AUR 软件包会将可执行文件安装到 `/usr/bin`。上述命令会启用 s
 socket，并立即启动 Pomotui。
 
 使用 `paru -Syu --devel` 更新 git 软件包及其他 VCS 依赖。
-升级后，软件包会尽力重启计时服务。如果出现重启警告，请运行：
+升级后，软件包会自动重启已登录用户及启用 lingering 的用户正在运行的计时
+服务；未运行的服务保持停止。若无法连接用户服务管理器，会显示警告，请运行：
 
 ```sh
 systemctl --user daemon-reload

@@ -11,17 +11,30 @@ post_install() {
 }
 
 post_upgrade() {
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-        if sudo -u "$SUDO_USER" systemctl --user daemon-reload 2>/dev/null \
-            && sudo -u "$SUDO_USER" systemctl --user try-restart pomotui.service 2>/dev/null; then
-            return 0
-        fi
-        echo "WARNING: Pomotui was upgraded, but the Timer Service could not be restarted." >&2
-        echo "Run as $SUDO_USER: systemctl --user restart pomotui.service" >&2
+    # pacman runs as root, often without the installing user's session variables.
+    # Upgrade every logged-in user's running service, including lingering users.
+    pomotui_users=$(loginctl list-users --no-legend --no-pager) || {
+        echo "WARNING: Pomotui was upgraded, but user services could not be discovered." >&2
+        echo "Run in your user session: systemctl --user daemon-reload && systemctl --user restart pomotui.service" >&2
         return 0
-    fi
-    echo "WARNING: Pomotui was upgraded, but the installing user could not be identified." >&2
-    echo "Run in your user session: systemctl --user daemon-reload && systemctl --user restart pomotui.service" >&2
+    }
+    while read -r pomotui_uid pomotui_user pomotui_rest; do
+        case "$pomotui_uid" in ''|*[!0-9]*|0) continue ;; esac
+        if runuser -u "$pomotui_user" -- env \
+            XDG_RUNTIME_DIR="/run/user/$pomotui_uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$pomotui_uid/bus" \
+            systemctl --user daemon-reload \
+            && runuser -u "$pomotui_user" -- env \
+                XDG_RUNTIME_DIR="/run/user/$pomotui_uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$pomotui_uid/bus" \
+                systemctl --user try-restart pomotui.service; then
+            continue
+        fi
+        echo "WARNING: Pomotui was upgraded, but the Timer Service for $pomotui_user could not be restarted." >&2
+        echo "Run as $pomotui_user: systemctl --user daemon-reload && systemctl --user restart pomotui.service" >&2
+    done <<EOF
+$pomotui_users
+EOF
     return 0
 }
 

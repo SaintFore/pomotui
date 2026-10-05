@@ -20,6 +20,7 @@ install=pomotui.install
 
 prepare() {
     cd "${pkgname}-${pkgver}"
+    cp packaging/aur/pomotui.install "$startdir/pomotui.install"
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 

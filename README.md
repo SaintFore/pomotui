@@ -72,8 +72,9 @@ The AUR packages install the executables in `/usr/bin`. The command above
 enables the systemd user socket and starts Pomotui immediately.
 
 Update the git package and its VCS dependencies with `paru -Syu --devel`.
-The package makes a best-effort attempt to restart the Timer Service after an
-upgrade. If it prints a restart warning, run:
+Package upgrades automatically restart running Timer Services for logged-in and
+lingering users. Inactive services remain stopped. If the user service manager
+cannot be reached, the upgrade prints a warning; run:
 
 ```sh
 systemctl --user daemon-reload
