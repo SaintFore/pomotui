@@ -324,7 +324,7 @@ impl Document {
         }
         if !matches!(document.version, 4 | 5 | 6 | FORMAT_VERSION) {
             return Err(format!(
-                "unsupported sync document version {}; reset local pre-release data with `pomotui reset --all-data --confirm`",
+                "unsupported sync document version {}; upgrade this device’s Timer Service to read this exchange file",
                 document.version
             ));
         }
