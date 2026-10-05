@@ -273,6 +273,11 @@ requests one immediately; because the work runs in the background, use
 `pomotui --json sync status` to confirm that `in_progress` is `false`,
 `last_success` is set, and `last_error` is `null`.
 
+When the main file already contains the canonical merged document, these
+attempts still import records and update sync health but leave the file intact.
+This avoids unnecessary filesystem activity; rewriting identical contents alone
+is not sufficient to cause a Syncthing content conflict.
+
 Work can continue offline. Same-titled Tasks retain distinct identities,
 concurrent edits resolve deterministically, and deletions do not invalidate a
 Task used by the local Current Session.
