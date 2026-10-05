@@ -1165,7 +1165,15 @@ impl Service {
         }
     }
 
-    fn claim_evidence(&self, milestone_id: u64, threshold: u64) -> Option<ClaimEvidence> {
+    fn claim_evidence(
+        &self,
+        milestone_id: u64,
+        threshold: u64,
+        chain_id: u64,
+    ) -> Option<ClaimEvidence> {
+        if chain_id != self.current_chain_id {
+            return None;
+        }
         let projection = project_session_reviews(&self.sync.records);
         let debt = project_reward_debt(&self.sync.records)
             .into_iter()
@@ -1325,17 +1333,10 @@ impl Service {
                         },
                         |unlock| unlock.id,
                     );
-                let _chain_length = if chain_id == self.current_chain_id {
-                    self.chain_links.len()
-                } else {
-                    self.ended_chains
-                        .iter()
-                        .find(|chain| chain.id == chain_id)
-                        .map_or(0, |chain| chain.links.len())
-                } as u64;
                 let state = if projected.claimed_at.is_some() {
                     "claimed"
-                } else if self.reward_progress(milestone_id, Some(chain_id)) >= projected.threshold
+                } else if chain_id == self.current_chain_id
+                    && self.reward_progress(milestone_id, Some(chain_id)) >= projected.threshold
                 {
                     "unlocked"
                 } else {
@@ -3186,7 +3187,7 @@ impl Handler for Service {
                     .reward_unlocks
                     .iter()
                     .find(|u| u.id == unlock_id)
-                    .and_then(|u| self.claim_evidence(u.milestone_id, u.threshold));
+                    .and_then(|u| self.claim_evidence(u.milestone_id, u.threshold, u.chain_id));
                 let Some(unlock) = self
                     .reward_unlocks
                     .iter_mut()
@@ -3194,7 +3195,7 @@ impl Handler for Service {
                 else {
                     return Self::rejected(format!("Reward unlock {unlock_id} does not exist"));
                 };
-                if unlock.state == "unlocked" {
+                if unlock.state == "unlocked" && unlock.chain_id == self.current_chain_id {
                     unlock.state = "claimed".into();
                     unlock.claimed_at = Some(self.wall);
                     let milestone_id = unlock.milestone_id;
