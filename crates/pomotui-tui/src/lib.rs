@@ -1750,6 +1750,15 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             reward.threshold
         )));
     }
+    for debt in &snapshot.reward_debt {
+        lines.push(Line::from(format!(
+            "{}: {}  {}: {}",
+            text(language, "Reward debt", "奖励欠额"),
+            debt.outstanding,
+            text(language, "Repaid successes", "已偿还成功"),
+            debt.repaid
+        )));
+    }
     for reward in &snapshot.current_chain_rewards {
         lines.push(Line::from(format!("{}  [{}]", reward.name, reward.state)));
     }
@@ -2110,6 +2119,20 @@ fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                 .add_modifier(Modifier::BOLD),
         )),
     ]);
+    for debt in &snapshot.reward_debt {
+        lines.push(Line::from(format!(
+            "{} {} · {} {} · {}",
+            text(language, "Reward debt", "奖励欠额"),
+            debt.outstanding,
+            text(language, "Repaid", "已偿还"),
+            debt.repaid,
+            text(
+                language,
+                "Successes repay debt before advancing this milestone.",
+                "成功先偿还欠额，再推进此门槛。"
+            )
+        )));
+    }
     if snapshot.current_chain_rewards.is_empty() {
         lines.push(Line::from(text(
             language,
@@ -4313,6 +4336,7 @@ mod tests {
             recent_ended_chains: vec![],
             next_reward: None,
             reward_milestones: vec![],
+            reward_debt: vec![],
             current_chain_rewards: vec![],
         }
     }

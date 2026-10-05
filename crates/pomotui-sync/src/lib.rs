@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 5;
+pub const FORMAT_VERSION: u16 = 6;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -175,6 +175,8 @@ pub enum RecordPayload {
         milestone_entity_id: EntityId,
         previous_chain_break_review_entity_id: Option<EntityId>,
         claimed_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<ClaimEvidence>,
     },
 }
 
@@ -238,7 +240,7 @@ impl Document {
         if document.format != FORMAT_NAME {
             return Err("unsupported sync document format".into());
         }
-        if !matches!(document.version, 4 | FORMAT_VERSION) {
+        if !matches!(document.version, 4 | 5 | FORMAT_VERSION) {
             return Err(format!(
                 "unsupported sync document version {}; reset local pre-release data with `pomotui reset --all-data --confirm`",
                 document.version
@@ -552,6 +554,7 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
                 milestone_entity_id,
                 previous_chain_break_review_entity_id,
                 claimed_at,
+                ..
             } => {
                 if deleted_chain_anchors.contains(&previous_chain_break_review_entity_id.as_ref()) {
                     continue;
@@ -856,8 +859,27 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             RecordPayload::TaskDeleted
             | RecordPayload::SessionDeleted
             | RecordPayload::EndedChainDeleted { .. }
-            | RecordPayload::RewardMilestoneDeleted
-            | RecordPayload::RewardClaimed { .. } => {}
+            | RecordPayload::RewardMilestoneDeleted => {}
+            RecordPayload::RewardClaimed { evidence, .. } => {
+                if let Some(e) = evidence {
+                    let support = e
+                        .supporting_review_entity_ids
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let observed = e
+                        .observed_review_entity_ids
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if e.threshold == 0
+                        || support.len() != e.supporting_review_entity_ids.len()
+                        || observed.len() != e.observed_review_entity_ids.len()
+                        || !support.is_subset(&observed)
+                        || !support.contains(&e.frontier_review_entity_id)
+                    {
+                        return Err("invalid immutable reward claim evidence".into());
+                    }
+                }
+            }
             RecordPayload::RewardMilestoneVersion {
                 name, threshold, ..
             } => {
@@ -1196,4 +1218,132 @@ impl fmt::Display for RecordId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+
+/// Immutable observed support for one logical milestone/chain claim. Legacy claims omit it.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ClaimEvidence {
+    pub threshold: u64,
+    pub supporting_review_entity_ids: Vec<EntityId>,
+    pub observed_review_entity_ids: Vec<EntityId>,
+    pub frontier_review_entity_id: EntityId,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RewardDebt {
+    pub milestone_entity_id: EntityId,
+    pub outstanding: u64,
+    pub repaid: u64,
+    pub repayment_review_entity_ids: Vec<EntityId>,
+}
+/// Replays accounting in source-session Review Order, independently of delivery time.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
+    let ends = records
+        .iter()
+        .filter_map(|r| match &r.payload {
+            RecordPayload::SessionEnded { ended_at, .. } => Some((&r.entity_id, *ended_at)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut reviews = records
+        .iter()
+        .filter_map(|r| match &r.payload {
+            RecordPayload::SessionReviewed {
+                session_entity_id,
+                judgment,
+                ..
+            } => ends
+                .get(session_entity_id)
+                .map(|end| ((*end, r.entity_id.clone()), *judgment)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    reviews.sort_by(|a, b| a.0.cmp(&b.0));
+    let positions = reviews
+        .iter()
+        .enumerate()
+        .map(|(i, (key, _))| (&key.1, i))
+        .collect::<BTreeMap<_, _>>();
+    let mut claims = BTreeMap::new();
+    for r in records {
+        if let RecordPayload::RewardClaimed {
+            milestone_entity_id,
+            previous_chain_break_review_entity_id,
+            evidence: Some(e),
+            ..
+        } = &r.payload
+        {
+            let key = (
+                milestone_entity_id.clone(),
+                previous_chain_break_review_entity_id.clone(),
+            );
+            claims
+                .entry(key)
+                .and_modify(|current: &mut &ClaimEvidence| {
+                    if e < *current {
+                        *current = e;
+                    }
+                })
+                .or_insert(e);
+        }
+    }
+    let mut accounts = BTreeMap::<EntityId, RewardDebt>::new();
+    let mut obligations = claims.into_iter().collect::<Vec<_>>();
+    obligations.sort_by_key(|(key, e)| {
+        (
+            positions
+                .get(&e.frontier_review_entity_id)
+                .copied()
+                .unwrap_or(usize::MAX),
+            key.clone(),
+        )
+    });
+    for ((milestone, _), e) in obligations {
+        let frontier = positions.get(&e.frontier_review_entity_id).copied();
+        let last_break = frontier.and_then(|end| {
+            (0..=end)
+                .rev()
+                .find(|i| reviews[*i].1 == SessionReviewJudgment::Failed)
+        });
+        let support = e
+            .supporting_review_entity_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|id| {
+                positions.get(*id).is_some_and(|i| {
+                    Some(*i) > last_break && reviews[*i].1 == SessionReviewJudgment::Successful
+                })
+            })
+            .count() as u64;
+        let account = accounts
+            .entry(milestone.clone())
+            .or_insert_with(|| RewardDebt {
+                milestone_entity_id: milestone,
+                outstanding: 0,
+                repaid: 0,
+                repayment_review_entity_ids: Vec::new(),
+            });
+        let mut missing = e.threshold.saturating_sub(support);
+        if let Some(frontier) = frontier {
+            for (_, ((_, id), judgment)) in reviews.iter().enumerate().skip(frontier + 1) {
+                if missing == 0 {
+                    break;
+                }
+                if *judgment == SessionReviewJudgment::Successful
+                    && !e.observed_review_entity_ids.contains(id)
+                    && !account.repayment_review_entity_ids.contains(id)
+                {
+                    account.repayment_review_entity_ids.push(id.clone());
+                    account.repaid += 1;
+                    missing -= 1;
+                }
+            }
+        }
+        account.outstanding += missing;
+    }
+    accounts.into_values().collect()
 }

@@ -15,11 +15,12 @@ use pomotui_protocol::{
     Snapshot, SyncStatus, TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use pomotui_sync::{
-    ActivityProjection, Document as SyncDocument, EntityId, FORMAT_VERSION as SYNC_FORMAT_VERSION,
-    MutationInstant, Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind,
-    RewardMilestoneProjection, RewardProjection, SessionKind as SyncSessionKind,
-    SessionOutcome as SyncSessionOutcome, SessionReviewJudgment, SessionReviewProjection, SyncPlan,
-    TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
+    ActivityProjection, ClaimEvidence, Document as SyncDocument, EntityId,
+    FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant, Record as SyncRecord, RecordId,
+    RecordPayload, ReviewedTaskKind, RewardMilestoneProjection, RewardProjection,
+    SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome, SessionReviewJudgment,
+    SessionReviewProjection, SyncPlan, TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
+    project_reward_debt, project_session_reviews,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -749,7 +750,7 @@ impl Service {
             next_reward: self
                 .reward_milestones
                 .iter()
-                .filter(|milestone| milestone.threshold > self.current_chain_length)
+                .filter(|milestone| milestone.threshold > self.reward_progress(milestone.id, None))
                 .min_by_key(|milestone| milestone.threshold)
                 .map(|milestone| RewardMilestoneSummary {
                     id: milestone.id,
@@ -771,6 +772,14 @@ impl Service {
                 milestones.sort_by_key(|milestone| (milestone.threshold, milestone.id));
                 milestones
             },
+            reward_debt: project_reward_debt(&self.sync.records)
+                .into_iter()
+                .map(|d| pomotui_protocol::RewardDebtSummary {
+                    milestone_identity: d.milestone_entity_id.as_str().to_owned(),
+                    outstanding: d.outstanding,
+                    repaid: d.repaid,
+                })
+                .collect(),
             current_chain_rewards: self
                 .reward_unlocks
                 .iter()
@@ -983,7 +992,7 @@ impl Service {
             let exists = self.reward_unlocks.iter().any(|unlock| {
                 unlock.chain_id == self.current_chain_id && unlock.milestone_id == milestone.id
             });
-            if milestone.threshold <= self.current_chain_length && !exists {
+            if milestone.threshold <= self.reward_progress(milestone.id, None) && !exists {
                 self.reward_unlocks.push(RewardUnlockState {
                     id: self.next_reward_unlock_id,
                     milestone_id: milestone.id,
@@ -1022,6 +1031,75 @@ impl Service {
                 self.next_reward_unlock_id = self.next_reward_unlock_id.saturating_add(1);
             }
         }
+    }
+
+    fn reward_progress(&self, milestone_id: u64, chain_id: Option<u64>) -> u64 {
+        let chain_id = chain_id.unwrap_or(self.current_chain_id);
+        let links = if chain_id == self.current_chain_id {
+            &self.chain_links
+        } else {
+            self.ended_chains
+                .iter()
+                .find(|c| c.id == chain_id)
+                .map_or(&self.chain_links, |c| &c.links)
+        };
+        let debt = project_reward_debt(&self.sync.records)
+            .into_iter()
+            .find(|d| {
+                self.sync.reward_milestone_entities.get(&milestone_id)
+                    == Some(&d.milestone_entity_id)
+            });
+        if let Some(debt) = debt {
+            if debt.outstanding > 0 {
+                return 0;
+            }
+            let used = links
+                .iter()
+                .filter(|link| {
+                    self.sync
+                        .session_review_entries
+                        .iter()
+                        .any(|(entity, local)| {
+                            *local == link.id && debt.repayment_review_entity_ids.contains(entity)
+                        })
+                })
+                .count() as u64;
+            (links.len() as u64).saturating_sub(used)
+        } else {
+            links.len() as u64
+        }
+    }
+
+    fn claim_evidence(&self, milestone_id: u64, threshold: u64) -> Option<ClaimEvidence> {
+        let projection = project_session_reviews(&self.sync.records);
+        let used = project_reward_debt(&self.sync.records)
+            .into_iter()
+            .find(|d| {
+                self.sync.reward_milestone_entities.get(&milestone_id)
+                    == Some(&d.milestone_entity_id)
+            })
+            .map_or_else(Vec::new, |d| d.repayment_review_entity_ids);
+        let supporting_review_entity_ids = projection
+            .current_chain
+            .links
+            .iter()
+            .filter(|r| !used.contains(&r.review_entity_id))
+            .map(|r| r.review_entity_id.clone())
+            .collect::<Vec<_>>();
+        let frontier_review_entity_id = supporting_review_entity_ids.last()?.clone();
+        let observed_review_entity_ids = self
+            .sync
+            .records
+            .iter()
+            .filter(|r| matches!(r.payload, RecordPayload::SessionReviewed { .. }))
+            .map(|r| r.entity_id.clone())
+            .collect();
+        Some(ClaimEvidence {
+            threshold,
+            supporting_review_entity_ids,
+            observed_review_entity_ids,
+            frontier_review_entity_id,
+        })
     }
 
     fn current_chain_anchor(&self) -> Option<EntityId> {
@@ -1140,7 +1218,7 @@ impl Service {
                         },
                         |unlock| unlock.id,
                     );
-                let chain_length = if chain_id == self.current_chain_id {
+                let _chain_length = if chain_id == self.current_chain_id {
                     self.chain_links.len()
                 } else {
                     self.ended_chains
@@ -1150,7 +1228,8 @@ impl Service {
                 } as u64;
                 let state = if projected.claimed_at.is_some() {
                     "claimed"
-                } else if chain_length >= projected.threshold {
+                } else if self.reward_progress(milestone_id, Some(chain_id)) >= projected.threshold
+                {
                     "unlocked"
                 } else {
                     "unavailable"
@@ -1803,6 +1882,7 @@ impl Service {
                         milestone_entity_id,
                         previous_chain_break_review_entity_id,
                         claimed_at,
+                        evidence: None,
                     },
                 ));
             }
@@ -2945,6 +3025,11 @@ impl Handler for Service {
                 }
             }
             Command::RewardClaim { unlock_id } => {
+                let claim_evidence = self
+                    .reward_unlocks
+                    .iter()
+                    .find(|u| u.id == unlock_id)
+                    .and_then(|u| self.claim_evidence(u.milestone_id, u.threshold));
                 let Some(unlock) = self
                     .reward_unlocks
                     .iter_mut()
@@ -3001,6 +3086,7 @@ impl Handler for Service {
                                 milestone_entity_id,
                                 previous_chain_break_review_entity_id,
                                 claimed_at,
+                                evidence: claim_evidence,
                             },
                         ));
                         self.sync.records.sort();
@@ -3017,6 +3103,7 @@ impl Handler for Service {
                     value: serde_json::json!({
                         "milestones": self.reward_milestones,
                         "unlocks": self.reward_unlocks,
+                        "debt": project_reward_debt(&self.sync.records),
                     }),
                 };
             }
@@ -3263,7 +3350,7 @@ impl PersistedService {
         };
         let clock = PlatformClock::default();
         let persisted = Self {
-            data_format_version: 2,
+            data_format_version: 3,
             timer: PersistedTimer {
                 session,
                 current_task: state.current_task.map(TaskId::get),
@@ -3327,7 +3414,7 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
-        if !matches!(persisted.data_format_version, 0 | 2) {
+        if !matches!(persisted.data_format_version, 0 | 2 | 3) {
             return Err(format!(
                 "unsupported persisted-state format {}; supported formats are unversioned released state and format 2",
                 persisted.data_format_version
@@ -3791,7 +3878,7 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&document).expect("valid JSON");
         assert_eq!(json["format"], "pomotui.sync");
-        assert_eq!(json["version"], 5);
+        assert_eq!(json["version"], SYNC_FORMAT_VERSION);
         assert_eq!(json["integrity"]["record_count"], 1);
         assert_eq!(
             json["integrity"]["records_sha256"]
