@@ -1,5 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::fmt::Write as _;
+
 use pomotui_protocol::{Command, PROTOCOL_VERSION, ProtocolError, Request, Response, SessionKind};
 
 #[allow(clippy::too_many_lines)]
@@ -176,7 +178,10 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
                 ""
             },
             reminder_delivery_label(&snapshot.reminder_delivery),
-            snapshot.reward_debt.iter().map(|d|format!(" · reward debt {} (repaid {})",d.outstanding,d.repaid)).collect::<String>()
+            snapshot.reward_debt.iter().fold(String::new(), |mut text, debt| {
+                let _ = write!(text, " · reward debt {} (repaid {}, credit {})", debt.outstanding, debt.repaid, debt.excess_credit);
+                text
+            })
         )),
         Response::Data { value }
             if value.get("format_version").is_some()
