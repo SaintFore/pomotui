@@ -3508,7 +3508,7 @@ impl PersistedService {
         };
         let clock = PlatformClock::default();
         let persisted = Self {
-            data_format_version: 3,
+            data_format_version: 4,
             timer: PersistedTimer {
                 session,
                 current_task: state.current_task.map(TaskId::get),
@@ -3572,12 +3572,16 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
-        if !matches!(persisted.data_format_version, 0 | 2 | 3) {
+        if !matches!(persisted.data_format_version, 0 | 2 | 3 | 4) {
             return Err(format!(
-                "unsupported persisted-state format {}; supported formats are unversioned released state and format 2",
+                "unsupported persisted-state format {}; supported formats are unversioned released state and formats 2, 3, and 4",
                 persisted.data_format_version
             ));
         }
+        pomotui_sync::Document::with_beginning(
+            persisted.sync.beginning.clone(),
+            &persisted.sync.records,
+        )?;
         let durations = SessionDurations::new(
             persisted.timer.focus_seconds,
             persisted.timer.short_break_seconds,
