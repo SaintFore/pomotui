@@ -334,3 +334,13 @@ Record IDs; persisted format 3 accepts the supported unversioned and format 2
 states. Upgrade all Devices before synchronizing: older software rejects the new
 format. Legacy claims without observed support remain claimed and accrue no
 inferred debt. Missing evidence cannot be reconstructed from a claim timestamp.
+
+## Fresh Start across devices
+
+Run `pomotui fresh-start --confirm` while the Timer Service is running to begin again. This clears Tasks, Session History, Action Chains, Rewards, Reward Debt and Credits, current timer work, review state, and queued reminders. The protected Void Task remains available, the timer becomes idle, and ordinary configuration and sync settings are preserved. The confirmation is required in both the CLI and service protocol.
+
+The beginning is committed locally even while the exchange path is inaccessible. Sync status reports that it awaits synchronization. Once published, another device adopts the beginning and clears its retired business state atomically; its sync status keeps a notice that Fresh Start arrived from another device. Old files, conflict copies, delayed offline work and restored old databases cannot bring retired work back after the winning beginning is observed. Concurrent Fresh Starts select the same winner deterministically; work made under a losing beginning is retired too.
+
+The exchange document retains the beginning even with no records. Format 7 verifies both that metadata and immutable record membership. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
+
+`pomotui reset --all-data --confirm` retains its existing local database backup/removal behavior and stopped-service requirement.

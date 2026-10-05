@@ -395,6 +395,34 @@ impl SqliteRepository {
         Ok(())
     }
 
+    /// Atomically replaces all business state and cancels retired reminder effects.
+    pub fn save_fresh_start(
+        &mut self,
+        payload: &str,
+        key: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        let transaction = self.connection.transaction()?;
+        for table in [
+            "mutation_keys",
+            "reminder_outbox",
+            "reminders",
+            "pending_reviews",
+            "action_chains",
+            "session_history",
+            "tasks",
+            "focus_cycle",
+            "recovery_observations",
+        ] {
+            transaction.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        transaction.execute("INSERT INTO current_session(singleton,payload) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET payload=excluded.payload", [payload])?;
+        if let Some(key) = key {
+            transaction.execute("INSERT INTO mutation_keys(key) VALUES (?1)", [key])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Atomically saves state and commits a mutation identity at most once.
     ///
     /// # Errors

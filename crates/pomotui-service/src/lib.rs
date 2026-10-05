@@ -32,6 +32,10 @@ const MAX_REMINDER_ATTEMPTS: u32 = 3;
 const MAX_REMINDER_AGE_SECONDS: i64 = 60 * 60;
 
 trait ServiceRepository: Send {
+    fn save_fresh_start(&mut self, payload: &str, key: Option<&str>) -> Result<(), String> {
+        let _ = (payload, key);
+        Err("Fresh Start unavailable in repository".into())
+    }
     fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String>;
     fn save_state(&mut self, payload: &str) -> Result<(), String>;
     fn save_completion(
@@ -62,6 +66,9 @@ trait ServiceRepository: Send {
 }
 
 impl ServiceRepository for SqliteRepository {
+    fn save_fresh_start(&mut self, payload: &str, key: Option<&str>) -> Result<(), String> {
+        SqliteRepository::save_fresh_start(self, payload, key).map_err(|e| e.to_string())
+    }
     fn save_state_once(&mut self, key: &str, payload: &str) -> Result<bool, String> {
         self.save_state_once(key, payload)
             .map_err(|error| error.to_string())
@@ -171,6 +178,8 @@ pub struct Service {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct SyncState {
+    #[serde(default)]
+    beginning: pomotui_sync::Beginning,
     path: Option<std::path::PathBuf>,
     records: Vec<SyncRecord>,
     task_entities: std::collections::BTreeMap<u64, EntityId>,
@@ -195,6 +204,10 @@ struct SyncState {
     last_error_stage: Option<String>,
     #[serde(default)]
     warning: Option<String>,
+    #[serde(default)]
+    reset_notice: Option<String>,
+    #[serde(default)]
+    awaiting_fresh_start_sync: bool,
     file_record_count: Option<usize>,
     #[serde(skip)]
     in_progress: bool,
@@ -397,6 +410,74 @@ impl Service {
         Ok(SyncWork { path })
     }
 
+    pub fn sync_document_for(&self, path: &Path) -> Result<pomotui_sync::Document, String> {
+        pomotui_sync::Document::with_beginning(
+            self.sync.beginning.clone(),
+            &self.sync_records_for(path)?,
+        )
+    }
+
+    pub fn apply_sync_document(
+        &mut self,
+        path: &Path,
+        incoming: &pomotui_sync::Document,
+    ) -> Result<pomotui_sync::Document, String> {
+        if self.sync.path.as_deref() != Some(path) {
+            return Err("synchronization configuration changed during the attempt".into());
+        }
+        let merged = pomotui_sync::union_documents(&self.sync_document_for(path)?, incoming)?;
+        if merged.beginning() > &self.sync.beginning {
+            self.replace_beginning(&merged, None, true)?;
+        } else {
+            self.apply_sync_records(path, merged.records())?;
+        }
+        self.sync_document_for(path)
+    }
+
+    fn replace_beginning(
+        &mut self,
+        document: &pomotui_sync::Document,
+        key: Option<&str>,
+        remote: bool,
+    ) -> Result<(), String> {
+        let mut replacement = Self::new();
+        let state = self.timer.state();
+        replacement.timer =
+            Timer::new(state.durations, state.rounds_per_cycle).map_err(|e| e.to_string())?;
+        replacement.now = self.now;
+        replacement.wall = self.wall;
+        replacement.reminders_enabled = self.reminders_enabled;
+        replacement.sound_enabled = self.sound_enabled;
+        replacement.sync.path = self.sync.path.clone();
+        replacement.sync.background = self.sync.background;
+        replacement.sync.beginning = document.beginning().clone();
+        replacement.sync.legacy_export_completed = true;
+        replacement.sync.records = document.records().to_vec();
+        replacement.sync.reset_notice =
+            remote.then(|| "Fresh Start received from another device".into());
+        replacement.sync.awaiting_fresh_start_sync = !remote;
+        let plan = plan_sync(&[], document.records())?;
+        replacement.apply_task_projections(plan.task_projections())?;
+        replacement.apply_activity_projections(plan.activity_projections());
+        replacement.apply_session_review_projection(plan.session_review_projection())?;
+        replacement.apply_reward_projection(plan.reward_projection());
+        if replacement.void_task_id.is_none() {
+            replacement.ensure_void_task()?;
+        }
+        if let Some(key) = key {
+            replacement.applied_keys.insert(key.into());
+        }
+        let payload = PersistedService::encode(&replacement)?;
+        if let Some(repository) = self.repository.as_mut() {
+            repository.save_fresh_start(&payload, key)?;
+        }
+        std::mem::swap(&mut replacement.repository, &mut self.repository);
+        std::mem::swap(&mut replacement.reminder, &mut self.reminder);
+        replacement.last_successful_commit = Some(self.wall);
+        *self = replacement;
+        Ok(())
+    }
+
     /// Captures the latest locally retained records for worker-side planning.
     ///
     /// # Errors
@@ -524,6 +605,7 @@ impl Service {
         self.sync.in_progress = false;
         self.sync.file_record_count = Some(file_record_count);
         self.sync.last_success = Some(self.wall);
+        self.sync.awaiting_fresh_start_sync = false;
         self.sync.last_error = None;
         self.sync.last_error_stage = None;
         if warning.is_some() {
@@ -1015,7 +1097,8 @@ impl Service {
                     self.sync
                         .reward_unlock_entities
                         .insert(self.next_reward_unlock_id, reward_entity.clone());
-                    self.sync.records.push(SyncRecord::new(
+                    self.sync.records.push(SyncRecord::in_beginning(
+                        self.sync.beginning.clone(),
                         RecordId::random(),
                         reward_entity,
                         self.next_sync_mutation_time(),
@@ -1140,7 +1223,8 @@ impl Service {
             .entry(id)
             .or_insert_with(EntityId::random)
             .clone();
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             entity_id,
             self.next_sync_mutation_time(),
@@ -1433,7 +1517,8 @@ impl Service {
                 })
             })
             .ok_or_else(|| format!("Chain entry {entry_id} does not exist"))?;
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             entity_id,
             self.next_sync_mutation_time(),
@@ -1480,7 +1565,8 @@ impl Service {
         for entry_id in observed_break_entry_ids {
             observed_chain_break_review_entity_ids.push(self.sync_review_entity_id(entry_id)?);
         }
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             break_entity_id,
             self.next_sync_mutation_time(),
@@ -1542,7 +1628,8 @@ impl Service {
     fn record_task_creation(&mut self, task_id: u64, title: &str) {
         let entity_id = EntityId::random();
         self.sync.task_entities.insert(task_id, entity_id.clone());
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             entity_id,
             self.next_sync_mutation_time(),
@@ -1583,7 +1670,8 @@ impl Service {
             .get(&task_id)
             .cloned()
             .ok_or_else(|| format!("Task {task_id} has no global identity"))?;
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             entity_id,
             self.next_sync_mutation_time(),
@@ -1600,7 +1688,8 @@ impl Service {
             .get(&task_id)
             .cloned()
             .ok_or_else(|| format!("Task {task_id} has no global identity"))?;
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             entity_id,
             self.next_sync_mutation_time(),
@@ -1631,7 +1720,8 @@ impl Service {
             .task_id
             .filter(|_| !is_void)
             .and_then(|id| self.sync.task_entities.get(&id.get()).cloned());
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             entity_id,
             self.next_sync_mutation_time(),
@@ -1681,7 +1771,8 @@ impl Service {
         self.sync
             .session_review_entries
             .insert(review_entity_id.clone(), review.entry_id);
-        self.sync.records.push(SyncRecord::new(
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
             RecordId::random(),
             review_entity_id,
             self.next_sync_mutation_time(),
@@ -1835,7 +1926,8 @@ impl Service {
                 self.sync
                     .reward_milestone_entities
                     .insert(unlock.milestone_id, entity.clone());
-                self.sync.records.push(SyncRecord::new(
+                self.sync.records.push(SyncRecord::in_beginning(
+                    self.sync.beginning.clone(),
                     RecordId::random(),
                     entity.clone(),
                     self.next_sync_mutation_time(),
@@ -1845,7 +1937,8 @@ impl Service {
                         budget: unlock.budget,
                     },
                 ));
-                self.sync.records.push(SyncRecord::new(
+                self.sync.records.push(SyncRecord::in_beginning(
+                    self.sync.beginning.clone(),
                     RecordId::random(),
                     entity.clone(),
                     self.next_sync_mutation_time(),
@@ -1874,7 +1967,8 @@ impl Service {
             self.sync
                 .reward_unlock_entities
                 .insert(unlock.id, reward_entity.clone());
-            self.sync.records.push(SyncRecord::new(
+            self.sync.records.push(SyncRecord::in_beginning(
+                self.sync.beginning.clone(),
                 RecordId::random(),
                 reward_entity.clone(),
                 self.next_sync_mutation_time(),
@@ -1888,7 +1982,8 @@ impl Service {
                 },
             ));
             if let Some(claimed_at) = unlock.claimed_at {
-                self.sync.records.push(SyncRecord::new(
+                self.sync.records.push(SyncRecord::in_beginning(
+                    self.sync.beginning.clone(),
                     RecordId::random(),
                     reward_entity,
                     self.next_sync_mutation_time(),
@@ -1929,30 +2024,14 @@ impl Service {
             .sync
             .path
             .clone()
-            .ok_or_else(|| "synchronization is not enabled".to_owned())?;
-        self.sync.last_attempt = Some(self.wall);
-        let source = read_sync_file(&path)?.ok_or_else(|| {
-            "sync file does not exist; use `pomotui sync rebuild` to create it from local records"
-                .to_owned()
-        })?;
-        let incoming = SyncDocument::from_json(&source)?.into_records();
-        self.sync.file_record_count = Some(incoming.len());
-        let plan = plan_sync(&self.sync.records, &incoming)?;
-        self.sync.records = plan.retained_records().to_vec();
-        self.apply_task_projections(plan.task_projections())?;
-        self.apply_activity_projections(plan.activity_projections());
-        self.apply_session_review_projection(plan.session_review_projection())?;
-        self.apply_reward_projection(plan.reward_projection());
-        self.set_clock_warning(plan.retained_records());
-        self.persist(None)?;
-        let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
-        replace_sync_file(&path, &serialized)?;
-        self.sync.file_record_count = Some(self.sync.records.len());
-        self.sync.last_success = Some(self.wall);
-        self.sync.last_error = None;
-        self.sync.last_error_stage = None;
-        self.persist(None)?;
-        Ok(self.sync.records.len())
+            .ok_or("synchronization is not enabled")?;
+        let source =
+            read_sync_file(&path)?.ok_or("sync file does not exist; use `pomotui sync rebuild`")?;
+        let incoming = SyncDocument::from_json(&source)?;
+        let retained = self.apply_sync_document(&path, &incoming)?;
+        replace_sync_file(&path, &retained.to_json()?)?;
+        self.finish_sync_success(&path, retained.records().len(), None);
+        Ok(retained.records().len())
     }
 
     /// Performs the one-time legacy export after validating the exchange file.
@@ -1962,11 +2041,30 @@ impl Service {
         self.observe_time();
         let source = read_sync_file(path)?;
         let missing_file = source.is_none();
+        if let Some(source) = source.as_deref() {
+            let incoming_document = SyncDocument::from_json(source)?;
+            if incoming_document.beginning() > &self.sync.beginning {
+                let previous_path = self.sync.path.clone();
+                self.sync.path = Some(path.to_owned());
+                if let Err(error) = self.replace_beginning(&incoming_document, None, true) {
+                    self.sync.path = previous_path;
+                    return Err(error);
+                }
+                return self.merge_sync_file();
+            }
+        }
+
         let incoming = source
             .as_deref()
             .map(SyncDocument::from_json)
             .transpose()?
-            .map_or_else(Vec::new, SyncDocument::into_records);
+            .map_or_else(Vec::new, |document| {
+                if document.beginning() == &self.sync.beginning {
+                    document.into_records()
+                } else {
+                    Vec::new()
+                }
+            });
         // Validate the complete incoming set before backup creation or mutation.
         let _ = plan_sync(&self.sync.records, &incoming)?;
 
@@ -2002,7 +2100,9 @@ impl Service {
             return Err(error);
         }
 
-        let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
+        let serialized =
+            SyncDocument::with_beginning(self.sync.beginning.clone(), &self.sync.records)?
+                .to_json()?;
         if let Err(error) = replace_sync_file(path, &serialized) {
             self.sync.last_error = Some(error.clone());
             self.sync.last_error_stage = Some("initial_publication".into());
@@ -2013,6 +2113,7 @@ impl Service {
         }
         self.sync.file_record_count = Some(self.sync.records.len());
         self.sync.last_success = Some(self.wall);
+        self.sync.awaiting_fresh_start_sync = false;
         self.sync.last_error = None;
         self.sync.last_error_stage = None;
         self.persist(None)?;
@@ -2026,10 +2127,13 @@ impl Service {
             .clone()
             .ok_or_else(|| "synchronization is not enabled".to_owned())?;
         self.sync.last_attempt = Some(self.wall);
-        let serialized = SyncDocument::new(&self.sync.records)?.to_json()?;
+        let serialized =
+            SyncDocument::with_beginning(self.sync.beginning.clone(), &self.sync.records)?
+                .to_json()?;
         replace_sync_file(&path, &serialized)?;
         self.sync.file_record_count = Some(self.sync.records.len());
         self.sync.last_success = Some(self.wall);
+        self.sync.awaiting_fresh_start_sync = false;
         self.sync.last_error = None;
         self.sync.last_error_stage = None;
         self.sync.warning = Some(
@@ -2367,7 +2471,16 @@ impl Service {
             last_success: self.sync.last_success,
             last_error: self.sync.last_error.clone(),
             last_error_stage: self.sync.last_error_stage.clone(),
-            warning: self.sync.warning.clone(),
+            warning: self
+                .sync
+                .reset_notice
+                .clone()
+                .or_else(|| {
+                    self.sync
+                        .awaiting_fresh_start_sync
+                        .then(|| "Fresh Start committed; awaiting synchronization".into())
+                })
+                .or_else(|| self.sync.warning.clone()),
             local_record_count: self.sync.records.len(),
             file_record_count: self.sync.file_record_count,
         })
@@ -2560,6 +2673,25 @@ impl Handler for Service {
             };
         }
         let result = match request.command {
+            Command::FreshStart { confirmed } => {
+                if !confirmed {
+                    return Self::rejected("Fresh Start requires explicit confirmation");
+                }
+                let result = self
+                    .sync
+                    .beginning
+                    .successor()
+                    .and_then(|beginning| pomotui_sync::Document::with_beginning(beginning, &[]))
+                    .and_then(|document| {
+                        self.replace_beginning(&document, mutation_key.as_deref(), false)
+                    });
+                return match result {
+                    Ok(()) => Response::Snapshot {
+                        snapshot: self.snapshot(),
+                    },
+                    Err(error) => self.durable_rejected(error),
+                };
+            }
             Command::Status => {
                 return Response::Snapshot {
                     snapshot: self.snapshot(),
@@ -2881,7 +3013,8 @@ impl Handler for Service {
                 } else {
                     for id in &ids {
                         if let Some(entity_id) = self.sync.session_entities.get(id).cloned() {
-                            self.sync.records.push(SyncRecord::new(
+                            self.sync.records.push(SyncRecord::in_beginning(
+                                self.sync.beginning.clone(),
                                 RecordId::random(),
                                 entity_id,
                                 self.next_sync_mutation_time(),
@@ -3027,7 +3160,8 @@ impl Handler for Service {
                     Err(format!("Reward Milestone {id} does not exist"))
                 } else {
                     if let Some(entity_id) = entity_id {
-                        self.sync.records.push(SyncRecord::new(
+                        self.sync.records.push(SyncRecord::in_beginning(
+                            self.sync.beginning.clone(),
                             RecordId::random(),
                             entity_id,
                             self.next_sync_mutation_time(),
@@ -3092,7 +3226,8 @@ impl Handler for Service {
                             .entry(unlock_id)
                             .or_insert_with(EntityId::random)
                             .clone();
-                        self.sync.records.push(SyncRecord::new(
+                        self.sync.records.push(SyncRecord::in_beginning(
+                            self.sync.beginning.clone(),
                             RecordId::random(),
                             reward_entity,
                             self.next_sync_mutation_time(),
