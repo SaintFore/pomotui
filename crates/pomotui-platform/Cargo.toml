@@ -9,6 +9,8 @@ rust-version.workspace = true
 test-support = []
 
 [dependencies]
+libc = "0.2"
+rustix = { version = "1.1", features = ["fs", "process"] }
 pomotui-domain = { path = "../pomotui-domain" }
 pomotui-sync = { path = "../pomotui-sync" }
 rusqlite = { version = "0.38", features = ["backup"] }

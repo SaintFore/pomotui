@@ -1,15 +1,56 @@
 use crate::Service;
 use pomotui_protocol::{Command, Handler, Request, Response};
-use pomotui_sync::{Document as SyncDocument, plan_sync};
+use pomotui_sync::Document as SyncDocument;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub trait SyncFileAdapter: Send + Sync + 'static {
-    /// Reads a synchronization document, or `None` when the path is missing.
+    /// Discovers bounded transport-specific conflict siblings.
     ///
     /// # Errors
     ///
+    /// Returns a stage-ready filesystem diagnostic.
+    fn discover_conflicts(&self, _path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Ensures an already-current publication is durable before cleanup.
+    /// # Errors
+    /// Returns a durability diagnostic.
+    fn confirm_publication(&self, _path: &Path, _document: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Observes source bytes and, where supported, stable filesystem identity.
+    /// # Errors
+    /// Returns a candidate-read diagnostic.
+    fn observe_candidate(
+        &self,
+        path: &Path,
+    ) -> Result<Option<pomotui_platform::SyncCandidate>, String> {
+        self.read(path).map(|source| {
+            source.map(|source| pomotui_platform::SyncCandidate::retained(path.into(), source))
+        })
+    }
+
+    /// Retires an exact observation after successful durable import and publication.
+    /// # Errors
+    /// Unsupported cleanup and changed candidates are retained with a diagnostic.
+    fn cleanup_candidate(
+        &self,
+        _main: &Path,
+        candidate: &pomotui_platform::SyncCandidate,
+    ) -> Result<(), String> {
+        Err(format!(
+            "cleanup unsupported; retained {}",
+            candidate.path.display()
+        ))
+    }
+
+    /// Reads a synchronization document, or `None` when the path is missing.
+    ///
+    /// # Errors
     /// Returns a stage-ready filesystem diagnostic.
     fn read(&self, path: &Path) -> Result<Option<String>, String>;
 
@@ -24,6 +65,25 @@ pub trait SyncFileAdapter: Send + Sync + 'static {
 struct PlatformSyncFile;
 
 impl SyncFileAdapter for PlatformSyncFile {
+    fn discover_conflicts(&self, path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+        pomotui_platform::discover_sync_conflicts(path)
+    }
+    fn confirm_publication(&self, path: &Path, document: &str) -> Result<(), String> {
+        pomotui_platform::confirm_sync_publication(path, document)
+    }
+    fn observe_candidate(
+        &self,
+        path: &Path,
+    ) -> Result<Option<pomotui_platform::SyncCandidate>, String> {
+        pomotui_platform::observe_sync_candidate(path)
+    }
+    fn cleanup_candidate(
+        &self,
+        main: &Path,
+        candidate: &pomotui_platform::SyncCandidate,
+    ) -> Result<(), String> {
+        pomotui_platform::cleanup_sync_candidate(main, candidate)
+    }
     fn read(&self, path: &Path) -> Result<Option<String>, String> {
         pomotui_platform::read_sync_file(path)
     }
@@ -171,30 +231,25 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
         return;
     };
     if rebuild {
-        let Some(plan) = current_plan(service, &work.path, &[]) else {
-            return;
-        };
         let retained = match service.lock() {
-            Ok(mut service) => match service.apply_sync_plan(&work.path, &plan, 0) {
-                Ok(records) => records,
+            Ok(guard) => match guard.sync_document_for(&work.path) {
+                Ok(document) => document,
                 Err(error) => {
-                    service.finish_sync_failure(&work.path, "rebuild", error);
+                    drop(guard);
+                    finish_failure(service, &work.path, "rebuild", error);
                     return;
                 }
             },
-            Err(error) => {
-                eprintln!("sync worker cannot lock Timer Service: {error}");
-                return;
-            }
+            Err(_) => return,
         };
-        let result = SyncDocument::new(&retained)
-            .and_then(|document| document.to_json())
+        let result = retained
+            .to_json()
             .and_then(|document| file.replace(&work.path, &document));
         match result {
             Ok(()) => finish_success(
                 service,
                 &work.path,
-                retained.len(),
+                retained.records().len(),
                 Some(
                     "rebuilt from locally known records; unseen remote records cannot be recovered"
                         .into(),
@@ -223,15 +278,60 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
             );
             return;
         };
-        let incoming = match SyncDocument::from_json(source_document) {
-            Ok(document) => document.into_records(),
+        let mut incoming = match SyncDocument::from_json(source_document) {
+            Ok(document) => document,
             Err(error) => {
                 finish_failure(service, &work.path, "validate", error);
                 return;
             }
         };
+        let candidates = match file.discover_conflicts(&work.path) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                finish_failure(service, &work.path, "discover", error);
+                return;
+            }
+        };
+        let mut observations = Vec::new();
+        for candidate in &candidates {
+            let observed = match file.observe_candidate(candidate) {
+                Ok(Some(observed)) => observed,
+                Ok(None) => continue,
+                Err(error) => {
+                    finish_failure(service, &work.path, "candidate-read", error);
+                    return;
+                }
+            };
+            let records = SyncDocument::from_json(&observed.source);
+            observations.push(observed);
+
+            let records = match records {
+                Ok(records) => records,
+                Err(error) => {
+                    finish_failure(
+                        service,
+                        &work.path,
+                        "candidate-validate",
+                        format!("{}: {error}", candidate.display()),
+                    );
+                    return;
+                }
+            };
+            incoming = match pomotui_sync::union_documents(&incoming, &records) {
+                Ok(records) => records,
+                Err(error) => {
+                    finish_failure(
+                        service,
+                        &work.path,
+                        "candidate-integrity",
+                        format!("{}: {error}", candidate.display()),
+                    );
+                    return;
+                }
+            };
+        }
         let retained = match service.lock() {
-            Ok(mut service) => match service.apply_sync_records(&work.path, &incoming) {
+            Ok(mut service) => match service.apply_sync_document(&work.path, &incoming) {
                 Ok(records) => records,
                 Err(error) => {
                     service.finish_sync_failure(&work.path, "import", error);
@@ -243,7 +343,7 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                 return;
             }
         };
-        let document = match SyncDocument::new(&retained).and_then(|document| document.to_json()) {
+        let document = match retained.to_json() {
             Ok(document) => document,
             Err(error) => {
                 finish_failure(service, &work.path, "serialize", error);
@@ -252,8 +352,32 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
         };
         match file.read(&work.path) {
             Ok(current) if current == source => {
+                if source.as_deref() == Some(document.as_str()) {
+                    if !observations.is_empty()
+                        && let Err(error) = file.confirm_publication(&work.path, &document)
+                    {
+                        finish_failure(service, &work.path, "publication", error);
+                        return;
+                    }
+                    finish_cleanup(
+                        service,
+                        file,
+                        &work.path,
+                        &observations,
+                        retained.records().len(),
+                    );
+                    return;
+                }
                 match file.replace(&work.path, &document) {
-                    Ok(()) => finish_success(service, &work.path, retained.len(), None),
+                    Ok(()) => {
+                        finish_cleanup(
+                            service,
+                            file,
+                            &work.path,
+                            &observations,
+                            retained.records().len(),
+                        );
+                    }
                     Err(error) => finish_failure(service, &work.path, "replace", error),
                 }
                 return;
@@ -277,32 +401,20 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
     }
 }
 
-fn current_plan(
+fn finish_cleanup(
     service: &Arc<Mutex<Service>>,
-    path: &Path,
-    incoming: &[pomotui_sync::Record],
-) -> Option<pomotui_sync::SyncPlan> {
-    let local = match service.lock() {
-        Ok(guard) => match guard.sync_records_for(path) {
-            Ok(records) => records,
-            Err(error) => {
-                drop(guard);
-                finish_failure(service, path, "plan", error);
-                return None;
-            }
-        },
-        Err(error) => {
-            eprintln!("sync worker cannot lock Timer Service: {error}");
-            return None;
-        }
-    };
-    match plan_sync(&local, incoming) {
-        Ok(plan) => Some(plan),
-        Err(error) => {
-            finish_failure(service, path, "plan", error);
-            None
+    file: &dyn SyncFileAdapter,
+    main: &Path,
+    observations: &[pomotui_platform::SyncCandidate],
+    records: usize,
+) {
+    for observation in observations {
+        if let Err(error) = file.cleanup_candidate(main, observation) {
+            finish_failure(service, main, "cleanup", error);
+            return;
         }
     }
+    finish_success(service, main, records, None);
 }
 
 fn finish_success(

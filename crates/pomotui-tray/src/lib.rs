@@ -76,6 +76,7 @@ mod tests {
             recent_ended_chains: vec![],
             next_reward: None,
             reward_milestones: vec![],
+            reward_debt: vec![],
             current_chain_rewards: vec![],
         }
     }

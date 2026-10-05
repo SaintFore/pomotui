@@ -24,6 +24,9 @@ pub enum SessionKind {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    FreshStart {
+        confirmed: bool,
+    },
     Start {
         kind: SessionKind,
         task_id: Option<u64>,
@@ -198,6 +201,8 @@ pub struct Snapshot {
     pub next_reward: Option<RewardMilestoneSummary>,
     #[serde(default)]
     pub reward_milestones: Vec<RewardMilestoneSummary>,
+    #[serde(default)]
+    pub reward_debt: Vec<RewardDebtSummary>,
     pub current_chain_rewards: Vec<RewardUnlockSummary>,
 }
 
@@ -852,4 +857,13 @@ mod tests {
             }
         );
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RewardDebtSummary {
+    pub milestone_identity: String,
+    pub outstanding: u64,
+    pub repaid: u64,
+    #[serde(default)]
+    pub excess_credit: u64,
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 5;
+pub const FORMAT_VERSION: u16 = 7;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -50,6 +50,54 @@ macro_rules! identity {
 
 identity!(RecordId, "synchronization record identity");
 identity!(EntityId, "synchronized entity identity");
+
+/// Causal total-order beginning. All pre-reset documents share universal genesis.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct Beginning {
+    generation: u64,
+    id: uuid::Uuid,
+}
+impl<'de> Deserialize<'de> for Beginning {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            generation: u64,
+            id: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::parse(wire.generation, &wire.id).map_err(serde::de::Error::custom)
+    }
+}
+impl Default for Beginning {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            id: uuid::Uuid::nil(),
+        }
+    }
+}
+fn is_genesis(beginning: &Beginning) -> bool {
+    beginning == &Beginning::default()
+}
+impl Beginning {
+    pub fn parse(generation: u64, id: &str) -> Result<Self, String> {
+        let id = uuid::Uuid::parse_str(id).map_err(|e| e.to_string())?;
+        if (generation == 0) != id.is_nil() {
+            return Err("invalid Fresh Start beginning".into());
+        }
+        Ok(Self { generation, id })
+    }
+    pub fn successor(&self) -> Result<Self, String> {
+        Ok(Self {
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or("Fresh Start generation exhausted")?,
+            id: uuid::Uuid::new_v4(),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -175,11 +223,15 @@ pub enum RecordPayload {
         milestone_entity_id: EntityId,
         previous_chain_break_review_entity_id: Option<EntityId>,
         claimed_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<ClaimEvidence>,
     },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "is_genesis")]
+    pub beginning: Beginning,
     pub id: RecordId,
     pub entity_id: EntityId,
     pub mutation_time: MutationInstant,
@@ -188,13 +240,30 @@ pub struct Record {
 
 impl Record {
     #[must_use]
-    pub const fn new(
+    pub fn in_beginning(
+        beginning: Beginning,
         id: RecordId,
         entity_id: EntityId,
         mutation_time: MutationInstant,
         payload: RecordPayload,
     ) -> Self {
         Self {
+            beginning,
+            id,
+            entity_id,
+            mutation_time,
+            payload,
+        }
+    }
+    #[must_use]
+    pub fn new(
+        id: RecordId,
+        entity_id: EntityId,
+        mutation_time: MutationInstant,
+        payload: RecordPayload,
+    ) -> Self {
+        Self {
+            beginning: Beginning::default(),
             id,
             entity_id,
             mutation_time,
@@ -211,6 +280,8 @@ struct Integrity {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Document {
+    #[serde(default)]
+    beginning: Beginning,
     format: String,
     version: u16,
     integrity: Integrity,
@@ -219,14 +290,29 @@ pub struct Document {
 
 impl Document {
     pub fn new(records: &[Record]) -> Result<Self, String> {
+        let beginning = records
+            .iter()
+            .map(|r| &r.beginning)
+            .max()
+            .cloned()
+            .unwrap_or_default();
+        Self::with_beginning(beginning, records)
+    }
+
+    pub fn with_beginning(beginning: Beginning, records: &[Record]) -> Result<Self, String> {
         let records = union(&[], records)?;
+        if records.iter().any(|r| r.beginning != beginning) {
+            return Err("document record beginning differs from selected beginning".into());
+        }
         validate_records(&records)?;
+        let records_sha256 = document_checksum(&beginning, &records)?;
         Ok(Self {
+            beginning,
             format: FORMAT_NAME.into(),
             version: FORMAT_VERSION,
             integrity: Integrity {
                 record_count: records.len(),
-                records_sha256: checksum(&records)?,
+                records_sha256,
             },
             records,
         })
@@ -238,17 +324,51 @@ impl Document {
         if document.format != FORMAT_NAME {
             return Err("unsupported sync document format".into());
         }
-        if !matches!(document.version, 4 | FORMAT_VERSION) {
+        if !matches!(document.version, 4 | 5 | 6 | FORMAT_VERSION) {
             return Err(format!(
-                "unsupported sync document version {}; reset local pre-release data with `pomotui reset --all-data --confirm`",
+                "unsupported sync document version {}; upgrade this device’s Timer Service to read this exchange file",
                 document.version
             ));
+        }
+        if document.version < FORMAT_VERSION
+            && (document.beginning != Beginning::default()
+                || document
+                    .records
+                    .iter()
+                    .any(|r| r.beginning != Beginning::default()))
+        {
+            return Err("legacy sync document contains Fresh Start metadata".into());
         }
         validate_records(&document.records)?;
         if document.integrity.record_count != document.records.len() {
             return Err("sync document integrity check failed".into());
         }
-        if document.integrity.records_sha256 != checksum(&document.records)? {
+        let expected_checksum = if document.version < FORMAT_VERSION {
+            #[derive(Serialize)]
+            struct LegacyRecord<'a> {
+                id: &'a RecordId,
+                entity_id: &'a EntityId,
+                mutation_time: MutationInstant,
+                payload: &'a RecordPayload,
+            }
+            let legacy = document
+                .records
+                .iter()
+                .map(|r| LegacyRecord {
+                    id: &r.id,
+                    entity_id: &r.entity_id,
+                    mutation_time: r.mutation_time,
+                    payload: &r.payload,
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&legacy).map_err(|e| e.to_string())?)
+            )
+        } else {
+            document_checksum(&document.beginning, &document.records)?
+        };
+        if document.integrity.records_sha256 != expected_checksum {
             return Err("sync document checksum does not match its records".into());
         }
         if document.version == 4 {
@@ -274,18 +394,20 @@ impl Document {
                 }
             }
         }
-        Ok(Self {
-            version: FORMAT_VERSION,
-            ..document
-        })
+        Self::with_beginning(document.beginning, &document.records)
     }
 
     pub fn to_json(&self) -> Result<String, String> {
-        let canonical = Self::new(&self.records)?;
+        let canonical = Self::with_beginning(self.beginning.clone(), &self.records)?;
         let mut source =
             serde_json::to_string_pretty(&canonical).map_err(|error| error.to_string())?;
         source.push('\n');
         Ok(source)
+    }
+
+    #[must_use]
+    pub fn beginning(&self) -> &Beginning {
+        &self.beginning
     }
 
     #[must_use]
@@ -305,9 +427,23 @@ pub fn union(left: &[Record], right: &[Record]) -> Result<Vec<Record>, String> {
         if let Some(existing) = records.get(&record.id)
             && existing != record
         {
+            let mut differences = Vec::new();
+            if existing.beginning != record.beginning {
+                differences.push("beginning membership");
+            }
+            if existing.entity_id != record.entity_id {
+                differences.push("entity_id");
+            }
+            if existing.mutation_time != record.mutation_time {
+                differences.push("mutation time");
+            }
+            if existing.payload != record.payload {
+                differences.push("payload kind/content");
+            }
             return Err(format!(
-                "conflicting synchronization record {}",
-                record.id.as_str()
+                "conflicting synchronization record {}: differing {}; retain both inputs and repair the contradictory record identity",
+                record.id.as_str(),
+                differences.join(", ")
             ));
         }
         records.insert(record.id.clone(), record.clone());
@@ -552,6 +688,7 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
                 milestone_entity_id,
                 previous_chain_break_review_entity_id,
                 claimed_at,
+                ..
             } => {
                 if deleted_chain_anchors.contains(&previous_chain_break_review_entity_id.as_ref()) {
                     continue;
@@ -856,8 +993,34 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             RecordPayload::TaskDeleted
             | RecordPayload::SessionDeleted
             | RecordPayload::EndedChainDeleted { .. }
-            | RecordPayload::RewardMilestoneDeleted
-            | RecordPayload::RewardClaimed { .. } => {}
+            | RecordPayload::RewardMilestoneDeleted => {}
+            RecordPayload::RewardClaimed { evidence, .. } => {
+                if let Some(e) = evidence {
+                    let support = e
+                        .supporting_review_entity_ids
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let observed = e
+                        .observed_review_entity_ids
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let carried = e
+                        .carried_review_entity_ids
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if e.threshold == 0
+                        || support.len() != e.supporting_review_entity_ids.len()
+                        || observed.len() != e.observed_review_entity_ids.len()
+                        || !support.is_subset(&observed)
+                        || carried.len() != e.carried_review_entity_ids.len()
+                        || !carried.is_subset(&observed)
+                        || !carried.is_disjoint(&support)
+                        || !observed.contains(&e.frontier_review_entity_id)
+                    {
+                        return Err("invalid immutable reward claim evidence".into());
+                    }
+                }
+            }
             RecordPayload::RewardMilestoneVersion {
                 name, threshold, ..
             } => {
@@ -1187,13 +1350,218 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     Ok(())
 }
 
-fn checksum(records: &[Record]) -> Result<String, String> {
-    let canonical = serde_json::to_vec(records).map_err(|error| error.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(canonical)))
+fn document_checksum(beginning: &Beginning, records: &[Record]) -> Result<String, String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(beginning, records)).map_err(|e| e.to_string())?)
+    ))
 }
 
 impl fmt::Display for RecordId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+
+/// Immutable observed support for one logical milestone/chain claim. Legacy claims omit it.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ClaimEvidence {
+    pub threshold: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_review_entity_ids: Vec<EntityId>,
+    pub supporting_review_entity_ids: Vec<EntityId>,
+    pub observed_review_entity_ids: Vec<EntityId>,
+    pub frontier_review_entity_id: EntityId,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RewardDebt {
+    pub milestone_entity_id: EntityId,
+    pub outstanding: u64,
+    pub repaid: u64,
+    pub excess_credit: u64,
+    pub excess_review_entity_ids: Vec<EntityId>,
+    pub repayment_review_entity_ids: Vec<EntityId>,
+}
+/// Replays accounting in source-session Review Order, independently of delivery time.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
+    let ends = records
+        .iter()
+        .filter_map(|r| match &r.payload {
+            RecordPayload::SessionEnded { ended_at, .. } => Some((&r.entity_id, *ended_at)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut reviews = records
+        .iter()
+        .filter_map(|r| match &r.payload {
+            RecordPayload::SessionReviewed {
+                session_entity_id,
+                judgment,
+                ..
+            } => ends
+                .get(session_entity_id)
+                .map(|end| ((*end, r.entity_id.clone()), *judgment)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    reviews.sort_by(|a, b| a.0.cmp(&b.0));
+    let positions = reviews
+        .iter()
+        .enumerate()
+        .map(|(i, (key, _))| (&key.1, i))
+        .collect::<BTreeMap<_, _>>();
+    let mut claims = BTreeMap::new();
+    for r in records {
+        if let RecordPayload::RewardClaimed {
+            milestone_entity_id,
+            previous_chain_break_review_entity_id,
+            evidence: Some(e),
+            ..
+        } = &r.payload
+        {
+            let key = (
+                milestone_entity_id.clone(),
+                previous_chain_break_review_entity_id.clone(),
+            );
+            claims
+                .entry(key)
+                .and_modify(|current: &mut &ClaimEvidence| {
+                    if e < *current {
+                        *current = e;
+                    }
+                })
+                .or_insert(e);
+        }
+    }
+    let mut accounts = BTreeMap::<EntityId, RewardDebt>::new();
+    let mut consumed_credits = BTreeMap::<EntityId, std::collections::BTreeSet<EntityId>>::new();
+    let mut obligations = claims.into_iter().collect::<Vec<_>>();
+    obligations.sort_by_key(|(key, e)| {
+        (
+            positions
+                .get(&e.frontier_review_entity_id)
+                .copied()
+                .unwrap_or(usize::MAX),
+            key.clone(),
+        )
+    });
+    for ((milestone, _), e) in obligations {
+        let frontier = positions.get(&e.frontier_review_entity_id).copied();
+        let last_break = frontier.and_then(|end| {
+            (0..=end)
+                .rev()
+                .find(|i| reviews[*i].1 == SessionReviewJudgment::Failed)
+        });
+        let snapshot_support = e
+            .supporting_review_entity_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|id| {
+                positions.get(*id).is_some_and(|i| {
+                    Some(*i) > last_break
+                        && reviews[*i].1 == SessionReviewJudgment::Successful
+                        && !accounts
+                            .get(&milestone)
+                            .is_some_and(|a| a.repayment_review_entity_ids.contains(id))
+                })
+            })
+            .count() as u64;
+        // Late successful reviews before the immutable claim frontier correct its support.
+        // They do not erase the capacity established by its original observed evidence.
+        let late_support = frontier.map_or(0, |end| {
+            reviews
+                .iter()
+                .enumerate()
+                .take(end + 1)
+                .filter(|(i, ((_, id), judgment))| {
+                    Some(*i) > last_break
+                        && *judgment == SessionReviewJudgment::Successful
+                        && !e.observed_review_entity_ids.contains(id)
+                        && !e.supporting_review_entity_ids.contains(id)
+                        && !accounts
+                            .get(&milestone)
+                            .is_some_and(|a| a.repayment_review_entity_ids.contains(id))
+                })
+                .count() as u64
+        });
+        let account = accounts
+            .entry(milestone.clone())
+            .or_insert_with(|| RewardDebt {
+                milestone_entity_id: milestone,
+                outstanding: 0,
+                repaid: 0,
+                excess_credit: 0,
+                excess_review_entity_ids: Vec::new(),
+                repayment_review_entity_ids: Vec::new(),
+            });
+        let consumed = consumed_credits
+            .entry(account.milestone_entity_id.clone())
+            .or_default();
+        let carried_support = e
+            .carried_review_entity_ids
+            .iter()
+            .filter(|id| {
+                account.repayment_review_entity_ids.contains(id) && consumed.insert((*id).clone())
+            })
+            .count() as u64;
+        let shortfall = e
+            .threshold
+            .saturating_sub(snapshot_support + late_support + carried_support);
+        let mut capacity = e
+            .threshold
+            .saturating_sub(snapshot_support + carried_support);
+        if let Some(frontier) = frontier {
+            for (_, ((_, id), judgment)) in reviews.iter().enumerate().skip(frontier + 1) {
+                if capacity == 0 {
+                    break;
+                }
+                if *judgment == SessionReviewJudgment::Successful
+                    && !e.observed_review_entity_ids.contains(id)
+                    && !account.repayment_review_entity_ids.contains(id)
+                {
+                    account.repayment_review_entity_ids.push(id.clone());
+                    account.repaid += 1;
+                    capacity -= 1;
+                }
+            }
+        }
+        account.outstanding += shortfall;
+    }
+    for account in accounts.values_mut() {
+        let shortfall = account.outstanding;
+        let consumed = consumed_credits
+            .get(&account.milestone_entity_id)
+            .map_or(0, |ids| ids.len() as u64);
+        account.outstanding = shortfall
+            .saturating_add(consumed)
+            .saturating_sub(account.repaid);
+        account.excess_review_entity_ids = account
+            .repayment_review_entity_ids
+            .iter()
+            .filter(|id| {
+                !consumed_credits
+                    .get(&account.milestone_entity_id)
+                    .is_some_and(|ids| ids.contains(*id))
+            })
+            .skip(usize::try_from(shortfall).unwrap_or(usize::MAX))
+            .cloned()
+            .collect();
+        account.excess_credit = account.excess_review_entity_ids.len() as u64;
+    }
+    accounts.into_values().collect()
+}
+
+/// Merge metadata before projecting records; retired beginnings cannot resurrect.
+pub fn union_documents(left: &Document, right: &Document) -> Result<Document, String> {
+    let beginning = left.beginning().max(right.beginning()).clone();
+    let records = union(left.records(), right.records())?
+        .into_iter()
+        .filter(|r| r.beginning == beginning)
+        .collect::<Vec<_>>();
+    Document::with_beginning(beginning, &records)
 }

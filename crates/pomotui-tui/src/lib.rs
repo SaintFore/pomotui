@@ -1750,6 +1750,15 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             reward.threshold
         )));
     }
+    for debt in &snapshot.reward_debt {
+        lines.push(Line::from(format!(
+            "{}: {}  {}: {}",
+            text(language, "Reward debt", "奖励欠额"),
+            debt.outstanding,
+            text(language, "Repaid successes", "已偿还成功"),
+            debt.repaid
+        )));
+    }
     for reward in &snapshot.current_chain_rewards {
         lines.push(Line::from(format!("{}  [{}]", reward.name, reward.state)));
     }
@@ -2040,8 +2049,8 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
 }
 
 fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
-    let language = app.language;
-    let Some(snapshot) = app.snapshot.as_ref() else {
+    let (language, snapshot) = (app.language, app.snapshot.as_ref());
+    let Some(snapshot) = snapshot else {
         frame.render_widget(
             Paragraph::new(text(
                 language,
@@ -2110,6 +2119,7 @@ fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                 .add_modifier(Modifier::BOLD),
         )),
     ]);
+    append_reward_debt(&mut lines, snapshot, language);
     if snapshot.current_chain_rewards.is_empty() {
         lines.push(Line::from(text(
             language,
@@ -2117,19 +2127,7 @@ fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             "当前行动链尚未获得奖励。",
         )));
     } else {
-        for reward in &snapshot.current_chain_rewards {
-            let budget = reward.budget.map_or_else(
-                || text(language, "no budget", "无预算").to_owned(),
-                |budget| format!("¥{budget}"),
-            );
-            lines.push(Line::from(format!(
-                "{} · {} {} · {budget} · {}",
-                reward.name,
-                text(language, "Length", "长度"),
-                reward.threshold,
-                reward.state,
-            )));
-        }
+        append_earned_rewards(&mut lines, snapshot, language);
         lines.push(Line::from(text(
             language,
             "C claim the first unlocked reward",
@@ -2140,6 +2138,39 @@ fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         Paragraph::new(lines).block(panel(text(language, "REWARDS", "奖励"), colors)),
         area,
     );
+}
+
+fn append_earned_rewards(lines: &mut Vec<Line<'_>>, snapshot: &Snapshot, language: Language) {
+    for reward in &snapshot.current_chain_rewards {
+        let budget = reward.budget.map_or_else(
+            || text(language, "no budget", "无预算").to_owned(),
+            |budget| format!("¥{budget}"),
+        );
+        lines.push(Line::from(format!(
+            "{} · {} {} · {budget} · {}",
+            reward.name,
+            text(language, "Length", "长度"),
+            reward.threshold,
+            reward.state,
+        )));
+    }
+}
+
+fn append_reward_debt(lines: &mut Vec<Line<'_>>, snapshot: &Snapshot, language: Language) {
+    for debt in &snapshot.reward_debt {
+        lines.push(Line::from(format!(
+            "{} {} · {} {} · {}",
+            text(language, "Reward debt", "奖励欠额"),
+            debt.outstanding,
+            text(language, "Repaid", "已偿还"),
+            debt.repaid,
+            text(
+                language,
+                "Successes repay debt before advancing this milestone.",
+                "成功先偿还欠额，再推进此门槛。"
+            )
+        )));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4313,6 +4344,7 @@ mod tests {
             recent_ended_chains: vec![],
             next_reward: None,
             reward_milestones: vec![],
+            reward_debt: vec![],
             current_chain_rewards: vec![],
         }
     }

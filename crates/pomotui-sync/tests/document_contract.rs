@@ -84,17 +84,17 @@ fn valid_task_records_have_byte_stable_round_trips() {
 }
 
 #[test]
-fn format_four_is_validated_and_upgraded_to_format_five() {
+fn format_four_is_validated_and_upgraded_to_current_format() {
     let current = Document::new(&[task_version(1, 9, 1_000, "First")])
         .and_then(|document| document.to_json())
         .expect("current document");
-    let legacy = current.replacen("\"version\": 5", "\"version\": 4", 1);
+    let legacy = legacy_json(&current, 4);
 
     let upgraded = Document::from_json(&legacy)
         .and_then(|document| document.to_json())
         .expect("upgrade format four");
 
-    assert!(upgraded.contains("\"version\": 5"));
+    assert!(upgraded.contains("\"version\": 7"));
     assert!(!upgraded.contains("\"version\": 4"));
 }
 
@@ -108,7 +108,7 @@ fn format_four_void_title_upgrades_to_system_void_attribution() {
     let current = Document::new(&legacy_records)
         .and_then(|document| document.to_json())
         .expect("legacy-shaped document");
-    let legacy = current.replacen("\"version\": 5", "\"version\": 4", 1);
+    let legacy = legacy_json(&current, 4);
 
     let upgraded = Document::from_json(&legacy).expect("upgrade format four");
     assert!(upgraded.records().iter().any(|record| matches!(
@@ -531,4 +531,47 @@ fn ended_chain_tombstone_cannot_span_an_already_known_intervening_chain() {
 
     let error = plan_sync(&[], &records).expect_err("cannot delete across another known chain");
     assert!(error.contains("not adjacent"), "{error}");
+}
+
+#[test]
+fn conflicting_record_identity_reports_each_changed_field() {
+    let original = task_version(1, 2, 1000, "Original");
+    let contradictory = task_version(1, 3, 2000, "Different");
+    let error = pomotui_sync::union(&[original], &[contradictory]).unwrap_err();
+    assert!(error.contains("entity_id"), "{error}");
+    assert!(error.contains("mutation"), "{error}");
+    assert!(error.contains("payload"), "{error}");
+}
+
+fn legacy_json(current: &str, version: u16) -> String {
+    use sha2::{Digest, Sha256};
+    let mut value: serde_json::Value = serde_json::from_str(current).unwrap();
+    value["version"] = version.into();
+    value.as_object_mut().unwrap().remove("beginning");
+    let records: Vec<pomotui_sync::Record> =
+        serde_json::from_value(value["records"].clone()).unwrap();
+    value["integrity"]["records_sha256"] = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&records).unwrap())
+    )
+    .into();
+    serde_json::to_string(&value).unwrap()
+}
+
+#[test]
+fn all_supported_legacy_formats_share_genesis_and_preserve_record_identity() {
+    let record = task_version(1, 9, 1_000, "legacy");
+    let current = Document::new(std::slice::from_ref(&record))
+        .unwrap()
+        .to_json()
+        .unwrap();
+    for version in [4, 5, 6] {
+        let normalized = Document::from_json(&legacy_json(&current, version)).unwrap();
+        assert_eq!(normalized.records(), std::slice::from_ref(&record));
+        assert_eq!(normalized.beginning(), &pomotui_sync::Beginning::default());
+        assert_eq!(
+            Document::from_json(&normalized.to_json().unwrap()).unwrap(),
+            normalized
+        );
+    }
 }

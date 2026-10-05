@@ -186,6 +186,22 @@ coalesced into one later run. `pomotui sync now` requests the same merge
 immediately when diagnosing or coordinating file transfer; it is not required
 after every local command.
 
+Timer Service also discovers Syncthing conflict siblings of the configured filename.
+For `pomotui.sync`, the supported spelling is
+`pomotui.sync-conflict-YYYYMMDD-HHMMSS-DEVICE.sync`; custom filenames use the
+same stem and extension rule. Other neighboring files are ignored. Each attempt
+scans at most 4096 directory entries and imports at most 32 candidates, rotating
+through larger sets on subsequent attempts. Files are limited to 8 MiB; symbolic
+links and nonregular objects are rejected. Valid copies are durably merged before
+publishing the main exchange file. Copies remain available for recovery.
+
+`sync status` distinguishes discovery failures (`discover`), invalid copies
+(`candidate-validate`), contradictory record identities (`candidate-integrity`
+or `import`), and publication failures (`replace`). A contradictory identity
+reports the record ID and differing fields. Keep these artifacts and resolve the
+reported invalid or contradictory input before retrying; local timer controls
+remain available during transport failures.
+
 Concurrent edits resolve without an interactive conflict screen. Immutable
 facts from both sides are retained. Versions of mutable data use their UTC
 mutation time and then a stable global identity as a deterministic tie-breaker;
@@ -272,3 +288,87 @@ If changes have not appeared elsewhere:
    the database with the broadest known history. Preserve database backups.
 6. Restart the Timer Service if the CLI says the running service is older than
    the installed synchronization command.
+
+### Conflict-copy recovery and cleanup
+
+Background synchronization discovers Syncthing conflict siblings of the configured
+filename (for `custom.sync`, `custom.sync-conflict-YYYYMMDD-HHMMSS-DEVICE.sync`).
+The date and time components must be 8 and 6 digits; the device suffix must be
+nonempty ASCII letters or digits. Other neighboring files are ignored. Each
+attempt processes at most 32 candidates, rotating larger batches.
+
+A validated copy is imported into SQLite before publishing the complete main
+file. Publication synchronizes both file contents and the parent directory;
+identical existing output is synchronized before cleanup without replacing it.
+Cleanup checks exact bytes and inode identity, moves with a no-overwrite rename
+into a private `.pomotui-cleanup-<main filename>` directory, synchronizes both
+directories, and checks the moved file again before removing it. Its unchanged
+original basename records provenance. Interrupted moves and copies that cannot
+be restored because a new original already exists remain discoverable in that
+directory on later attempts. A changed, invalid, unsafe, or unverified artifact
+is retained with a synchronization diagnostic. The main file remains the single
+portable exchange document after successful recovery.
+
+This cleanup supports immutable conflict copies and Syncthing's atomic pathname
+replacement. An observed in-place write is retained, but Unix rename cannot
+revoke an already-open writable file descriptor. A noncooperating writer that
+changes the moved inode after the final check is outside this transport
+contract. Do not use arbitrary in-place writers with automatic cleanup. Directory
+operations require no-follow regular files, private owned quarantine directories,
+and no-replace rename support; unsupported filesystems retain the copy and report
+an error. These checks protect ordinary transport races, not malicious programs
+running as the same user.
+### Reward Debt after synchronization
+
+A claimed reward remains claimed when a late Session Review breaks its supporting
+Action Chain. Each milestone keeps its own debt in missing successful reviews:
+a threshold of seven supported by one success owes six. Future successes repay
+one unit for every affected milestone before advancing that milestone's next
+reward. Breaks preserve debt and repayment; actual chain length remains factual.
+`pomotui reward list`, JSON status, human status, and the TUI expose debt and repaid
+successes. Editing or deleting a milestone does not forgive its obligation.
+
+New claims retain immutable support and observed-review identities in the same
+portable activity file. Format 7 accepts formats 4, 5 and 6 without changing old
+Record IDs; persisted format 4 accepts the supported unversioned, format 2, and format 3
+states. Upgrade all Devices before synchronizing: older software rejects the new
+format. Legacy claims without observed support remain claimed and accrue no
+inferred debt. Missing evidence cannot be reconstructed from a claim timestamp.
+
+## Fresh Start across devices
+
+Run `pomotui fresh-start --confirm` while the Timer Service is running to begin again. This clears Tasks, Session History, Action Chains, Rewards, Reward Debt and Credits, current timer work, review state, and queued reminders. The protected Void Task remains available, the timer becomes idle, and ordinary configuration and sync settings are preserved. The confirmation is required in both the CLI and service protocol.
+
+The beginning is committed locally even while the exchange path is inaccessible. Sync status reports that it awaits synchronization. Once published, another device adopts the beginning and clears its retired business state atomically; its sync status keeps a notice that Fresh Start arrived from another device. Old files, conflict copies, delayed offline work and restored old databases cannot bring retired work back after the winning beginning is observed. Concurrent Fresh Starts select the same winner deterministically; work made under a losing beginning is retired too.
+
+The exchange document retains the beginning even with no records. Format 7 verifies both that metadata and immutable record membership. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
+
+`pomotui reset --all-data --confirm` retains its existing local database backup/removal behavior and stopped-service requirement.
+
+Before Fresh Start, back up the local database, configuration, and portable main
+file if you need an archive. An archived old main file is an archive, not an undo
+operation: once the new beginning is observed, synchronizing it cannot restore
+retired business history. Tell other users of the same exchange file before
+resetting it. An offline device may continue old work, but that work is discarded
+when it observes the winning beginning. Keep every device on a compatible release.
+
+If a claimed reward's evidence later improves, the service recalculates the
+shortfall while keeping already credited repayments. For example, six missing
+successes repaid by four successes becomes zero outstanding plus one credit when
+late evidence reduces the shortfall to three. Deleting an Ended Chain removes
+reflective history but retains the minimal accounting evidence. Fresh Start is
+the explicit operation that clears this accounting too.
+
+Check `pomotui sync status --json` for `last_error`, `last_error_stage`, `warning`,
+record counts and the current format. Invalid copies and contradictory Record IDs
+are retained for repair; file modification time does not decide which contradictory
+content wins. Back up both inputs before repairing them. Do not manually replace
+Record IDs to conceal contradictory content. A cleanup error means the candidate
+remains available for a later attempt; do not remove it until its unique contents
+are safely retained. TUI synchronization health and reward debt use the same
+service state as the CLI.
+
+The opt-in [real Syncthing acceptance run](syncthing-acceptance.md) uses temporary
+profiles and two separate exchange directories. Its deterministic companion tests
+remain the daily development checks. Neither setup requires syncing SQLite or
+copying a companion reset file.

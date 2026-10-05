@@ -357,12 +357,12 @@ fn overlapping_requests_coalesce_into_one_later_run() {
     }
     state.released = true;
     file.changed.notify_all();
-    while state.replacements < 2 {
+    while state.reads < 4 {
         state = file.changed.wait(state).expect("state");
     }
     drop(state);
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(file.state.lock().expect("state").replacements, 2);
+    assert_eq!(file.state.lock().expect("state").reads, 4);
     let Response::Data { value: status } = service
         .lock()
         .expect("service")
@@ -516,7 +516,7 @@ fn sync_now_imports_a_replaced_document_through_the_protocol_handler() {
     };
     assert_eq!(status["enabled"], true);
     assert_eq!(status["path"], path.to_string_lossy().as_ref());
-    assert_eq!(status["format_version"], 5);
+    assert_eq!(status["format_version"], pomotui_sync::FORMAT_VERSION);
     assert!(
         status["local_record_count"]
             .as_u64()
@@ -623,4 +623,364 @@ fn later_trigger_restores_retained_union_after_external_replacement_wins_a_write
     drop(trigger);
     worker.shutdown();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn startup_recovers_custom_named_conflict_and_cleans_it_after_publication() {
+    let root = test_root("conflict-startup");
+    let path = root.join("custom.sync");
+    std::fs::write(&path, Document::new(&[]).unwrap().to_json().unwrap()).unwrap();
+    let record = Record::new(
+        RecordId::parse("00000000-0000-0000-0000-000000000051").unwrap(),
+        EntityId::parse("00000000-0000-0000-0000-000000000052").unwrap(),
+        MutationInstant::from_millis(1000).unwrap(),
+        RecordPayload::TaskVersion {
+            title: "Recovered conflict".into(),
+            status: TaskStatus::Open,
+        },
+    );
+    let candidate = root.join("custom.sync-conflict-20261005-120000-ABCDEFG.sync");
+    std::fs::write(
+        &candidate,
+        Document::new(&[record]).unwrap().to_json().unwrap(),
+    )
+    .unwrap();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(Arc::clone(&service), Duration::from_mins(1)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let Response::Data { value } = service
+        .lock()
+        .unwrap()
+        .handle(request(None, Command::TaskList))
+    else {
+        panic!("tasks");
+    };
+    worker.shutdown();
+    assert!(
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["title"] == "Recovered conflict")
+    );
+    assert!(!candidate.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_candidate_preserves_main_and_reports_candidate_validation() {
+    let root = test_root("invalid-candidate");
+    let path = root.join("pomotui.sync");
+    let main = Document::new(&[]).unwrap().to_json().unwrap();
+    std::fs::write(&path, &main).unwrap();
+    let candidate = root.join("pomotui.sync-conflict-20261005-120000-ABCDEFG.sync");
+    std::fs::write(&candidate, "not json").unwrap();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(Arc::clone(&service), Duration::from_mins(1)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let Response::Data { value } = service
+        .lock()
+        .unwrap()
+        .handle(request(None, Command::SyncStatus))
+    else {
+        panic!("health");
+    };
+    worker.shutdown();
+    assert_eq!(value["last_error_stage"], "candidate-validate");
+    assert!(
+        value["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("sync-conflict")
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), main);
+    assert_eq!(std::fs::read_to_string(&candidate).unwrap(), "not json");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn canonical_idle_sync_preserves_the_main_file_across_startup_and_manual_attempts() {
+    let root = test_root("idle-main-file");
+    let path = root.join("pomotui.sync");
+    let canonical = Document::new(&[])
+        .and_then(|document| document.to_json())
+        .expect("document");
+    std::fs::write(&path, &canonical).expect("main file");
+    let service = configured_service(&root, &path);
+    // Establish the complete local union before observing idle attempts.
+    SyncWorker::start(Arc::clone(&service), Duration::from_mins(1))
+        .expect("worker")
+        .shutdown();
+    let bytes = std::fs::read(&path).expect("main bytes");
+    let metadata = std::fs::metadata(&path).expect("main metadata");
+    // Keep the original inode alive so replacement cannot reuse its identity.
+    let original = std::fs::File::open(&path).expect("original main file");
+    for attempt in 0..3 {
+        let worker =
+            SyncWorker::start(Arc::clone(&service), Duration::from_mins(1)).expect("worker");
+        let mut handler = SyncServiceHandler::new(Arc::clone(&service), worker.trigger());
+        assert!(!matches!(
+            handler.handle(request(Some(&format!("idle-{attempt}")), Command::SyncNow)),
+            Response::Error { .. }
+        ));
+        drop(handler);
+        worker.shutdown();
+        let current = std::fs::metadata(&path).expect("current metadata");
+        assert_eq!(std::fs::read(&path).expect("main bytes"), bytes);
+        assert_eq!(
+            current.modified().expect("mtime"),
+            metadata.modified().expect("original mtime")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                current.ino(),
+                original.metadata().expect("open main metadata").ino()
+            );
+        }
+        let Response::Data { value: status } = service
+            .lock()
+            .expect("service")
+            .handle(request(None, Command::SyncStatus))
+        else {
+            panic!("sync status");
+        };
+        assert!(status["last_success"].is_number());
+        assert!(status["last_error"].is_null());
+        assert_eq!(status["in_progress"], false);
+    }
+    drop(original);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn interval_sync_imports_canonical_records_without_replacing_the_main_file() {
+    struct ObservedFile(std::sync::mpsc::Sender<()>);
+    impl SyncFileAdapter for ObservedFile {
+        fn read(&self, path: &std::path::Path) -> Result<Option<String>, String> {
+            let result = pomotui_platform::read_sync_file(path);
+            let _ = self.0.send(());
+            result
+        }
+        fn replace(&self, path: &std::path::Path, document: &str) -> Result<(), String> {
+            pomotui_platform::replace_sync_file(path, document)
+        }
+    }
+    let root = test_root("idle-interval");
+    let path = root.join("pomotui.sync");
+    let record = Record::new(
+        RecordId::parse("00000000-0000-0000-0000-000000000001").expect("record"),
+        EntityId::parse("00000000-0000-0000-0000-000000000002").expect("entity"),
+        MutationInstant::from_millis(1_000).expect("instant"),
+        RecordPayload::TaskVersion {
+            title: "Canonical remote task".into(),
+            status: TaskStatus::Open,
+        },
+    );
+    let canonical = Document::new(&[record])
+        .and_then(|document| document.to_json())
+        .expect("document");
+    std::fs::write(&path, &canonical).expect("main file");
+    let original = std::fs::File::open(&path).expect("main file");
+    let metadata = original.metadata().expect("main metadata");
+    let service = configured_service(&root, &path);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = SyncWorker::start_with_file_adapter(
+        Arc::clone(&service),
+        Duration::from_millis(10),
+        Arc::new(ObservedFile(sender)),
+    )
+    .expect("worker");
+    // Three completed source/recheck pairs cover startup and interval attempts.
+    for _ in 0..6 {
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("sync read");
+    }
+    worker.shutdown();
+    let current = std::fs::metadata(&path).expect("current metadata");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("main bytes"),
+        canonical
+    );
+    assert_eq!(
+        current.modified().expect("mtime"),
+        metadata.modified().expect("original mtime")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(current.ino(), metadata.ino());
+    }
+    let Response::Data { value: tasks } = service
+        .lock()
+        .expect("service")
+        .handle(request(None, Command::TaskList))
+    else {
+        panic!("tasks");
+    };
+    assert!(
+        tasks
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .any(|task| task["title"] == "Canonical remote task")
+    );
+    drop(original);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn twenty_eight_record_main_and_eighteen_record_subset_remain_twenty_eight() {
+    let root = test_root("subset-conflict");
+    let path = root.join("pomotui.sync");
+    let records: Vec<_> = (1..=28)
+        .map(|index| {
+            Record::new(
+                RecordId::parse(&format!("00000000-0000-0000-0000-{index:012}")).unwrap(),
+                EntityId::parse(&format!("10000000-0000-0000-0000-{index:012}")).unwrap(),
+                MutationInstant::from_millis(1000).unwrap(),
+                RecordPayload::TaskVersion {
+                    title: format!("Task {index}"),
+                    status: TaskStatus::Open,
+                },
+            )
+        })
+        .collect();
+    std::fs::write(&path, Document::new(&records).unwrap().to_json().unwrap()).unwrap();
+    let candidate = root.join("pomotui.sync-conflict-20261005-120000-ABCDEFG.sync");
+    std::fs::write(
+        &candidate,
+        Document::new(&records[..18]).unwrap().to_json().unwrap(),
+    )
+    .unwrap();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(Arc::clone(&service), Duration::from_millis(20)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    worker.shutdown();
+    assert_eq!(
+        Document::from_json(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()
+            .records()
+            .len(),
+        28
+    );
+    assert!(!candidate.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn idle_canonical_sync_cleans_an_absorbed_subset_without_replacing_main() {
+    use std::os::unix::fs::MetadataExt;
+    let root = test_root("idle-cleanup");
+    let path = root.join("pomotui.sync");
+    let source = Document::new(&[]).unwrap().to_json().unwrap();
+    std::fs::write(&path, &source).unwrap();
+    let candidate = root.join("pomotui.sync-conflict-20261005-120000-DEVICE.sync");
+    std::fs::write(&candidate, &source).unwrap();
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(service, Duration::from_mins(1)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while candidate.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    worker.shutdown();
+    assert!(
+        !candidate.exists(),
+        "absorbed candidate must be removed even when publication is skipped"
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_durable_publication_never_calls_cleanup_and_import_survives_restart() {
+    struct PublicationFault {
+        cleanup_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl SyncFileAdapter for PublicationFault {
+        fn discover_conflicts(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, String> {
+            pomotui_platform::discover_sync_conflicts(path)
+        }
+        fn read(&self, path: &std::path::Path) -> Result<Option<String>, String> {
+            pomotui_platform::read_sync_file(path)
+        }
+        fn confirm_publication(&self, _: &std::path::Path, _: &str) -> Result<(), String> {
+            Err("injected directory fsync failure".into())
+        }
+        fn replace(&self, _: &std::path::Path, _: &str) -> Result<(), String> {
+            Err("injected publication failure".into())
+        }
+        fn cleanup_candidate(
+            &self,
+            _: &std::path::Path,
+            _: &pomotui_platform::SyncCandidate,
+        ) -> Result<(), String> {
+            self.cleanup_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("failed publication cannot authorize cleanup")
+        }
+    }
+    for idle in [false, true] {
+        let root = test_root(if idle {
+            "cleanup-confirm-fault"
+        } else {
+            "cleanup-replace-fault"
+        });
+        let path = root.join("pomotui.sync");
+        let record = Record::new(
+            RecordId::parse("00000000-0000-0000-0000-000000000081").unwrap(),
+            EntityId::parse("00000000-0000-0000-0000-000000000082").unwrap(),
+            MutationInstant::from_millis(1000).unwrap(),
+            RecordPayload::TaskVersion {
+                title: "Durably imported before publication".into(),
+                status: TaskStatus::Open,
+            },
+        );
+        let source = Document::new(&[record]).unwrap().to_json().unwrap();
+        std::fs::write(
+            &path,
+            if idle {
+                source.clone()
+            } else {
+                Document::new(&[]).unwrap().to_json().unwrap()
+            },
+        )
+        .unwrap();
+        let candidate = root.join("pomotui.sync-conflict-20261005-120000-DEVICE.sync");
+        std::fs::write(&candidate, &source).unwrap();
+        let service = configured_service(&root, &path);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = PublicationFault {
+            cleanup_calls: Arc::clone(&calls),
+        };
+        let worker = SyncWorker::start_with_file_adapter(
+            Arc::clone(&service),
+            Duration::from_mins(1),
+            Arc::new(adapter),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        worker.shutdown();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_to_string(&candidate).unwrap(), source);
+        drop(service);
+        let mut reopened = Service::open(&root.join("service.sqlite3")).unwrap();
+        let Response::Data { value } = reopened.handle(request(None, Command::TaskList)) else {
+            panic!("tasks")
+        };
+        assert!(
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["title"] == "Durably imported before publication")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
