@@ -624,3 +624,76 @@ fn later_trigger_restores_retained_union_after_external_replacement_wins_a_write
     worker.shutdown();
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn startup_recovers_custom_named_conflict_without_removing_it() {
+    let root = test_root("conflict-startup");
+    let path = root.join("custom.sync");
+    std::fs::write(&path, Document::new(&[]).unwrap().to_json().unwrap()).unwrap();
+    let record = Record::new(
+        RecordId::parse("00000000-0000-0000-0000-000000000051").unwrap(),
+        EntityId::parse("00000000-0000-0000-0000-000000000052").unwrap(),
+        MutationInstant::from_millis(1000).unwrap(),
+        RecordPayload::TaskVersion {
+            title: "Recovered conflict".into(),
+            status: TaskStatus::Open,
+        },
+    );
+    let candidate = root.join("custom.sync-conflict-20261005-120000-ABCDEFG.sync");
+    std::fs::write(
+        &candidate,
+        Document::new(&[record]).unwrap().to_json().unwrap(),
+    )
+    .unwrap();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(Arc::clone(&service), Duration::from_mins(1)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let Response::Data { value } = service
+        .lock()
+        .unwrap()
+        .handle(request(None, Command::TaskList))
+    else {
+        panic!("tasks");
+    };
+    worker.shutdown();
+    assert!(
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["title"] == "Recovered conflict")
+    );
+    assert!(candidate.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_candidate_preserves_main_and_reports_candidate_validation() {
+    let root = test_root("invalid-candidate");
+    let path = root.join("pomotui.sync");
+    let main = Document::new(&[]).unwrap().to_json().unwrap();
+    std::fs::write(&path, &main).unwrap();
+    let candidate = root.join("pomotui.sync-conflict-20261005-120000-ABCDEFG.sync");
+    std::fs::write(&candidate, "not json").unwrap();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(Arc::clone(&service), Duration::from_mins(1)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let Response::Data { value } = service
+        .lock()
+        .unwrap()
+        .handle(request(None, Command::SyncStatus))
+    else {
+        panic!("health");
+    };
+    worker.shutdown();
+    assert_eq!(value["last_error_stage"], "candidate-validate");
+    assert!(
+        value["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("sync-conflict")
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), main);
+    assert_eq!(std::fs::read_to_string(&candidate).unwrap(), "not json");
+    std::fs::remove_dir_all(root).unwrap();
+}

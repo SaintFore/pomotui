@@ -37,7 +37,7 @@ pub use repository::{
     PendingReminderEffect, ReminderDeliveryCounts, ReminderEffectKind, RepositoryError,
     SqliteRepository,
 };
-pub use sync_file::{read_sync_file, replace_sync_file};
+pub use sync_file::{discover_sync_conflicts, read_sync_file, replace_sync_file};
 
 /// Returns the domain model version targeted by these adapters.
 #[must_use]

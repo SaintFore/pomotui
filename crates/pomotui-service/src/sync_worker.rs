@@ -6,10 +6,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub trait SyncFileAdapter: Send + Sync + 'static {
-    /// Reads a synchronization document, or `None` when the path is missing.
+    /// Discovers bounded transport-specific conflict siblings.
     ///
     /// # Errors
     ///
+    /// Returns a stage-ready filesystem diagnostic.
+    fn discover_conflicts(&self, _path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Reads a synchronization document, or `None` when the path is missing.
+    ///
+    /// # Errors
     /// Returns a stage-ready filesystem diagnostic.
     fn read(&self, path: &Path) -> Result<Option<String>, String>;
 
@@ -24,6 +32,9 @@ pub trait SyncFileAdapter: Send + Sync + 'static {
 struct PlatformSyncFile;
 
 impl SyncFileAdapter for PlatformSyncFile {
+    fn discover_conflicts(&self, path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+        pomotui_platform::discover_sync_conflicts(path)
+    }
     fn read(&self, path: &Path) -> Result<Option<String>, String> {
         pomotui_platform::read_sync_file(path)
     }
@@ -223,13 +234,53 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
             );
             return;
         };
-        let incoming = match SyncDocument::from_json(source_document) {
+        let mut incoming = match SyncDocument::from_json(source_document) {
             Ok(document) => document.into_records(),
             Err(error) => {
                 finish_failure(service, &work.path, "validate", error);
                 return;
             }
         };
+        let candidates = match file.discover_conflicts(&work.path) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                finish_failure(service, &work.path, "discover", error);
+                return;
+            }
+        };
+        for candidate in &candidates {
+            let records = file
+                .read(candidate)
+                .and_then(|source| {
+                    source.ok_or_else(|| "candidate disappeared; retry later".into())
+                })
+                .and_then(|source| SyncDocument::from_json(&source))
+                .map(SyncDocument::into_records);
+            let records = match records {
+                Ok(records) => records,
+                Err(error) => {
+                    finish_failure(
+                        service,
+                        &work.path,
+                        "candidate-validate",
+                        format!("{}: {error}", candidate.display()),
+                    );
+                    return;
+                }
+            };
+            incoming = match pomotui_sync::union(&incoming, &records) {
+                Ok(records) => records,
+                Err(error) => {
+                    finish_failure(
+                        service,
+                        &work.path,
+                        "candidate-integrity",
+                        format!("{}: {error}", candidate.display()),
+                    );
+                    return;
+                }
+            };
+        }
         let retained = match service.lock() {
             Ok(mut service) => match service.apply_sync_records(&work.path, &incoming) {
                 Ok(records) => records,
