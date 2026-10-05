@@ -329,7 +329,7 @@ reward. Breaks preserve debt and repayment; actual chain length remains factual.
 successes. Editing or deleting a milestone does not forgive its obligation.
 
 New claims retain immutable support and observed-review identities in the same
-portable activity file. Format 6 accepts formats 4 and 5 without changing old
+portable activity file. Format 7 accepts formats 4, 5 and 6 without changing old
 Record IDs; persisted format 4 accepts the supported unversioned, format 2, and format 3
 states. Upgrade all Devices before synchronizing: older software rejects the new
 format. Legacy claims without observed support remain claimed and accrue no
@@ -344,3 +344,31 @@ The beginning is committed locally even while the exchange path is inaccessible.
 The exchange document retains the beginning even with no records. Format 7 verifies both that metadata and immutable record membership. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
 
 `pomotui reset --all-data --confirm` retains its existing local database backup/removal behavior and stopped-service requirement.
+
+Before Fresh Start, back up the local database, configuration, and portable main
+file if you need an archive. An archived old main file is an archive, not an undo
+operation: once the new beginning is observed, synchronizing it cannot restore
+retired business history. Tell other users of the same exchange file before
+resetting it. An offline device may continue old work, but that work is discarded
+when it observes the winning beginning. Keep every device on a compatible release.
+
+If a claimed reward's evidence later improves, the service recalculates the
+shortfall while keeping already credited repayments. For example, six missing
+successes repaid by four successes becomes zero outstanding plus one credit when
+late evidence reduces the shortfall to three. Deleting an Ended Chain removes
+reflective history but retains the minimal accounting evidence. Fresh Start is
+the explicit operation that clears this accounting too.
+
+Check `pomotui sync status --json` for `last_error`, `last_error_stage`, `warning`,
+record counts and the current format. Invalid copies and contradictory Record IDs
+are retained for repair; file modification time does not decide which contradictory
+content wins. Back up both inputs before repairing them. Do not manually replace
+Record IDs to conceal contradictory content. A cleanup error means the candidate
+remains available for a later attempt; do not remove it until its unique contents
+are safely retained. TUI synchronization health and reward debt use the same
+service state as the CLI.
+
+The opt-in [real Syncthing acceptance run](syncthing-acceptance.md) uses temporary
+profiles and two separate exchange directories. Its deterministic companion tests
+remain the daily development checks. Neither setup requires syncing SQLite or
+copying a companion reset file.

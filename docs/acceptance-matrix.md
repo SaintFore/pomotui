@@ -43,3 +43,21 @@
 | Sync configuration and path remain local; disable/path changes retain records | service `disabling_preserves_records_and_rebuild_recovers_a_valid_local_union`; CLI sync command tests |
 | The complete file is size-, schema-, version-, integrity-, and semantic-validated before import | sync document contract tests; platform invalid-document replacement test |
 | Pomotui exposes no provider dependency, Device registry, acknowledgement, or replication proof | protocol sync command surface tests; dependency manifests; user guide |
+
+## Spec #1 conflict recovery, Reward Debt and Fresh Start
+
+| Guarantee | Evidence |
+|---|---|
+| Actual offline divergent writes create Syncthing conflict copies; complete union survives cleanup | `python3 tests/syncthing_acceptance.py`; [run evidence](syncthing-acceptance.md) |
+| Subset absorption, idle inode/mtime stability and stale-file union repair | real Syncthing runner; filesystem `sync_files` tests and worker idle/recovery scenarios |
+| Invalid and contradictory same-ID copies remain diagnosable; unsafe cleanup retains evidence | real runner JSON/identity/symlink cases; deterministic cleanup/race tests |
+| Claimed threshold-seven reward with one supporting success owes six | real runner late-review import; `reward_debt` service and sync allocation scenarios |
+| Concurrent offline repayments count once; correction credits excess; history/config deletion preserve accounting | real runner with two real replica directories; deterministic debt permutations |
+| Remote Fresh Start clears offline old work and reports notice; stale replay cannot resurrect history/debt | real runner; `fresh_start_process` and `fresh_start` fault tests |
+| One copied main file carries activity and beginning to a fresh Device while settings remain local | real runner's third service; `fresh_start_process` |
+| Supported released migrations preserve represented facts and IDs without fabricating legacy debt | `legacy_migration`, sync `document_contract`; actual archived baseline format-5 binary rejection in real runner |
+
+Real transport commands, versions, barriers, results and limitations are recorded
+in [Syncthing acceptance](syncthing-acceptance.md). Daily checks remain
+`cargo test --workspace`; the real runner is opt-in because it requires Syncthing
+and permission to open isolated localhost sockets.
