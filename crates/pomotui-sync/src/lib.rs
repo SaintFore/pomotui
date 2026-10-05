@@ -881,11 +881,18 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                         .observed_review_entity_ids
                         .iter()
                         .collect::<std::collections::BTreeSet<_>>();
+                    let carried = e
+                        .carried_review_entity_ids
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>();
                     if e.threshold == 0
                         || support.len() != e.supporting_review_entity_ids.len()
                         || observed.len() != e.observed_review_entity_ids.len()
                         || !support.is_subset(&observed)
-                        || !support.contains(&e.frontier_review_entity_id)
+                        || carried.len() != e.carried_review_entity_ids.len()
+                        || !carried.is_subset(&observed)
+                        || !carried.is_disjoint(&support)
+                        || !observed.contains(&e.frontier_review_entity_id)
                     {
                         return Err("invalid immutable reward claim evidence".into());
                     }
@@ -1235,6 +1242,8 @@ impl fmt::Display for RecordId {
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ClaimEvidence {
     pub threshold: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_review_entity_ids: Vec<EntityId>,
     pub supporting_review_entity_ids: Vec<EntityId>,
     pub observed_review_entity_ids: Vec<EntityId>,
     pub frontier_review_entity_id: EntityId,
@@ -1244,6 +1253,8 @@ pub struct RewardDebt {
     pub milestone_entity_id: EntityId,
     pub outstanding: u64,
     pub repaid: u64,
+    pub excess_credit: u64,
+    pub excess_review_entity_ids: Vec<EntityId>,
     pub repayment_review_entity_ids: Vec<EntityId>,
 }
 /// Replays accounting in source-session Review Order, independently of delivery time.
@@ -1302,6 +1313,7 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
         }
     }
     let mut accounts = BTreeMap::<EntityId, RewardDebt>::new();
+    let mut consumed_credits = BTreeMap::<EntityId, std::collections::BTreeSet<EntityId>>::new();
     let mut obligations = claims.into_iter().collect::<Vec<_>>();
     obligations.sort_by_key(|(key, e)| {
         (
@@ -1319,29 +1331,68 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
                 .rev()
                 .find(|i| reviews[*i].1 == SessionReviewJudgment::Failed)
         });
-        let support = e
+        let snapshot_support = e
             .supporting_review_entity_ids
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .filter(|id| {
                 positions.get(*id).is_some_and(|i| {
-                    Some(*i) > last_break && reviews[*i].1 == SessionReviewJudgment::Successful
+                    Some(*i) > last_break
+                        && reviews[*i].1 == SessionReviewJudgment::Successful
+                        && !accounts
+                            .get(&milestone)
+                            .is_some_and(|a| a.repayment_review_entity_ids.contains(id))
                 })
             })
             .count() as u64;
+        // Late successful reviews before the immutable claim frontier correct its support.
+        // They do not erase the capacity established by its original observed evidence.
+        let late_support = frontier.map_or(0, |end| {
+            reviews
+                .iter()
+                .enumerate()
+                .take(end + 1)
+                .filter(|(i, ((_, id), judgment))| {
+                    Some(*i) > last_break
+                        && *judgment == SessionReviewJudgment::Successful
+                        && !e.observed_review_entity_ids.contains(id)
+                        && !e.supporting_review_entity_ids.contains(id)
+                        && !accounts
+                            .get(&milestone)
+                            .is_some_and(|a| a.repayment_review_entity_ids.contains(id))
+                })
+                .count() as u64
+        });
         let account = accounts
             .entry(milestone.clone())
             .or_insert_with(|| RewardDebt {
                 milestone_entity_id: milestone,
                 outstanding: 0,
                 repaid: 0,
+                excess_credit: 0,
+                excess_review_entity_ids: Vec::new(),
                 repayment_review_entity_ids: Vec::new(),
             });
-        let mut missing = e.threshold.saturating_sub(support);
+        let consumed = consumed_credits
+            .entry(account.milestone_entity_id.clone())
+            .or_default();
+        let carried_support = e
+            .carried_review_entity_ids
+            .iter()
+            .filter(|id| {
+                account.repayment_review_entity_ids.contains(id) && consumed.insert((*id).clone())
+            })
+            .count() as u64;
+        let shortfall = e
+            .threshold
+            .saturating_sub(snapshot_support + late_support + carried_support);
+        let mut capacity = e
+            .threshold
+            .saturating_sub(snapshot_support + carried_support);
         if let Some(frontier) = frontier {
             for (_, ((_, id), judgment)) in reviews.iter().enumerate().skip(frontier + 1) {
-                if missing == 0 {
+                if capacity == 0 {
                     break;
                 }
                 if *judgment == SessionReviewJudgment::Successful
@@ -1350,11 +1401,32 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
                 {
                     account.repayment_review_entity_ids.push(id.clone());
                     account.repaid += 1;
-                    missing -= 1;
+                    capacity -= 1;
                 }
             }
         }
-        account.outstanding += missing;
+        account.outstanding += shortfall;
+    }
+    for account in accounts.values_mut() {
+        let shortfall = account.outstanding;
+        let consumed = consumed_credits
+            .get(&account.milestone_entity_id)
+            .map_or(0, |ids| ids.len() as u64);
+        account.outstanding = shortfall
+            .saturating_add(consumed)
+            .saturating_sub(account.repaid);
+        account.excess_review_entity_ids = account
+            .repayment_review_entity_ids
+            .iter()
+            .filter(|id| {
+                !consumed_credits
+                    .get(&account.milestone_entity_id)
+                    .is_some_and(|ids| ids.contains(*id))
+            })
+            .skip(usize::try_from(shortfall).unwrap_or(usize::MAX))
+            .cloned()
+            .collect();
+        account.excess_credit = account.excess_review_entity_ids.len() as u64;
     }
     accounts.into_values().collect()
 }

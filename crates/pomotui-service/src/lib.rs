@@ -778,6 +778,7 @@ impl Service {
                     milestone_identity: d.milestone_entity_id.as_str().to_owned(),
                     outstanding: d.outstanding,
                     repaid: d.repaid,
+                    excess_credit: d.excess_credit,
                 })
                 .collect(),
             current_chain_rewards: self
@@ -1064,7 +1065,9 @@ impl Service {
                         })
                 })
                 .count() as u64;
-            (links.len() as u64).saturating_sub(used)
+            (links.len() as u64)
+                .saturating_sub(used)
+                .saturating_add(debt.excess_credit)
         } else {
             links.len() as u64
         }
@@ -1072,13 +1075,18 @@ impl Service {
 
     fn claim_evidence(&self, milestone_id: u64, threshold: u64) -> Option<ClaimEvidence> {
         let projection = project_session_reviews(&self.sync.records);
-        let used = project_reward_debt(&self.sync.records)
+        let debt = project_reward_debt(&self.sync.records)
             .into_iter()
             .find(|d| {
                 self.sync.reward_milestone_entities.get(&milestone_id)
                     == Some(&d.milestone_entity_id)
-            })
-            .map_or_else(Vec::new, |d| d.repayment_review_entity_ids);
+            });
+        let used = debt
+            .as_ref()
+            .map_or_else(Vec::new, |d| d.repayment_review_entity_ids.clone());
+        let carried_review_entity_ids = debt
+            .as_ref()
+            .map_or_else(Vec::new, |d| d.excess_review_entity_ids.clone());
         let supporting_review_entity_ids = projection
             .current_chain
             .links
@@ -1086,7 +1094,12 @@ impl Service {
             .filter(|r| !used.contains(&r.review_entity_id))
             .map(|r| r.review_entity_id.clone())
             .collect::<Vec<_>>();
-        let frontier_review_entity_id = supporting_review_entity_ids.last()?.clone();
+        let frontier_review_entity_id = projection
+            .current_chain
+            .links
+            .last()?
+            .review_entity_id
+            .clone();
         let observed_review_entity_ids = self
             .sync
             .records
@@ -1096,6 +1109,7 @@ impl Service {
             .collect();
         Some(ClaimEvidence {
             threshold,
+            carried_review_entity_ids,
             supporting_review_entity_ids,
             observed_review_entity_ids,
             frontier_review_entity_id,

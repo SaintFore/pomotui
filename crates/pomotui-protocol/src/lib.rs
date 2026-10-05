@@ -861,4 +861,6 @@ pub struct RewardDebtSummary {
     pub milestone_identity: String,
     pub outstanding: u64,
     pub repaid: u64,
+    #[serde(default)]
+    pub excess_credit: u64,
 }
