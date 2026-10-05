@@ -144,15 +144,17 @@ Chain Breaks must not reopen an unclaimed Ended Chain reward, and a claim must
 snapshot its own eligible current chain. Four regression combinations cover an
 empty/nonempty current chain after ordinary/late breaks.
 
-One **P1 Spec finding remains unresolved**. The accepted spec says “No unobserved
-candidate content may be destroyed.” The cleanup implementation verifies a
+The final **P1 Spec finding concerned the cleanup contract**. The original spec
+said “No unobserved candidate content may be destroyed.” Cleanup verifies a
 quarantined inode before unlinking it, but an already-open writable descriptor
 can modify that inode after verification. An executable platform test demonstrates
 this limit. The passing Syncthing scenarios establish the documented immutable
 copy/atomic-replacement contract, not the stronger unconditional guarantee.
 
-The user has been asked whether to accept that supported transport contract or
-require conservative retention whenever writer exclusion cannot be proved. No
-answer has been assumed. Full specification completion is not certified, and
-spec/ticket closure is deferred until this finding is resolved. No production
-profiles or data were modified.
+On 2026-10-05, after the two cleanup options and this limitation were explained,
+the user replied “按你推荐的来”, accepting the supported atomic-replacement
+contract. ADR 0008 records that decision. The finding is resolved by this explicit
+specification amendment; no stronger writer exclusion is claimed. Both review
+axes have zero unresolved findings under the accepted contract. Implementation
+remains on the local integration branch until publishing is separately authorized.
+No production profiles or data were modified.
