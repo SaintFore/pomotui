@@ -349,3 +349,85 @@ fn empty_fresh_start_document_survives_copy_restart_and_rebuild() {
     fresh.stop();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn concurrent_fresh_starts_choose_one_beginning_under_replay_and_restart() {
+    let root = test_root();
+    let path = root.join("exchange/shared.sync");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut first = TimerService::start(root.join("a"), 4);
+    let mut second = TimerService::start(root.join("b"), 7);
+    create_task(&first, "old shared Task");
+    enable(&first, &path);
+    sync_now(&first);
+    enable(&second, &path);
+    sync_now(&second);
+    first.request(Command::SyncDisable);
+    second.request(Command::SyncDisable);
+    for service in [&first, &second] {
+        assert!(matches!(
+            service.request(Command::FreshStart { confirmed: true }),
+            Response::Snapshot { .. }
+        ));
+    }
+    create_task(&first, "first reset work");
+    create_task(&second, "second reset work");
+    let first_path = root.join("first.sync");
+    let second_path = root.join("second.sync");
+    enable(&first, &first_path);
+    enable(&second, &second_path);
+    sync_now(&first);
+    sync_now(&second);
+    let first_document = std::fs::read(&first_path).unwrap();
+    let second_document = std::fs::read(&second_path).unwrap();
+    first.request(Command::SyncDisable);
+    second.request(Command::SyncDisable);
+    std::fs::write(&path, &first_document).unwrap();
+    std::fs::write(
+        path.with_file_name("shared (conflicted copy).sync"),
+        &second_document,
+    )
+    .unwrap();
+    enable(&first, &path);
+    sync_now(&first);
+    enable(&second, &path);
+    sync_now(&second);
+    sync_now(&first);
+    let titles = |service: &TimerService| {
+        let mut titles: Vec<_> = service
+            .data(Command::TaskList)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["title"].as_str().unwrap().to_owned())
+            .collect();
+        titles.sort();
+        titles
+    };
+    let winner = titles(&first);
+    assert_eq!(winner, titles(&second));
+    assert_eq!(winner.len(), 2);
+    assert!(
+        winner.contains(&"first reset work".into()) || winner.contains(&"second reset work".into())
+    );
+    first.restart(4);
+    second.restart(7);
+    std::fs::write(&path, &second_document).unwrap();
+    std::fs::write(
+        path.with_file_name("shared (conflicted copy).sync"),
+        &first_document,
+    )
+    .unwrap();
+    sync_now(&second);
+    sync_now(&first);
+    assert_eq!(titles(&first), winner);
+    assert_eq!(titles(&second), winner);
+    first.request(Command::SyncRebuild);
+    sync_now(&first);
+    sync_now(&second);
+    assert_eq!(titles(&first), winner);
+    assert_eq!(titles(&second), winner);
+    first.stop();
+    second.stop();
+    std::fs::remove_dir_all(root).unwrap();
+}
