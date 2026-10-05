@@ -184,6 +184,13 @@ fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
 }
 
 fn enable(service: &TimerService, path: &Path) {
+    if !path.exists() {
+        std::fs::write(
+            path,
+            pomotui_sync::Document::new(&[]).unwrap().to_json().unwrap(),
+        )
+        .unwrap();
+    }
     assert!(matches!(
         service.request(Command::SyncEnable { path: path.into() }),
         Response::Data { .. }
