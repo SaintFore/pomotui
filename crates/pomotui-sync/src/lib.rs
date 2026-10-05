@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 6;
+pub const FORMAT_VERSION: u16 = 7;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -50,6 +50,26 @@ macro_rules! identity {
 
 identity!(RecordId, "synchronization record identity");
 identity!(EntityId, "synchronized entity identity");
+
+/// Causal total-order beginning. All pre-reset documents share universal genesis.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct Beginning {
+    generation: u64,
+    id: uuid::Uuid,
+}
+impl Default for Beginning {
+    fn default() -> Self { Self { generation: 0, id: uuid::Uuid::nil() } }
+}
+impl Beginning {
+    pub fn parse(generation: u64, id: &str) -> Result<Self, String> {
+        let id = uuid::Uuid::parse_str(id).map_err(|e| e.to_string())?;
+        if (generation == 0) != id.is_nil() { return Err("invalid Fresh Start beginning".into()); }
+        Ok(Self { generation, id })
+    }
+    pub fn successor(&self) -> Result<Self, String> {
+        Ok(Self { generation: self.generation.checked_add(1).ok_or("Fresh Start generation exhausted")?, id: uuid::Uuid::new_v4() })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -182,6 +202,8 @@ pub enum RecordPayload {
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Record {
+    #[serde(default)]
+    pub beginning: Beginning,
     pub id: RecordId,
     pub entity_id: EntityId,
     pub mutation_time: MutationInstant,
@@ -189,14 +211,18 @@ pub struct Record {
 }
 
 impl Record {
+    pub fn in_beginning(beginning: Beginning, id: RecordId, entity_id: EntityId, mutation_time: MutationInstant, payload: RecordPayload) -> Self {
+        Self { beginning, id, entity_id, mutation_time, payload }
+    }
     #[must_use]
-    pub const fn new(
+    pub fn new(
         id: RecordId,
         entity_id: EntityId,
         mutation_time: MutationInstant,
         payload: RecordPayload,
     ) -> Self {
         Self {
+            beginning: Beginning::default(),
             id,
             entity_id,
             mutation_time,
@@ -213,6 +239,8 @@ struct Integrity {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Document {
+    #[serde(default)]
+    beginning: Beginning,
     format: String,
     version: u16,
     integrity: Integrity,
@@ -221,9 +249,16 @@ pub struct Document {
 
 impl Document {
     pub fn new(records: &[Record]) -> Result<Self, String> {
+        let beginning = records.iter().map(|r| &r.beginning).max().cloned().unwrap_or_default();
+        Self::with_beginning(beginning, records)
+    }
+
+    pub fn with_beginning(beginning: Beginning, records: &[Record]) -> Result<Self, String> {
         let records = union(&[], records)?;
+        if records.iter().any(|r| r.beginning != beginning) { return Err("document record beginning differs from selected beginning".into()); }
         validate_records(&records)?;
         Ok(Self {
+            beginning,
             format: FORMAT_NAME.into(),
             version: FORMAT_VERSION,
             integrity: Integrity {
@@ -240,7 +275,7 @@ impl Document {
         if document.format != FORMAT_NAME {
             return Err("unsupported sync document format".into());
         }
-        if !matches!(document.version, 4 | 5 | FORMAT_VERSION) {
+        if !matches!(document.version, 4 | 5 | 6 | FORMAT_VERSION) {
             return Err(format!(
                 "unsupported sync document version {}; reset local pre-release data with `pomotui reset --all-data --confirm`",
                 document.version
@@ -250,7 +285,13 @@ impl Document {
         if document.integrity.record_count != document.records.len() {
             return Err("sync document integrity check failed".into());
         }
-        if document.integrity.records_sha256 != checksum(&document.records)? {
+        let expected_checksum = if document.version < FORMAT_VERSION {
+            #[derive(Serialize)]
+            struct LegacyRecord<'a> { id: &'a RecordId, entity_id: &'a EntityId, mutation_time: MutationInstant, payload: &'a RecordPayload }
+            let legacy = document.records.iter().map(|r| LegacyRecord { id: &r.id, entity_id: &r.entity_id, mutation_time: r.mutation_time, payload: &r.payload }).collect::<Vec<_>>();
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).map_err(|e| e.to_string())?))
+        } else { checksum(&document.records)? };
+        if document.integrity.records_sha256 != expected_checksum {
             return Err("sync document checksum does not match its records".into());
         }
         if document.version == 4 {
@@ -283,12 +324,15 @@ impl Document {
     }
 
     pub fn to_json(&self) -> Result<String, String> {
-        let canonical = Self::new(&self.records)?;
+        let canonical = Self::with_beginning(self.beginning.clone(), &self.records)?;
         let mut source =
             serde_json::to_string_pretty(&canonical).map_err(|error| error.to_string())?;
         source.push('\n');
         Ok(source)
     }
+
+    #[must_use]
+    pub fn beginning(&self) -> &Beginning { &self.beginning }
 
     #[must_use]
     pub fn records(&self) -> &[Record] {
@@ -308,6 +352,7 @@ pub fn union(left: &[Record], right: &[Record]) -> Result<Vec<Record>, String> {
             && existing != record
         {
             let mut differences = Vec::new();
+            if existing.beginning != record.beginning { differences.push("beginning membership"); }
             if existing.entity_id != record.entity_id {
                 differences.push("entity_id");
             }
@@ -1357,4 +1402,11 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
         account.outstanding += missing;
     }
     accounts.into_values().collect()
+}
+
+/// Merge metadata before projecting records; retired beginnings cannot resurrect.
+pub fn union_documents(left: &Document, right: &Document) -> Result<Document, String> {
+    let beginning = left.beginning().max(right.beginning()).clone();
+    let records = union(left.records(), right.records())?.into_iter().filter(|r| r.beginning == beginning).collect::<Vec<_>>();
+    Document::with_beginning(beginning, &records)
 }
