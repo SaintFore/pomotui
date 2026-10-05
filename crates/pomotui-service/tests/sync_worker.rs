@@ -626,7 +626,7 @@ fn later_trigger_restores_retained_union_after_external_replacement_wins_a_write
 }
 
 #[test]
-fn startup_recovers_custom_named_conflict_without_removing_it() {
+fn startup_recovers_custom_named_conflict_and_cleans_it_after_publication() {
     let root = test_root("conflict-startup");
     let path = root.join("custom.sync");
     std::fs::write(&path, Document::new(&[]).unwrap().to_json().unwrap()).unwrap();
@@ -663,7 +663,7 @@ fn startup_recovers_custom_named_conflict_without_removing_it() {
             .iter()
             .any(|task| task["title"] == "Recovered conflict")
     );
-    assert!(candidate.exists());
+    assert!(!candidate.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -866,6 +866,121 @@ fn twenty_eight_record_main_and_eighteen_record_subset_remain_twenty_eight() {
             .len(),
         28
     );
-    assert!(candidate.exists());
+    assert!(!candidate.exists());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn idle_canonical_sync_cleans_an_absorbed_subset_without_replacing_main() {
+    use std::os::unix::fs::MetadataExt;
+    let root = test_root("idle-cleanup");
+    let path = root.join("pomotui.sync");
+    let source = Document::new(&[]).unwrap().to_json().unwrap();
+    std::fs::write(&path, &source).unwrap();
+    let candidate = root.join("pomotui.sync-conflict-20261005-120000-DEVICE.sync");
+    std::fs::write(&candidate, &source).unwrap();
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    let service = configured_service(&root, &path);
+    let worker = SyncWorker::start(service, Duration::from_mins(1)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while candidate.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    worker.shutdown();
+    assert!(
+        !candidate.exists(),
+        "absorbed candidate must be removed even when publication is skipped"
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_durable_publication_never_calls_cleanup_and_import_survives_restart() {
+    struct PublicationFault {
+        cleanup_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl SyncFileAdapter for PublicationFault {
+        fn discover_conflicts(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, String> {
+            pomotui_platform::discover_sync_conflicts(path)
+        }
+        fn read(&self, path: &std::path::Path) -> Result<Option<String>, String> {
+            pomotui_platform::read_sync_file(path)
+        }
+        fn confirm_publication(&self, _: &std::path::Path, _: &str) -> Result<(), String> {
+            Err("injected directory fsync failure".into())
+        }
+        fn replace(&self, _: &std::path::Path, _: &str) -> Result<(), String> {
+            Err("injected publication failure".into())
+        }
+        fn cleanup_candidate(
+            &self,
+            _: &std::path::Path,
+            _: &pomotui_platform::SyncCandidate,
+        ) -> Result<(), String> {
+            self.cleanup_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("failed publication cannot authorize cleanup")
+        }
+    }
+    for idle in [false, true] {
+        let root = test_root(if idle {
+            "cleanup-confirm-fault"
+        } else {
+            "cleanup-replace-fault"
+        });
+        let path = root.join("pomotui.sync");
+        let record = Record::new(
+            RecordId::parse("00000000-0000-0000-0000-000000000081").unwrap(),
+            EntityId::parse("00000000-0000-0000-0000-000000000082").unwrap(),
+            MutationInstant::from_millis(1000).unwrap(),
+            RecordPayload::TaskVersion {
+                title: "Durably imported before publication".into(),
+                status: TaskStatus::Open,
+            },
+        );
+        let source = Document::new(&[record]).unwrap().to_json().unwrap();
+        std::fs::write(
+            &path,
+            if idle {
+                source.clone()
+            } else {
+                Document::new(&[]).unwrap().to_json().unwrap()
+            },
+        )
+        .unwrap();
+        let candidate = root.join("pomotui.sync-conflict-20261005-120000-DEVICE.sync");
+        std::fs::write(&candidate, &source).unwrap();
+        let service = configured_service(&root, &path);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = PublicationFault {
+            cleanup_calls: Arc::clone(&calls),
+        };
+        let worker = SyncWorker::start_with_file_adapter(
+            Arc::clone(&service),
+            Duration::from_mins(1),
+            Arc::new(adapter),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        worker.shutdown();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_to_string(&candidate).unwrap(), source);
+        drop(service);
+        let mut reopened = Service::open(&root.join("service.sqlite3")).unwrap();
+        let Response::Data { value } = reopened.handle(request(None, Command::TaskList)) else {
+            panic!("tasks")
+        };
+        assert!(
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["title"] == "Durably imported before publication")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

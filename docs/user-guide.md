@@ -288,3 +288,33 @@ If changes have not appeared elsewhere:
    the database with the broadest known history. Preserve database backups.
 6. Restart the Timer Service if the CLI says the running service is older than
    the installed synchronization command.
+
+### Conflict-copy recovery and cleanup
+
+Background synchronization discovers Syncthing conflict siblings of the configured
+filename (for `custom.sync`, `custom.sync-conflict-YYYYMMDD-HHMMSS-DEVICE.sync`).
+The date and time components must be 8 and 6 digits; the device suffix must be
+nonempty ASCII letters or digits. Other neighboring files are ignored. Each
+attempt processes at most 32 candidates, rotating larger batches.
+
+A validated copy is imported into SQLite before publishing the complete main
+file. Publication synchronizes both file contents and the parent directory;
+identical existing output is synchronized before cleanup without replacing it.
+Cleanup checks exact bytes and inode identity, moves with a no-overwrite rename
+into a private `.pomotui-cleanup-<main filename>` directory, synchronizes both
+directories, and checks the moved file again before removing it. Its unchanged
+original basename records provenance. Interrupted moves and copies that cannot
+be restored because a new original already exists remain discoverable in that
+directory on later attempts. A changed, invalid, unsafe, or unverified artifact
+is retained with a synchronization diagnostic. The main file remains the single
+portable exchange document after successful recovery.
+
+This cleanup supports immutable conflict copies and Syncthing's atomic pathname
+replacement. An observed in-place write is retained, but Unix rename cannot
+revoke an already-open writable file descriptor. A noncooperating writer that
+changes the moved inode after the final check is outside this transport
+contract. Do not use arbitrary in-place writers with automatic cleanup. Directory
+operations require no-follow regular files, private owned quarantine directories,
+and no-replace rename support; unsupported filesystems retain the copy and report
+an error. These checks protect ordinary transport races, not malicious programs
+running as the same user.
