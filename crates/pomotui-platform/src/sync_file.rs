@@ -92,6 +92,19 @@ fn temporary_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
+fn conflict_name_parts(name: &str) -> (String, String) {
+    let (stem, extension) = name
+        .rsplit_once('.')
+        .map_or((name, ""), |(stem, ext)| (stem, ext));
+    let prefix = format!("{stem}.sync-conflict-");
+    let suffix = if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{extension}")
+    };
+    (prefix, suffix)
+}
+
 /// Discovers only Syncthing conflict siblings of the selected exchange filename.
 /// Each attempt handles at most 32 candidates and scans at most 4096 directory entries.
 ///
@@ -104,15 +117,7 @@ pub fn discover_sync_conflicts(path: &Path) -> Result<Vec<PathBuf>, String> {
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "sync filename is not UTF-8".to_owned())?;
-    let (stem, extension) = name
-        .rsplit_once('.')
-        .map_or((name, ""), |(stem, ext)| (stem, ext));
-    let prefix = format!("{stem}.sync-conflict-");
-    let suffix = if extension.is_empty() {
-        String::new()
-    } else {
-        format!(".{extension}")
-    };
+    let (prefix, suffix) = conflict_name_parts(name);
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -426,7 +431,7 @@ mod cleanup_tests {
 pub struct SyncCandidate {
     pub path: PathBuf,
     pub source: String,
-    identity: Option<(u64, u64, u64, i64, i64, i64, i64)>,
+    identity: Option<FileSignature>,
 }
 
 impl SyncCandidate {
@@ -441,17 +446,24 @@ impl SyncCandidate {
     }
 }
 
-fn signature(metadata: &std::fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileSignature {
+    device: u64,
+    inode: u64,
+    link_count: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+fn signature(metadata: &std::fs::Metadata) -> FileSignature {
     use std::os::unix::fs::MetadataExt;
-    (
-        metadata.dev(),
-        metadata.ino(),
-        metadata.nlink(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.ctime(),
-        metadata.ctime_nsec(),
-    )
+    FileSignature {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        link_count: metadata.nlink(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    }
 }
 
 /// Opens a bounded regular file without following a final symlink and pins its identity.
@@ -523,13 +535,13 @@ fn quarantine_path(main: &Path) -> Result<PathBuf, String> {
 fn matches_observation(observed: &SyncCandidate, current: &SyncCandidate, moved: bool) -> bool {
     match (observed.identity, current.identity) {
         (Some(a), Some(b)) => {
-            a.0 == b.0
-                && a.1 == b.1
-                && a.2 == 1
-                && b.2 == 1
-                && a.3 == b.3
-                && a.4 == b.4
-                && (moved || (a.5 == b.5 && a.6 == b.6))
+            a.device == b.device
+                && a.inode == b.inode
+                && a.link_count == 1
+                && b.link_count == 1
+                && a.modified == b.modified
+                // Moving the file changes ctime without changing observed content.
+                && (moved || a.changed == b.changed)
                 && observed.source == current.source
         }
         _ => false,
@@ -585,20 +597,13 @@ fn cleanup_with_probe(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or("invalid main filename")?;
-    let (stem, extension) = name
-        .rsplit_once('.')
-        .map_or((name, ""), |(stem, ext)| (stem, ext));
-    let suffix = if extension.is_empty() {
-        String::new()
-    } else {
-        format!(".{extension}")
-    };
+    let (prefix, suffix) = conflict_name_parts(name);
     let quarantine = quarantine_path(main)?;
     if !observed
         .path
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| is_conflict_name(n, &format!("{stem}.sync-conflict-"), &suffix))
+        .is_some_and(|n| is_conflict_name(n, &prefix, &suffix))
         || (observed.path.parent() != main.parent()
             && observed.path.parent() != Some(quarantine.as_path()))
     {

@@ -291,3 +291,52 @@ fn corrected_surplus_crosses_break_and_is_consumed_by_one_later_claim() {
     drop(restarted);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ended_chain_unclaimed_rewards_remain_unavailable_after_sync() {
+    for (break_time, later_success) in [(20, false), (20, true), (5, false), (5, true)] {
+        let root = std::env::temp_dir().join(format!(
+            "pomotui-ended-reward-{}",
+            RecordId::random().as_str()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("activity.sync");
+        let mut service = Service::open(&root.join("service.db")).unwrap();
+        service.enable_background_sync();
+        service.handle(request(Command::SyncEnable { path: path.clone() }));
+        let mut records = success(1, 10);
+        records.push(Record::new(
+            RecordId::random(),
+            id(30),
+            MutationInstant::from_millis(10).unwrap(),
+            RecordPayload::RewardMilestoneVersion {
+                name: "Coffee".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
+        service.apply_sync_records(&path, &records).unwrap();
+        let unlock_id = snapshot(&mut service).current_chain_rewards[0].id;
+        let mut failure = success(2, break_time);
+        if let RecordPayload::SessionReviewed {
+            judgment,
+            reflection,
+            ..
+        } = &mut failure[1].payload
+        {
+            *judgment = pomotui_sync::SessionReviewJudgment::Failed;
+            *reflection = Some("interrupt".into());
+        }
+        service.apply_sync_records(&path, &failure).unwrap();
+        if later_success {
+            service.apply_sync_records(&path, &success(3, 30)).unwrap();
+        }
+        assert!(matches!(
+            service.handle(request(Command::RewardClaim { unlock_id })),
+            Response::Error { .. }
+        ));
+        assert!(snapshot(&mut service).reward_debt.is_empty());
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
