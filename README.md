@@ -38,7 +38,9 @@ use.
 - **Three frontends** — TUI dashboard, CLI, and Waybar module observe and control the same session
 - **Tasks and history** — task lifecycle, durable Session History, daily statistics, and seven-day trends
 - **Action Chains and rewards** — reviewed sessions build a chain; reward milestones can be unlocked and claimed
+- **Reward Debt** — claimed rewards stay claimed; future successes repay any shortfall revealed by late reviews
 - **Cross-device convergence** — sync tasks, history, reviews, and chains through one provider-neutral file
+- **Fresh Start** — explicitly clear business data across synchronized computers while keeping ordinary settings
 - **Desktop integration** — notifications, completion sounds, systemd user socket, app launcher entry
 - **Bilingual UI** — English and Simplified Chinese, switchable in Settings
 
@@ -47,12 +49,12 @@ use.
 **Linux:**
 
 - systemd user services
-- A Rust toolchain supporting edition 2024
+- Rust 1.96.1 for source builds (selected by `rust-toolchain.toml`)
 - Optional: Waybar, `notify-send`, and `paplay`
 
 **macOS:**
 
-- A Rust toolchain supporting edition 2024
+- Rust 1.96.1 for source builds (selected by `rust-toolchain.toml`)
 - Optional: `afplay` (built-in), `osascript` (built-in), Waybar (via Homebrew)
 
 ## Install
@@ -70,8 +72,9 @@ The AUR packages install the executables in `/usr/bin`. The command above
 enables the systemd user socket and starts Pomotui immediately.
 
 Update the git package and its VCS dependencies with `paru -Syu --devel`.
-The package makes a best-effort attempt to restart the Timer Service after an
-upgrade. If it prints a restart warning, run:
+Package upgrades automatically restart running Timer Services for logged-in and
+lingering users. Inactive services remain stopped. If the user service manager
+cannot be reached, the upgrade prints a warning; run:
 
 ```sh
 systemctl --user daemon-reload
@@ -278,6 +281,15 @@ attempts still import records and update sync health but leave the file intact.
 This avoids unnecessary filesystem activity; rewriting identical contents alone
 is not sufficient to cause a Syncthing content conflict.
 
+Normal synchronization runs in the background, including after offline work;
+you do not need to run `sync now` after every action. Pomotui also recovers valid
+conflict copies using the supported Syncthing filename pattern, durably merges
+their records, and cleans up absorbed copies under the supported atomic-replacement
+write contract. Other tools' conflict filenames are not automatically recognized.
+Invalid or contradictory copies are retained with a diagnostic. See the
+[conflict recovery guide](docs/user-guide.md#conflict-copy-recovery-and-cleanup)
+for supported naming and filesystem conditions.
+
 Work can continue offline. Same-titled Tasks retain distinct identities,
 concurrent edits resolve deterministically, and deletions do not invalidate a
 Task used by the local Current Session.
@@ -289,6 +301,33 @@ Task used by the local Current Session.
 > up the local SQLite database. See the
 > [user guide](docs/user-guide.md#cross-device-synchronization) for conflict,
 > upgrade, path-change, recovery, and troubleshooting procedures.
+
+### Rewards after late reviews
+
+A late offline review can change an Action Chain. Claimed rewards remain claimed;
+if their supporting successes fall short, the missing successes become Reward
+Debt for that milestone. Future successful reviews repay the debt before advancing
+its next reward. Ordinary history deletion or milestone deletion does not clear
+the obligation. Check `pomotui reward list` or the TUI for debt and repayment.
+See the [reward guide](docs/user-guide.md#reward-debt-after-synchronization).
+
+### Start fresh across computers
+
+To deliberately clear Tasks, history, chains, rewards, debt, and current timer
+work, run this command while the Timer Service is running:
+
+```sh
+pomotui fresh-start --confirm
+```
+
+Ordinary settings and sync configuration are preserved. The new beginning
+propagates through the same exchange file; an offline computer clears its old
+business data when it receives that beginning, including work done before it
+learned of the reset. Back up data you want to archive before running the command.
+See [Fresh Start](docs/user-guide.md#fresh-start-across-devices) for details.
+
+`pomotui reset --all-data --confirm` is a separate local database repair command.
+Use Fresh Start when you intend to restart business data across computers.
 
 ### Pre-release upgrades and old sync formats
 
@@ -388,6 +427,8 @@ Run the same checks used by CI:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
+cargo build --workspace
+cargo build --release --workspace
 tests/e2e.sh
 ```
 
