@@ -13,6 +13,8 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         .map(String::as_str)
         .collect();
     let command = match words.as_slice() {
+        ["fresh-start", "--confirm"] => Command::FreshStart { confirmed: true },
+        ["fresh-start"] => return Err("Fresh Start requires --confirm".into()),
         ["status" | "waybar"] => Command::Status,
         ["start", "focus"] => Command::Start { kind: SessionKind::Focus, task_id: None },
         ["start", "focus", "--task", id] => Command::Start {
@@ -124,7 +126,7 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["sync", "now"] => Command::SyncNow,
         ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
-        _ => return Err("usage: pomotui [--json] status|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
+        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
 }
@@ -315,6 +317,21 @@ fn percentage(remaining: u64, planned: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fresh_start_requires_explicit_confirmation() {
+        let missing = super::parse(&["fresh-start".into()]).expect_err("confirmation required");
+        assert!(missing.contains("--confirm"));
+        let (command, json, _) =
+            super::parse(&["fresh-start".into(), "--confirm".into(), "--json".into()])
+                .expect("confirmed fresh start");
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            serde_json::json!({"command":"fresh_start", "confirmed":true})
+        );
+        assert!(command.mutates());
+        assert!(json);
+    }
+
     use super::*;
     use pomotui_protocol::Snapshot;
 

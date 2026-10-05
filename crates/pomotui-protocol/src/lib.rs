@@ -24,6 +24,9 @@ pub enum SessionKind {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    FreshStart {
+        confirmed: bool,
+    },
     Start {
         kind: SessionKind,
         task_id: Option<u64>,
