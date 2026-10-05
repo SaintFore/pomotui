@@ -231,3 +231,84 @@ fn newer_nonempty_beginning_imports_void_reviews_after_local_reset() {
     assert_eq!(snapshot.recent_chain_links.len(), 1);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn format_three_genesis_state_upgrades_to_format_four_on_next_write() {
+    use pomotui_platform::SqliteRepository;
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-format-upgrade-{}",
+        pomotui_sync::RecordId::random().as_str()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("state.sqlite3");
+    let mut service = Service::open(&path).unwrap();
+    send(
+        &mut service,
+        "create",
+        Command::TaskCreate {
+            title: "retained".into(),
+        },
+    );
+    drop(service);
+    let mut repository = SqliteRepository::open(&path).unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&repository.current_session_payload().unwrap().unwrap()).unwrap();
+    state["data_format_version"] = serde_json::json!(3);
+    state["sync"].as_object_mut().unwrap().remove("beginning");
+    repository.save_state(&state.to_string()).unwrap();
+    let mut reopened = Service::open(&path).unwrap();
+    let Response::Data { value } = send(&mut reopened, "list", Command::TaskList) else {
+        panic!()
+    };
+    assert!(value.to_string().contains("retained"));
+    send(
+        &mut reopened,
+        "reset",
+        Command::FreshStart { confirmed: true },
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&repository.current_session_payload().unwrap().unwrap()).unwrap();
+    assert_eq!(saved["data_format_version"], 4);
+    drop(reopened);
+    drop(repository);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn startup_rejects_records_from_another_beginning_without_rewriting_state() {
+    use pomotui_platform::SqliteRepository;
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-beginning-membership-{}",
+        pomotui_sync::RecordId::random().as_str()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("state.sqlite3");
+    let mut service = Service::open(&path).unwrap();
+    send(
+        &mut service,
+        "reset",
+        Command::FreshStart { confirmed: true },
+    );
+    send(
+        &mut service,
+        "create",
+        Command::TaskCreate {
+            title: "new beginning".into(),
+        },
+    );
+    drop(service);
+    let mut repository = SqliteRepository::open(&path).unwrap();
+    let mut state: serde_json::Value =
+        serde_json::from_str(&repository.current_session_payload().unwrap().unwrap()).unwrap();
+    state["sync"]["records"][0]["beginning"] =
+        serde_json::json!({"generation": 0, "id": "00000000-0000-0000-0000-000000000000"});
+    let corrupt = state.to_string();
+    repository.save_state(&corrupt).unwrap();
+    assert!(Service::open(&path).is_err());
+    assert_eq!(
+        repository.current_session_payload().unwrap().unwrap(),
+        corrupt
+    );
+    drop(repository);
+    std::fs::remove_dir_all(root).unwrap();
+}

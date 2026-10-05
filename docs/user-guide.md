@@ -330,7 +330,7 @@ successes. Editing or deleting a milestone does not forgive its obligation.
 
 New claims retain immutable support and observed-review identities in the same
 portable activity file. Format 6 accepts formats 4 and 5 without changing old
-Record IDs; persisted format 3 accepts the supported unversioned and format 2
+Record IDs; persisted format 4 accepts the supported unversioned, format 2, and format 3
 states. Upgrade all Devices before synchronizing: older software rejects the new
 format. Legacy claims without observed support remain claimed and accrue no
 inferred debt. Missing evidence cannot be reconstructed from a claim timestamp.
