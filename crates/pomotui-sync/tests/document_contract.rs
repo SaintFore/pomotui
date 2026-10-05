@@ -561,10 +561,13 @@ fn legacy_json(current: &str, version: u16) -> String {
 #[test]
 fn all_supported_legacy_formats_share_genesis_and_preserve_record_identity() {
     let record = task_version(1, 9, 1_000, "legacy");
-    let current = Document::new(&[record.clone()]).unwrap().to_json().unwrap();
+    let current = Document::new(std::slice::from_ref(&record))
+        .unwrap()
+        .to_json()
+        .unwrap();
     for version in [4, 5, 6] {
         let normalized = Document::from_json(&legacy_json(&current, version)).unwrap();
-        assert_eq!(normalized.records(), &[record.clone()]);
+        assert_eq!(normalized.records(), std::slice::from_ref(&record));
         assert_eq!(normalized.beginning(), &pomotui_sync::Beginning::default());
         assert_eq!(
             Document::from_json(&normalized.to_json().unwrap()).unwrap(),

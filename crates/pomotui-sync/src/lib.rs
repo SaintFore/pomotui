@@ -239,6 +239,7 @@ pub struct Record {
 }
 
 impl Record {
+    #[must_use]
     pub fn in_beginning(
         beginning: Beginning,
         id: RecordId,
@@ -304,13 +305,14 @@ impl Document {
             return Err("document record beginning differs from selected beginning".into());
         }
         validate_records(&records)?;
+        let records_sha256 = document_checksum(&beginning, &records)?;
         Ok(Self {
-            beginning: beginning.clone(),
+            beginning,
             format: FORMAT_NAME.into(),
             version: FORMAT_VERSION,
             integrity: Integrity {
                 record_count: records.len(),
-                records_sha256: document_checksum(&beginning, &records)?,
+                records_sha256,
             },
             records,
         })

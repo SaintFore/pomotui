@@ -159,3 +159,75 @@ fn committed_reset_cancels_queued_effects_and_clears_old_keys_across_restart() {
     drop(repository);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn newer_nonempty_beginning_imports_void_reviews_after_local_reset() {
+    use pomotui_sync::{
+        Beginning, Document, EntityId, MutationInstant, Record, RecordId, RecordPayload,
+        ReviewedTaskKind, SessionKind, SessionOutcome, SessionReviewJudgment,
+    };
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-newer-review-{}",
+        RecordId::random().as_str()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("exchange.json");
+    std::fs::write(&path, Document::new(&[]).unwrap().to_json().unwrap()).unwrap();
+    let mut service = Service::open(&root.join("state.sqlite3")).unwrap();
+    send(
+        &mut service,
+        "enable",
+        Command::SyncEnable { path: path.clone() },
+    );
+    assert!(matches!(
+        send(
+            &mut service,
+            "reset",
+            Command::FreshStart { confirmed: true }
+        ),
+        Response::Snapshot { .. }
+    ));
+    let beginning = Beginning::parse(2, "00000000-0000-4000-8000-000000000001").unwrap();
+    let session = EntityId::random();
+    let records = vec![
+        Record::in_beginning(
+            beginning.clone(),
+            RecordId::random(),
+            session.clone(),
+            MutationInstant::from_millis(60_000).unwrap(),
+            RecordPayload::SessionEnded {
+                ended_at: 60_000,
+                kind: SessionKind::Focus,
+                outcome: SessionOutcome::Stopped,
+                planned_seconds: 60,
+                actual_seconds: 60,
+                task_entity_id: None,
+                task_title: None,
+            },
+        ),
+        Record::in_beginning(
+            beginning.clone(),
+            RecordId::random(),
+            EntityId::random(),
+            MutationInstant::from_millis(60_001).unwrap(),
+            RecordPayload::SessionReviewed {
+                session_entity_id: session,
+                judgment: SessionReviewJudgment::Successful,
+                task_entity_id: EntityId::random(),
+                task_kind: ReviewedTaskKind::SystemVoid,
+                task_title: "Void".into(),
+                actual_seconds: 60,
+                reflection: None,
+                chain_entry_title: Some("new beginning work".into()),
+            },
+        ),
+    ];
+    let document = Document::with_beginning(beginning.clone(), &records).unwrap();
+    let imported = service.apply_sync_document(&path, &document).unwrap();
+    assert_eq!(imported.beginning(), &beginning);
+    let Response::Snapshot { snapshot } = send(&mut service, "status", Command::Status) else {
+        panic!()
+    };
+    assert_eq!(snapshot.recent_chain_links.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
