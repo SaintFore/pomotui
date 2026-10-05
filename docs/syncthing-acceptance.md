@@ -50,7 +50,9 @@ the TUI. All other business operations use the CLI.
 
 ## Recorded run
 
-See the final execution evidence below. Earlier development runs failed on a
+On 2026-10-05, the final run against integration commit
+`45504dc0fc67a27b4537dbb9df9b50d40ce00273` exited **0**, with all nine
+scenario assertions passing. Earlier development runs failed on a
 real defect: adopting a newer nonempty beginning containing a System Void review
 attempted review projection before reestablishing the Void invariant. Those runs
 are not counted as passes; the regression was fixed and the final runner also
@@ -67,9 +69,10 @@ cleanup assumes immutable conflict copies and atomic pathname replacement.
 
 Legacy migrations are exercised with frozen released fixtures by
 `legacy_migration`, and format 4/5/6 identity/genesis migration by
-`document_contract`. This run does not execute an archived older application
-binary; newer-format refusal is current validation-test evidence, not a claim
-that an old installed environment was run successfully.
+`document_contract`. The optional `--old-binaries` check executed the actual baseline application at
+`93a4ba1` (sync format 5). It rejected the format-7 file, kept its bytes and local
+Tasks unchanged, and still started its local timer. This does not test every
+intermediate or historical release.
 
 Migration checks run on 2026-10-05 with:
 
@@ -82,3 +85,46 @@ Result: **3 service migration tests and 17 document-contract tests passed**.
 The frozen released database scenarios covered independent/restorable migration,
 one-time export and first-export rollback/restart. Document scenarios covered
 formats 4/5/6, stable record identities, universal genesis and Void attribution.
+
+
+Final command (scratch logs retained at `/tmp/pomotui-real-acceptance-final`):
+
+```sh
+python3 tests/syncthing_acceptance.py \
+  --binaries /home/saintfore/code/pomotui/target/debug \
+  --old-binaries /tmp/pomotui-old-93a4ba1/target/debug \
+  --keep /tmp/pomotui-real-acceptance-final
+```
+
+Versions: Syncthing **2.1.5**, linux-amd64, built with Go 1.27.0;
+Python **3.14.7**; Rust **1.96.1**. The application package is **0.1.0**,
+with sync format **7**, public protocol **5** and persisted state **4**.
+The old binary was built from an isolated `git archive 93a4ba1` checkout with a
+separate Cargo target directory, preventing stale build artifacts from mixing
+protocol versions. To repeat that optional check:
+
+```sh
+legacy_root=$(mktemp -d /tmp/pomotui-legacy-XXXXXX)
+git archive 93a4ba1 | tar -x -C "$legacy_root"
+cargo build --manifest-path "$legacy_root/Cargo.toml" \
+  -p pomotui-service -p pomotui-cli --target-dir "$legacy_root/target"
+python3 tests/syncthing_acceptance.py --binaries target/debug \
+  --old-binaries "$legacy_root/target/debug"
+```
+
+| Actual scenario | Result |
+|---|---|
+| Confirmed disconnect, divergent CLI activity, reconnect creates real Syncthing conflict | PASS |
+| Both replicas retain the complete Task/Session/review union; absorbed copy removed; live timers/settings remain independent | PASS |
+| Repeated idle sync preserves inode/mtime; subset copy cleans safely; stale main overwrite repairs the union | PASS |
+| JSON/checksum/version/immutable-ID errors and unsafe symlink retain evidence with diagnosis; timer commands remain usable | PASS |
+| Actual claim, late timestamp-controlled review import, chain revision and debt six on both devices | PASS |
+| Independent offline repayments merge to four credits once; late correction gives excess credit one; history/config deletion and restart retain accounting | PASS |
+| Fresh Start with other device offline retires old work; reset notice; stale main/copy/restart cannot resurrect history/debt | PASS |
+| A single copied main file gives fresh C current activity and beginning while keeping C's settings | PASS |
+| Actual old binary rejects version 7 without mutating the exchange or local Tasks, and timer remains usable | PASS |
+
+The old binary's diagnostic was:
+`unsupported sync document version 7`. Its old advice to reset pre-release data
+is not upgrade guidance for current users: upgrade all devices and preserve
+backups instead.
