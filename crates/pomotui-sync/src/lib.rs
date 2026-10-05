@@ -305,9 +305,20 @@ pub fn union(left: &[Record], right: &[Record]) -> Result<Vec<Record>, String> {
         if let Some(existing) = records.get(&record.id)
             && existing != record
         {
+            let mut differences = Vec::new();
+            if existing.entity_id != record.entity_id {
+                differences.push("entity_id");
+            }
+            if existing.mutation_time != record.mutation_time {
+                differences.push("mutation time");
+            }
+            if existing.payload != record.payload {
+                differences.push("payload kind/content");
+            }
             return Err(format!(
-                "conflicting synchronization record {}",
-                record.id.as_str()
+                "conflicting synchronization record {}: differing {}; retain both inputs and repair the contradictory record identity",
+                record.id.as_str(),
+                differences.join(", ")
             ));
         }
         records.insert(record.id.clone(), record.clone());
