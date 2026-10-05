@@ -318,3 +318,19 @@ operations require no-follow regular files, private owned quarantine directories
 and no-replace rename support; unsupported filesystems retain the copy and report
 an error. These checks protect ordinary transport races, not malicious programs
 running as the same user.
+### Reward Debt after synchronization
+
+A claimed reward remains claimed when a late Session Review breaks its supporting
+Action Chain. Each milestone keeps its own debt in missing successful reviews:
+a threshold of seven supported by one success owes six. Future successes repay
+one unit for every affected milestone before advancing that milestone's next
+reward. Breaks preserve debt and repayment; actual chain length remains factual.
+`pomotui reward list`, JSON status, human status, and the TUI expose debt and repaid
+successes. Editing or deleting a milestone does not forgive its obligation.
+
+New claims retain immutable support and observed-review identities in the same
+portable activity file. Format 6 accepts formats 4 and 5 without changing old
+Record IDs; persisted format 3 accepts the supported unversioned and format 2
+states. Upgrade all Devices before synchronizing: older software rejects the new
+format. Legacy claims without observed support remain claimed and accrue no
+inferred debt. Missing evidence cannot be reconstructed from a claim timestamp.

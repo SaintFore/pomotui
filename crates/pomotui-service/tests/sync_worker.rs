@@ -516,7 +516,7 @@ fn sync_now_imports_a_replaced_document_through_the_protocol_handler() {
     };
     assert_eq!(status["enabled"], true);
     assert_eq!(status["path"], path.to_string_lossy().as_ref());
-    assert_eq!(status["format_version"], 5);
+    assert_eq!(status["format_version"], pomotui_sync::FORMAT_VERSION);
     assert!(
         status["local_record_count"]
             .as_u64()

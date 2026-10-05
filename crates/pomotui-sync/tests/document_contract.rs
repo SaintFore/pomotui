@@ -84,17 +84,17 @@ fn valid_task_records_have_byte_stable_round_trips() {
 }
 
 #[test]
-fn format_four_is_validated_and_upgraded_to_format_five() {
+fn format_four_is_validated_and_upgraded_to_current_format() {
     let current = Document::new(&[task_version(1, 9, 1_000, "First")])
         .and_then(|document| document.to_json())
         .expect("current document");
-    let legacy = current.replacen("\"version\": 5", "\"version\": 4", 1);
+    let legacy = current.replacen("\"version\": 6", "\"version\": 4", 1);
 
     let upgraded = Document::from_json(&legacy)
         .and_then(|document| document.to_json())
         .expect("upgrade format four");
 
-    assert!(upgraded.contains("\"version\": 5"));
+    assert!(upgraded.contains("\"version\": 6"));
     assert!(!upgraded.contains("\"version\": 4"));
 }
 
@@ -108,7 +108,7 @@ fn format_four_void_title_upgrades_to_system_void_attribution() {
     let current = Document::new(&legacy_records)
         .and_then(|document| document.to_json())
         .expect("legacy-shaped document");
-    let legacy = current.replacen("\"version\": 5", "\"version\": 4", 1);
+    let legacy = current.replacen("\"version\": 6", "\"version\": 4", 1);
 
     let upgraded = Document::from_json(&legacy).expect("upgrade format four");
     assert!(upgraded.records().iter().any(|record| matches!(

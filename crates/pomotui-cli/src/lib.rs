@@ -163,7 +163,7 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
             "percentage": percentage(snapshot.remaining_seconds, snapshot.planned_seconds),
         })).map_err(|error| error.to_string()),
         Response::Snapshot { snapshot } => Ok(format!(
-            "{:?} {} · {} · round {}/{} · chain {}{}{}",
+            "{:?} {} · {} · round {}/{} · chain {}{}{}{}",
             snapshot.kind,
             clock(snapshot.remaining_seconds),
             snapshot.state,
@@ -175,7 +175,8 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
             } else {
                 ""
             },
-            reminder_delivery_label(&snapshot.reminder_delivery)
+            reminder_delivery_label(&snapshot.reminder_delivery),
+            snapshot.reward_debt.iter().map(|d|format!(" · reward debt {} (repaid {})",d.outstanding,d.repaid)).collect::<String>()
         )),
         Response::Data { value }
             if value.get("format_version").is_some()
@@ -342,6 +343,7 @@ mod tests {
                         recent_ended_chains: vec![],
                         next_reward: None,
                         reward_milestones: vec![],
+                        reward_debt: vec![],
                         current_chain_rewards: vec![],
                     },
                 },
@@ -477,6 +479,7 @@ mod tests {
                 recent_ended_chains: vec![],
                 next_reward: None,
                 reward_milestones: vec![],
+                reward_debt: vec![],
                 current_chain_rewards: vec![],
             },
         };
@@ -518,6 +521,7 @@ mod tests {
             recent_ended_chains: vec![],
             next_reward: None,
             reward_milestones: vec![],
+            reward_debt: vec![],
             current_chain_rewards: vec![],
         };
         snapshot.pending_review = Some(pomotui_protocol::PendingReviewSummary {
