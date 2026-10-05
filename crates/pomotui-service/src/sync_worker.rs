@@ -303,6 +303,10 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
         };
         match file.read(&work.path) {
             Ok(current) if current == source => {
+                if source.as_deref() == Some(document.as_str()) {
+                    finish_success(service, &work.path, retained.len(), None);
+                    return;
+                }
                 match file.replace(&work.path, &document) {
                     Ok(()) => finish_success(service, &work.path, retained.len(), None),
                     Err(error) => finish_failure(service, &work.path, "replace", error),
