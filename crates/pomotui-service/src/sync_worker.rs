@@ -1,6 +1,6 @@
 use crate::Service;
 use pomotui_protocol::{Command, Handler, Request, Response};
-use pomotui_sync::{Document as SyncDocument, plan_sync};
+use pomotui_sync::{Document as SyncDocument};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -231,30 +231,16 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
         return;
     };
     if rebuild {
-        let Some(plan) = current_plan(service, &work.path, &[]) else {
-            return;
-        };
         let retained = match service.lock() {
-            Ok(mut service) => match service.apply_sync_plan(&work.path, &plan, 0) {
-                Ok(records) => records,
-                Err(error) => {
-                    service.finish_sync_failure(&work.path, "rebuild", error);
-                    return;
-                }
-            },
-            Err(error) => {
-                eprintln!("sync worker cannot lock Timer Service: {error}");
-                return;
-            }
+            Ok(guard) => match guard.sync_document_for(&work.path) { Ok(document) => document, Err(error) => { drop(guard); finish_failure(service, &work.path, "rebuild", error); return; } },
+            Err(_) => return,
         };
-        let result = SyncDocument::new(&retained)
-            .and_then(|document| document.to_json())
-            .and_then(|document| file.replace(&work.path, &document));
+        let result = retained.to_json().and_then(|document| file.replace(&work.path, &document));
         match result {
             Ok(()) => finish_success(
                 service,
                 &work.path,
-                retained.len(),
+                retained.records().len(),
                 Some(
                     "rebuilt from locally known records; unseen remote records cannot be recovered"
                         .into(),
@@ -284,7 +270,7 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
             return;
         };
         let mut incoming = match SyncDocument::from_json(source_document) {
-            Ok(document) => document.into_records(),
+            Ok(document) => document,
             Err(error) => {
                 finish_failure(service, &work.path, "validate", error);
                 return;
@@ -307,7 +293,7 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                     return;
                 }
             };
-            let records = SyncDocument::from_json(&observed.source).map(SyncDocument::into_records);
+            let records = SyncDocument::from_json(&observed.source);
             observations.push(observed);
 
             let records = match records {
@@ -322,7 +308,7 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                     return;
                 }
             };
-            incoming = match pomotui_sync::union(&incoming, &records) {
+            incoming = match pomotui_sync::union_documents(&incoming, &records) {
                 Ok(records) => records,
                 Err(error) => {
                     finish_failure(
@@ -336,7 +322,7 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
             };
         }
         let retained = match service.lock() {
-            Ok(mut service) => match service.apply_sync_records(&work.path, &incoming) {
+            Ok(mut service) => match service.apply_sync_document(&work.path, &incoming) {
                 Ok(records) => records,
                 Err(error) => {
                     service.finish_sync_failure(&work.path, "import", error);
@@ -348,7 +334,7 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                 return;
             }
         };
-        let document = match SyncDocument::new(&retained).and_then(|document| document.to_json()) {
+        let document = match retained.to_json() {
             Ok(document) => document,
             Err(error) => {
                 finish_failure(service, &work.path, "serialize", error);
@@ -364,12 +350,12 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                         finish_failure(service, &work.path, "publication", error);
                         return;
                     }
-                    finish_cleanup(service, file, &work.path, &observations, retained.len());
+                    finish_cleanup(service, file, &work.path, &observations, retained.records().len());
                     return;
                 }
                 match file.replace(&work.path, &document) {
                     Ok(()) => {
-                        finish_cleanup(service, file, &work.path, &observations, retained.len());
+                        finish_cleanup(service, file, &work.path, &observations, retained.records().len());
                     }
                     Err(error) => finish_failure(service, &work.path, "replace", error),
                 }
@@ -410,33 +396,6 @@ fn finish_cleanup(
     finish_success(service, main, records, None);
 }
 
-fn current_plan(
-    service: &Arc<Mutex<Service>>,
-    path: &Path,
-    incoming: &[pomotui_sync::Record],
-) -> Option<pomotui_sync::SyncPlan> {
-    let local = match service.lock() {
-        Ok(guard) => match guard.sync_records_for(path) {
-            Ok(records) => records,
-            Err(error) => {
-                drop(guard);
-                finish_failure(service, path, "plan", error);
-                return None;
-            }
-        },
-        Err(error) => {
-            eprintln!("sync worker cannot lock Timer Service: {error}");
-            return None;
-        }
-    };
-    match plan_sync(&local, incoming) {
-        Ok(plan) => Some(plan),
-        Err(error) => {
-            finish_failure(service, path, "plan", error);
-            None
-        }
-    }
-}
 
 fn finish_success(
     service: &Arc<Mutex<Service>>,
