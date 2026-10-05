@@ -52,22 +52,50 @@ identity!(RecordId, "synchronization record identity");
 identity!(EntityId, "synchronized entity identity");
 
 /// Causal total-order beginning. All pre-reset documents share universal genesis.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Beginning {
     generation: u64,
     id: uuid::Uuid,
 }
+impl<'de> Deserialize<'de> for Beginning {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            generation: u64,
+            id: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::parse(wire.generation, &wire.id).map_err(serde::de::Error::custom)
+    }
+}
 impl Default for Beginning {
-    fn default() -> Self { Self { generation: 0, id: uuid::Uuid::nil() } }
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            id: uuid::Uuid::nil(),
+        }
+    }
+}
+fn is_genesis(beginning: &Beginning) -> bool {
+    beginning == &Beginning::default()
 }
 impl Beginning {
     pub fn parse(generation: u64, id: &str) -> Result<Self, String> {
         let id = uuid::Uuid::parse_str(id).map_err(|e| e.to_string())?;
-        if (generation == 0) != id.is_nil() { return Err("invalid Fresh Start beginning".into()); }
+        if (generation == 0) != id.is_nil() {
+            return Err("invalid Fresh Start beginning".into());
+        }
         Ok(Self { generation, id })
     }
     pub fn successor(&self) -> Result<Self, String> {
-        Ok(Self { generation: self.generation.checked_add(1).ok_or("Fresh Start generation exhausted")?, id: uuid::Uuid::new_v4() })
+        Ok(Self {
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or("Fresh Start generation exhausted")?,
+            id: uuid::Uuid::new_v4(),
+        })
     }
 }
 
@@ -202,7 +230,7 @@ pub enum RecordPayload {
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Record {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_genesis")]
     pub beginning: Beginning,
     pub id: RecordId,
     pub entity_id: EntityId,
@@ -211,8 +239,20 @@ pub struct Record {
 }
 
 impl Record {
-    pub fn in_beginning(beginning: Beginning, id: RecordId, entity_id: EntityId, mutation_time: MutationInstant, payload: RecordPayload) -> Self {
-        Self { beginning, id, entity_id, mutation_time, payload }
+    pub fn in_beginning(
+        beginning: Beginning,
+        id: RecordId,
+        entity_id: EntityId,
+        mutation_time: MutationInstant,
+        payload: RecordPayload,
+    ) -> Self {
+        Self {
+            beginning,
+            id,
+            entity_id,
+            mutation_time,
+            payload,
+        }
     }
     #[must_use]
     pub fn new(
@@ -249,21 +289,28 @@ pub struct Document {
 
 impl Document {
     pub fn new(records: &[Record]) -> Result<Self, String> {
-        let beginning = records.iter().map(|r| &r.beginning).max().cloned().unwrap_or_default();
+        let beginning = records
+            .iter()
+            .map(|r| &r.beginning)
+            .max()
+            .cloned()
+            .unwrap_or_default();
         Self::with_beginning(beginning, records)
     }
 
     pub fn with_beginning(beginning: Beginning, records: &[Record]) -> Result<Self, String> {
         let records = union(&[], records)?;
-        if records.iter().any(|r| r.beginning != beginning) { return Err("document record beginning differs from selected beginning".into()); }
+        if records.iter().any(|r| r.beginning != beginning) {
+            return Err("document record beginning differs from selected beginning".into());
+        }
         validate_records(&records)?;
         Ok(Self {
-            beginning,
+            beginning: beginning.clone(),
             format: FORMAT_NAME.into(),
             version: FORMAT_VERSION,
             integrity: Integrity {
                 record_count: records.len(),
-                records_sha256: checksum(&records)?,
+                records_sha256: document_checksum(&beginning, &records)?,
             },
             records,
         })
@@ -281,16 +328,44 @@ impl Document {
                 document.version
             ));
         }
+        if document.version < FORMAT_VERSION
+            && (document.beginning != Beginning::default()
+                || document
+                    .records
+                    .iter()
+                    .any(|r| r.beginning != Beginning::default()))
+        {
+            return Err("legacy sync document contains Fresh Start metadata".into());
+        }
         validate_records(&document.records)?;
         if document.integrity.record_count != document.records.len() {
             return Err("sync document integrity check failed".into());
         }
         let expected_checksum = if document.version < FORMAT_VERSION {
             #[derive(Serialize)]
-            struct LegacyRecord<'a> { id: &'a RecordId, entity_id: &'a EntityId, mutation_time: MutationInstant, payload: &'a RecordPayload }
-            let legacy = document.records.iter().map(|r| LegacyRecord { id: &r.id, entity_id: &r.entity_id, mutation_time: r.mutation_time, payload: &r.payload }).collect::<Vec<_>>();
-            format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).map_err(|e| e.to_string())?))
-        } else { checksum(&document.records)? };
+            struct LegacyRecord<'a> {
+                id: &'a RecordId,
+                entity_id: &'a EntityId,
+                mutation_time: MutationInstant,
+                payload: &'a RecordPayload,
+            }
+            let legacy = document
+                .records
+                .iter()
+                .map(|r| LegacyRecord {
+                    id: &r.id,
+                    entity_id: &r.entity_id,
+                    mutation_time: r.mutation_time,
+                    payload: &r.payload,
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&legacy).map_err(|e| e.to_string())?)
+            )
+        } else {
+            document_checksum(&document.beginning, &document.records)?
+        };
         if document.integrity.records_sha256 != expected_checksum {
             return Err("sync document checksum does not match its records".into());
         }
@@ -317,10 +392,7 @@ impl Document {
                 }
             }
         }
-        Ok(Self {
-            version: FORMAT_VERSION,
-            ..document
-        })
+        Self::with_beginning(document.beginning, &document.records)
     }
 
     pub fn to_json(&self) -> Result<String, String> {
@@ -332,7 +404,9 @@ impl Document {
     }
 
     #[must_use]
-    pub fn beginning(&self) -> &Beginning { &self.beginning }
+    pub fn beginning(&self) -> &Beginning {
+        &self.beginning
+    }
 
     #[must_use]
     pub fn records(&self) -> &[Record] {
@@ -352,7 +426,9 @@ pub fn union(left: &[Record], right: &[Record]) -> Result<Vec<Record>, String> {
             && existing != record
         {
             let mut differences = Vec::new();
-            if existing.beginning != record.beginning { differences.push("beginning membership"); }
+            if existing.beginning != record.beginning {
+                differences.push("beginning membership");
+            }
             if existing.entity_id != record.entity_id {
                 differences.push("entity_id");
             }
@@ -1272,9 +1348,11 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     Ok(())
 }
 
-fn checksum(records: &[Record]) -> Result<String, String> {
-    let canonical = serde_json::to_vec(records).map_err(|error| error.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(canonical)))
+fn document_checksum(beginning: &Beginning, records: &[Record]) -> Result<String, String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(beginning, records)).map_err(|e| e.to_string())?)
+    ))
 }
 
 impl fmt::Display for RecordId {
@@ -1479,6 +1557,9 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
 /// Merge metadata before projecting records; retired beginnings cannot resurrect.
 pub fn union_documents(left: &Document, right: &Document) -> Result<Document, String> {
     let beginning = left.beginning().max(right.beginning()).clone();
-    let records = union(left.records(), right.records())?.into_iter().filter(|r| r.beginning == beginning).collect::<Vec<_>>();
+    let records = union(left.records(), right.records())?
+        .into_iter()
+        .filter(|r| r.beginning == beginning)
+        .collect::<Vec<_>>();
     Document::with_beginning(beginning, &records)
 }

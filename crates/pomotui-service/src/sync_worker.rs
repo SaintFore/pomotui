@@ -1,6 +1,6 @@
 use crate::Service;
 use pomotui_protocol::{Command, Handler, Request, Response};
-use pomotui_sync::{Document as SyncDocument};
+use pomotui_sync::Document as SyncDocument;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -232,10 +232,19 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
     };
     if rebuild {
         let retained = match service.lock() {
-            Ok(guard) => match guard.sync_document_for(&work.path) { Ok(document) => document, Err(error) => { drop(guard); finish_failure(service, &work.path, "rebuild", error); return; } },
+            Ok(guard) => match guard.sync_document_for(&work.path) {
+                Ok(document) => document,
+                Err(error) => {
+                    drop(guard);
+                    finish_failure(service, &work.path, "rebuild", error);
+                    return;
+                }
+            },
             Err(_) => return,
         };
-        let result = retained.to_json().and_then(|document| file.replace(&work.path, &document));
+        let result = retained
+            .to_json()
+            .and_then(|document| file.replace(&work.path, &document));
         match result {
             Ok(()) => finish_success(
                 service,
@@ -350,12 +359,24 @@ fn run_sync_attempt(service: &Arc<Mutex<Service>>, file: &dyn SyncFileAdapter, r
                         finish_failure(service, &work.path, "publication", error);
                         return;
                     }
-                    finish_cleanup(service, file, &work.path, &observations, retained.records().len());
+                    finish_cleanup(
+                        service,
+                        file,
+                        &work.path,
+                        &observations,
+                        retained.records().len(),
+                    );
                     return;
                 }
                 match file.replace(&work.path, &document) {
                     Ok(()) => {
-                        finish_cleanup(service, file, &work.path, &observations, retained.records().len());
+                        finish_cleanup(
+                            service,
+                            file,
+                            &work.path,
+                            &observations,
+                            retained.records().len(),
+                        );
                     }
                     Err(error) => finish_failure(service, &work.path, "replace", error),
                 }
@@ -395,7 +416,6 @@ fn finish_cleanup(
     }
     finish_success(service, main, records, None);
 }
-
 
 fn finish_success(
     service: &Arc<Mutex<Service>>,

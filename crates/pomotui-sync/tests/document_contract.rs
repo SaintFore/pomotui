@@ -88,13 +88,13 @@ fn format_four_is_validated_and_upgraded_to_current_format() {
     let current = Document::new(&[task_version(1, 9, 1_000, "First")])
         .and_then(|document| document.to_json())
         .expect("current document");
-    let legacy = current.replacen("\"version\": 6", "\"version\": 4", 1);
+    let legacy = legacy_json(&current, 4);
 
     let upgraded = Document::from_json(&legacy)
         .and_then(|document| document.to_json())
         .expect("upgrade format four");
 
-    assert!(upgraded.contains("\"version\": 6"));
+    assert!(upgraded.contains("\"version\": 7"));
     assert!(!upgraded.contains("\"version\": 4"));
 }
 
@@ -108,7 +108,7 @@ fn format_four_void_title_upgrades_to_system_void_attribution() {
     let current = Document::new(&legacy_records)
         .and_then(|document| document.to_json())
         .expect("legacy-shaped document");
-    let legacy = current.replacen("\"version\": 6", "\"version\": 4", 1);
+    let legacy = legacy_json(&current, 4);
 
     let upgraded = Document::from_json(&legacy).expect("upgrade format four");
     assert!(upgraded.records().iter().any(|record| matches!(
@@ -541,4 +541,19 @@ fn conflicting_record_identity_reports_each_changed_field() {
     assert!(error.contains("entity_id"), "{error}");
     assert!(error.contains("mutation"), "{error}");
     assert!(error.contains("payload"), "{error}");
+}
+
+fn legacy_json(current: &str, version: u16) -> String {
+    use sha2::{Digest, Sha256};
+    let mut value: serde_json::Value = serde_json::from_str(current).unwrap();
+    value["version"] = version.into();
+    value.as_object_mut().unwrap().remove("beginning");
+    let records: Vec<pomotui_sync::Record> =
+        serde_json::from_value(value["records"].clone()).unwrap();
+    value["integrity"]["records_sha256"] = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&records).unwrap())
+    )
+    .into();
+    serde_json::to_string(&value).unwrap()
 }
