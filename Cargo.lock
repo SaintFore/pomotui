@@ -1754,6 +1754,7 @@ dependencies = [
  "pomotui-domain",
  "pomotui-sync",
  "rusqlite",
+ "rustix",
 ]
 
 [[package]]

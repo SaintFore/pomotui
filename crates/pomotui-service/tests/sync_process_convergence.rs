@@ -471,7 +471,7 @@ fn separate_replica_directories_recover_conflict_records_and_replay() {
             .len(),
         2
     );
-    assert!(sibling.exists(), "ticket 3 preserves candidates");
+    assert!(!sibling.exists(), "durably absorbed conflict is cleaned");
     let merged = std::fs::read(&first_path).expect("merged document");
     std::fs::write(&second_path, &merged).expect("deliver union");
     sync_now(&second);
@@ -479,6 +479,10 @@ fn separate_replica_directories_recover_conflict_records_and_replay() {
         normalized_shared_state(&first),
         normalized_shared_state(&second)
     );
+    // Replay the already absorbed subset; idle publication must still retire it.
+    std::fs::write(&sibling, &second_bytes).expect("replay absorbed conflict");
+    sync_now(&first);
+    assert!(!sibling.exists());
     first.stop();
     std::fs::write(&first_path, first_bytes).expect("replay stale main");
     first = TimerService::start(root.join("first"), 4);
