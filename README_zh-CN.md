@@ -34,6 +34,8 @@ Pomotui 是一个驻留在终端里的番茄钟，提供三种前端：
 - **任务与历史** — 任务生命周期、持久会话历史、每日统计和七日趋势
 - **行动链条与奖励** — 复盘的会话累积成链条；奖励里程碑可以解锁并领取
 - **跨设备收敛** — 通过一个与提供商无关的文件同步任务、历史、复盘和链条
+- **奖励欠额** — 已领取奖励保留，晚到复盘揭示的成功次数缺口由后续成功偿还
+- **重新开始** — 明确确认后清空各同步电脑的业务数据，保留普通设置
 - **桌面集成** — 通知、完成音效、systemd 用户 socket、应用启动器入口
 - **双语界面** — 英文和简体中文，可在设置中切换
 
@@ -41,11 +43,11 @@ Pomotui 是一个驻留在终端里的番茄钟，提供三种前端：
 
 **Linux：**
 - systemd 用户服务
-- 支持 edition 2024 的 Rust 工具链
+- 源码构建使用 Rust 1.96.1，由 `rust-toolchain.toml` 指定
 - 可选：Waybar、`notify-send`、`paplay`
 
 **macOS：**
-- 支持 edition 2024 的 Rust 工具链
+- 源码构建使用 Rust 1.96.1，由 `rust-toolchain.toml` 指定
 - 可选：`afplay`（内置）、`osascript`（内置）、Waybar（通过 Homebrew）
 
 ## 安装
@@ -250,6 +252,13 @@ Timer Service 运行期间，Pomotui 会在服务启动、发生相关持久化�
 `pomotui --json sync status` 确认 `in_progress` 为 `false`、`last_success`
 已有时间戳且 `last_error` 为 `null`。
 
+正常同步在后台完成，离线工作也会在文件传输恢复后合并，无需每次操作后手动
+执行 `sync now`。主文件内容没有变化时，Pomotui 不会重新替换文件。
+对于符合已支持的 Syncthing 命名格式的冲突副本，Pomotui 会校验并持久化合并
+其中的记录，再按原子替换写入的约定清理已吸收副本。其他工具的冲突文件名
+目前不会自动识别。无效或内容矛盾的副本会保留并报告诊断。支持的命名格式和
+文件系统条件见[冲突恢复指南](docs/user-guide.md#conflict-copy-recovery-and-cleanup)。
+
 离线时可以继续工作。标题相同的任务仍保持不同身份，并发编辑会确定性解决；
 删除不会使本机当前会话正在使用的任务失效。
 
@@ -258,6 +267,30 @@ Timer Service 运行期间，Pomotui 会在服务启动、发生相关持久化�
 > 电脑上。同步文件是交换文档，不是复制完成的证明，也不能代替本地 SQLite
 > 数据库备份。冲突、升级、路径变更、恢复和故障排查流程请参阅
 > [用户指南](docs/user-guide.md#cross-device-synchronization)。
+
+### 晚到复盘与奖励欠额
+
+离线复盘晚到时可能改变行动链条。已领取奖励仍然保留；如果支撑奖励的成功
+次数不足，缺少的次数会成为对应里程碑的奖励欠额。后续成功复盘先偿还欠额，
+再推进下一次奖励。普通历史删除或里程碑删除不会清除这笔义务。
+通过 `pomotui reward list` 或 TUI 查看欠额和偿还情况，详见
+[奖励指南](docs/user-guide.md#reward-debt-after-synchronization)。
+
+### 在各台电脑上重新开始
+
+要主动清空任务、历史、链条、奖励、欠额和当前计时工作，请在 Timer Service
+运行时执行：
+
+```sh
+pomotui fresh-start --confirm
+```
+
+普通设置和同步配置会保留。新起点通过同一个交换文件传播；离线电脑收到后
+会清空旧起点下的业务数据，包括它得知重置前完成的工作。执行前请备份需要
+归档的数据，详见[重新开始指南](docs/user-guide.md#fresh-start-across-devices)。
+
+`pomotui reset --all-data --confirm` 是另一个用于修复本地数据库的命令。
+需要让各台电脑的业务数据一起重新开始时，请使用 Fresh Start。
 
 ### 预发布升级与旧同步格式
 
@@ -348,6 +381,8 @@ Pomotui 是一个 Cargo 工作区，具有严格的 crate 分层：
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
+cargo build --workspace
+cargo build --release --workspace
 tests/e2e.sh
 ```
 
