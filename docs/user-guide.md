@@ -117,6 +117,11 @@ together, and `D` deletes the marked records after confirmation. On the
 Dashboard, press `Enter` to bind the selected Task to the Current Session and
 `Space` to start/pause/resume; `X` stops and `K` skips.
 
+Create or update a Reward Milestone using `10 | USDT | 100`: a positive integer
+threshold, a reward name, and an optional non-negative integer budget. Omit
+currency suffixes such as `CNY` from the budget. Invalid input shows a message
+inside the editor; correct the input and press `Enter` again to save.
+
 Text editors open with the existing value and the cursor at its end. They are
 single-line editors (not full Emacs), with arrows, Home/End, Backspace/Delete,
 `C-a/e/b/f` and `M-b/f` for movement, `C-h/d/w` and `M-d` for deletion, plus

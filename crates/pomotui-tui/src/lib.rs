@@ -1009,6 +1009,9 @@ impl App {
     }
 
     fn begin_text_entry(&mut self, overlay: Overlay) {
+        if matches!(overlay, Overlay::CreateReward | Overlay::UpdateReward) {
+            self.message = None;
+        }
         self.input = if overlay == Overlay::RenameTask {
             self.selected_task()
                 .map_or_else(String::new, |task| task.title.clone())
@@ -1147,8 +1150,8 @@ impl App {
                     self.message = Some(
                         text(
                             self.language,
-                            "Use: THRESHOLD | REWARD NAME | OPTIONAL BUDGET",
-                            "格式：阈值 | 奖励名称 | 可选预算",
+                            "Use: 10 | Reward | 100 (positive threshold; budget: non-negative integer, no currency)",
+                            "示例：10 | 奖励 | 100；阈值须为正整数，预算须为非负整数，不含币种",
                         )
                         .into(),
                     );
@@ -3774,16 +3777,16 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
             text(app.language, "CREATE REWARD", "新建奖励"),
             text(
                 app.language,
-                "Threshold | reward name | optional budget",
-                "阈值 | 奖励名称 | 可选预算",
+                "Threshold | reward name | optional budget (integer, e.g. 100)",
+                "阈值 | 奖励名称 | 可选预算（整数，如 100）",
             ),
         ),
         Overlay::UpdateReward => (
             text(app.language, "UPDATE REWARD", "更新奖励"),
             text(
                 app.language,
-                "Threshold | reward name | optional budget",
-                "阈值 | 奖励名称 | 可选预算",
+                "Threshold | reward name | optional budget (integer, e.g. 100)",
+                "阈值 | 奖励名称 | 可选预算（整数，如 100）",
             ),
         ),
         Overlay::ReviewFailureVoidTitle => (
@@ -3800,26 +3803,36 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         app.input_cursor,
         usize::from(area.width.saturating_sub(2)),
     );
+    let mut lines = vec![
+        Line::from(label),
+        Line::from(Span::styled(
+            cursor,
+            Style::default()
+                .fg(colors.text)
+                .bg(colors.surface)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            text(
+                app.language,
+                "Enter save · Esc cancel · C-a/e start/end · C-k/u/y kill/yank",
+                "Enter 保存 · Esc 取消 · C-a/e 首/尾 · C-k/u/y 剪切/粘回",
+            ),
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    if matches!(app.overlay, Overlay::CreateReward | Overlay::UpdateReward) {
+        if let Some(message) = app.message.as_deref() {
+            lines.push(Line::from(Span::styled(
+                message,
+                Style::default().fg(colors.accent),
+            )));
+        }
+    }
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(label),
-            Line::from(Span::styled(
-                cursor,
-                Style::default()
-                    .fg(colors.text)
-                    .bg(colors.surface)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                text(
-                    app.language,
-                    "Enter save · Esc cancel · C-a/e start/end · C-k/u/y kill/yank",
-                    "Enter 保存 · Esc 取消 · C-a/e 首/尾 · C-k/u/y 剪切/粘回",
-                ),
-                Style::default().fg(colors.muted),
-            )),
-        ])
-        .block(panel(title, colors).border_style(Style::default().fg(colors.accent))),
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(panel(title, colors).border_style(Style::default().fg(colors.accent))),
         area,
     );
 }
@@ -4629,6 +4642,57 @@ mod tests {
         assert_eq!(
             app.handle_key(InputKey::Char('R')),
             Some(Action::Command(pomotui_protocol::Command::StopReview))
+        );
+    }
+
+    #[test]
+    fn reward_creation_shows_invalid_budget_and_allows_correction() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::VermilionPaperDark,
+        );
+        app.overlay = Overlay::None;
+        app.language = Language::SimplifiedChinese;
+        app.view = View::Rewards;
+        app.handle_key(InputKey::Char('n'));
+        for character in "10 | USDT | 100CNY".chars() {
+            app.handle_key(InputKey::Char(character));
+        }
+        assert_eq!(app.handle_key(InputKey::Enter), None);
+        assert_eq!(app.overlay, Overlay::CreateReward);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_overlay(
+                    frame,
+                    frame.area(),
+                    &app,
+                    colors(app.theme, app.color_overrides),
+                );
+            })
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>()
+            .replace(' ', "");
+        assert!(
+            rendered.contains("预算须为非负整数"),
+            "validation must be visible: {rendered}"
+        );
+        for _ in 0..3 {
+            app.handle_key(InputKey::Backspace);
+        }
+        assert_eq!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::RewardCreate {
+                name: "USDT".into(),
+                threshold: 10,
+                budget: Some(100),
+            }))
         );
     }
 
