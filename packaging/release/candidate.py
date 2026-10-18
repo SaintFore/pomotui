@@ -4,6 +4,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import os
 import re
 import tarfile
 import json
@@ -158,7 +159,8 @@ def build(args):
     image = run('docker', 'image', 'inspect', 'archlinux:base-devel', '--format', '{{index .RepoDigests 0}}')
     with (args.output / 'build.log').open('w') as log:
         subprocess.run(['docker', 'run', '--rm', '-v', f'{args.output}:/candidate',
-                        '-v', f'{script}:/build-arch.sh:ro', image,
+                        '-v', f'{script}:/build-arch.sh:ro',
+                        '-e', f'CANDIDATE_UID={os.getuid()}', '-e', f'CANDIDATE_GID={os.getgid()}', image,
                         'bash', '/build-arch.sh'], stdout=log, stderr=subprocess.STDOUT, check=True)
     manifest = json.loads((args.output / 'candidate.json').read_text())
     manifest['build_image'] = image

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Invoked only inside the disposable Arch build container by candidate.py.
 set -Eeuo pipefail
+# Preserve host ownership even when the build fails (hosted runners need not use UID 1000).
+trap 'chown -R "$CANDIDATE_UID:$CANDIDATE_GID" /candidate' EXIT
 pacman -Syu --noconfirm --needed base-devel rustup git python sqlite dbus
 useradd --create-home builder
 chown -R builder:builder /candidate
