@@ -69,3 +69,38 @@ nspawn environment provides the required actual pacman and systemd user-manager
 boundary without depending on nested virtualization. This evidence establishes
 initial feasibility; it does not establish the remaining session/data/failure
 scenarios or constitute a complete production publication gate.
+
+## Upgrade lifecycle and disabled intent
+
+The shared AUR hook treats an enabled `pomotui.socket` as the durable opt-in for
+upgrade recovery. A stopped or failed service behind that enabled socket is
+recovered, including systemd start-limit exhaustion. The hook reloads the user
+manager, checks effective units, clears failed service/socket state and restarts
+the service. Public JSON status must report healthy durable storage, and the
+running process executable must match the installed `/usr/bin/pomotui-service`.
+These checks diagnose failures; pacman does not roll back binaries or user data.
+
+To deliberately opt out, run `systemctl --user disable --now pomotui.socket`
+and `systemctl --user stop pomotui.service`. Upgrade never enables a disabled
+socket or starts its service. Disabling without `--now` does not stop an already
+running socket/service; the hook still leaves that disabled installation alone.
+A disabled but temporarily active socket is not durable permission to restart.
+Manual launches and custom service enablement without the documented socket
+opt-in fall outside supported automatic recovery.
+
+Only the packaged service/socket with no drop-ins qualifies for automatic
+recovery. A user unit, runtime unit or drop-in may change executable paths or
+service policy, so the hook reports its exact `FragmentPath` and `DropInPaths`,
+leaves it intact and recommends inspecting `systemctl --user cat UNIT`. Review
+and move aside conflicting source-install units/drop-ins yourself before
+reloading and restarting; do not delete business data to resolve a unit conflict.
+The hook distinguishes manager discovery/reload, effective-unit conflict,
+failed-state reset, restart, public health and executable-identity failures.
+
+`lifecycle.sh`, sourced by the same real acceptance entry point, installs the old
+package anew for stopped, failed, start-limited, disabled, user-unit override and
+source-executable drop-in scenarios. Crashes and start-limit exhaustion use the
+real manager. The conflict scenarios keep an old source-install executable
+responding, proving that a status response alone cannot establish acceptance;
+its exact override is diagnosed and its content and process are preserved.
+All scenario state belongs to the disposable acceptance user.
