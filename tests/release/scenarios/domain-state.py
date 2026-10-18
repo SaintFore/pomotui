@@ -206,9 +206,18 @@ for name in ['corrupt', 'unsupported-schema', 'unsupported-payload']:
             connection.execute('UPDATE current_session SET payload = ?', (json.dumps(payload),))
     original = database.read_bytes()
     run('pacman', '-U', '--noconfirm', candidate)
-    manager('reset-failed', 'pomotui.service', check=False)
-    result = manager('start', 'pomotui.service', check=False)
-    assert result.returncode != 0, name
+    # Type=simple start can succeed before database opening fails. Observe the
+    # completed startup/restart attempts, rather than the command's exit code.
+    deadline = time.monotonic() + 10
+    while manager('show', 'pomotui.service', '-p', 'ActiveState', '--value').stdout.strip() != 'failed' and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert manager('is-failed', 'pomotui.service', check=False).stdout.strip() == 'failed', name
+    try:
+        request()
+    except (OSError, TimeoutError, AssertionError):
+        pass
+    else:
+        raise AssertionError(f'{name}: damaged data unexpectedly served public status')
     journal = manager('status', 'pomotui.service', '--no-pager', check=False).stdout
     journal += run('journalctl', f'_UID={uid}', '--no-pager').stdout
     (out / f'{name}-diagnosis.log').write_text(journal)
