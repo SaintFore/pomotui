@@ -391,3 +391,13 @@ The initial default is ten minutes. Set `reservation_minutes = 10` at the root o
 `pomotui reservation status --json` includes a stable reservation ID, its task, original duration, remaining seconds, and `countdown` or `awaiting_review` state. During countdown, `pomotui start focus` fulfills the reservation and starts the reserved task immediately, even when the next recommended Session is a Break Session. At expiry the service waits for judgment rather than automatically starting or failing. Use `pomotui reservation success ID` to confirm success and start from the current time. Earlier unrecorded focus time is not backfilled. Success alone does not add an Action Chain link or reward progress.
 
 A reservation survives closing the CLI and restarting the Timer Service. A Break Session may run during its countdown or pending judgment; fulfilling the reservation stops that break, preserving its actual history, and begins Focus. Pending judgment blocks ordinary starts of another Focus Session and new reservations. After Focus begins, the existing stop and Session Review choices remain available.
+
+
+The Timer Service observes reservation expiry and sends a desktop notification even
+when no TUI, CLI, or Waybar frontend is open. The notification asks you to review
+whether you started on time; it does not start Focus or break the Action Chain.
+Reservation reminders obey `reminder_enabled` and do not play the Session
+completion sound. The committed `awaiting_review` state survives delivery failures
+and service restarts. Notifications use the existing bounded retry mechanism;
+successful delivery is not repeated after restart. Resolving a reservation cancels
+any remaining expiry retry, and Fresh Start clears outstanding reminders.

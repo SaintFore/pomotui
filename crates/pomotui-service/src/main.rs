@@ -32,14 +32,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_home.join("pomotui");
     std::fs::create_dir_all(&data_dir)?;
     eprintln!("Timer Service opening {}", data_dir.display());
-    let mut service = Service::open(&data_dir.join("pomotui.sqlite3"))?;
+    let settings = load_settings()?;
+    if settings
+        .as_ref()
+        .is_some_and(|settings| settings.volume > 100)
+    {
+        return Err("volume must be between 0 and 100".into());
+    }
+    let mut service = if let Some(settings) = &settings {
+        let sound = settings.sound.as_ref().map(|sound| {
+            if sound == "builtin:complete" {
+                std::path::PathBuf::from("/usr/share/sounds/freedesktop/stereo/complete.oga")
+            } else {
+                std::path::PathBuf::from(sound)
+            }
+        });
+        Service::open_with_reminder_settings(
+            &data_dir.join("pomotui.sqlite3"),
+            settings.reminder_enabled,
+            sound,
+            settings.volume,
+        )?
+    } else {
+        Service::open(&data_dir.join("pomotui.sqlite3"))?
+    };
     service.set_configuration_path(settings_path());
-    if let Some(settings) = load_settings()? {
+    if let Some(settings) = settings {
         if let Some(minutes) = settings.reservation_minutes {
             service.configure_reservation_minutes(minutes)?;
-        }
-        if settings.volume > 100 {
-            return Err("volume must be between 0 and 100".into());
         }
         service.configure_durations(pomotui_domain::SessionDurations::new(
             u64::from(settings.focus) * 60,
@@ -47,14 +67,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             u64::from(settings.long_break) * 60,
         )?)?;
         service.configure_cycle(settings.rounds_per_cycle)?;
-        let sound = settings.sound.map(|sound| {
-            if sound == "builtin:complete" {
-                std::path::PathBuf::from("/usr/share/sounds/freedesktop/stereo/complete.oga")
-            } else {
-                std::path::PathBuf::from(sound)
-            }
-        });
-        service.configure_reminder(settings.reminder_enabled, sound, settings.volume);
     }
     service.enable_background_sync();
     let service = std::sync::Arc::new(std::sync::Mutex::new(service));
