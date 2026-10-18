@@ -1,6 +1,7 @@
 """Publication boundary tests: isolated Git remotes and a local AUR RPC server."""
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -93,6 +94,31 @@ class AurTest(candidate_test.CandidateTest):
             rejected=self.aur('verify','--provenance-api-url',api,'--source-repository',str(self.repo),ok=False)
             self.assertIn('provenance',rejected.stderr)
             self.assertEqual(subprocess.check_output(['git','--git-dir',str(self.remote),'rev-parse','master']),head)
+
+    def test_production_verification_reads_public_https_without_an_aur_private_key(self):
+        self.aur('publish')
+        adapter=self.output.parent/'read-adapter';adapter.mkdir()
+        log=adapter/'git-reads.json'
+        real_git=shutil.which('git')
+        script=adapter/'git'
+        script.write_text('#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n'
+            +f'args=sys.argv[1:]\nexpected="https://aur.archlinux.org/pomotui-git.git"\n'
+            +f'log=Path({str(log)!r})\n'
+            +'if "clone" in args:\n    log.write_text(json.dumps(args))\n'
+            +f'args=[{str(self.remote)!r} if arg==expected else arg for arg in args]\n'
+            +f'os.execv({real_git!r},[{real_git!r},*args])\n')
+        script.chmod(0o755)
+        ssh=adapter/'ssh';ssh.write_text('#!/bin/sh\necho unexpected SSH >&2\nexit 99\n');ssh.chmod(0o755)
+        env=os.environ.copy();env.pop('AUR_SSH_KEY_FILE',None);env['PATH']=str(adapter)+os.pathsep+env['PATH']
+        result=subprocess.run([sys.executable,str(CLI),'verify','--candidate',str(self.output),
+            '--channel','aur-git','--rpc-url','https://127.0.0.1:1/rpc','--discovery-attempts','1'],
+            env=env,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('https://aur.archlinux.org/pomotui-git.git',json.loads(log.read_text()))
+        observed=json.loads(result.stdout)
+        self.assertEqual(observed['stage'],'pending-indexing')
+        self.assertTrue(observed['remote_commit'])
+        self.assertNotIn('unexpected SSH',result.stderr)
 
     def test_competing_remote_writers_retry_rejected_fast_forward_without_duplicate_commit(self):
         manifest=json.loads((self.output/'candidate.json').read_text())

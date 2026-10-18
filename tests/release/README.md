@@ -389,7 +389,9 @@ accepts `--output` and otherwise uses `CANDIDATE/publication.json`. Keep that fi
 with the original candidate. Matching reruns reread authoritative content and
 reuse successful writes. AUR remote verification and index discovery remain
 separate: pending indexing returns failure with a retained pending journal;
-`release.py verify-stable` performs a read-only continuation.
+`release.py verify-stable` performs a read-only continuation through public
+HTTPS AUR clones, so it needs no AUR private key even when publishing
+credentials require repair.
 
 Transient transport/service failures retry the entire reconciliable operation
 three times by default (`--retry-attempts`, maximum five), with a bounded delay.

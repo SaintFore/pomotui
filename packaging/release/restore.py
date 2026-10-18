@@ -85,7 +85,12 @@ def restore(args):
     if subprocess.run(['git','-C',str(args.repo),'merge-base','--is-ancestor',source,'FETCH_HEAD'], capture_output=True).returncode:
         raise ValueError('restored candidate is not in trusted main history')
     if args.intent == 'stable':
-        selected = next((item for item in artifacts if item['name'] == f'stable-selection-{args.run_id}-{attempt}'), None)
+        selections=[]
+        for item in artifacts:
+            match=re.fullmatch(rf'stable-selection-{args.run_id}-(\d+)',item['name'])
+            if match and int(match[1])<=attempt:
+                selections.append((int(match[1]),item))
+        selected=min(selections,key=lambda item:item[0])[1] if selections else None
         if selected is None:
             raise ValueError('original approved release selection missing')
         extract(api, selected, args.selection)
@@ -103,10 +108,10 @@ def restore(args):
             found = re.fullmatch(rf'{prefix}-{args.run_id}-(\d+)', item['name'])
             if found:
                 prior.append((int(found[1]),item))
-        if prior:
-            import tempfile
+        import tempfile
+        for _, prior_artifact in sorted(prior,key=lambda item:item[0],reverse=True):
             with tempfile.TemporaryDirectory(prefix='pomotui-journal-') as tmp:
-                extract(api,max(prior,key=lambda item:item[0])[1],Path(tmp))
+                extract(api,prior_artifact,Path(tmp))
                 filename = 'stable-publication.json' if args.intent == 'stable' else 'aur-git.json'
                 path = Path(tmp)/filename
                 if path.is_file():
@@ -114,6 +119,7 @@ def restore(args):
                     if value.get('candidate_sha256') != origin['candidate_sha256']:
                         raise ValueError('retained journal candidate identity differs from original gate')
                     atomic(args.journal,value)
+                    break
     if args.journal and args.journal_run_id:
         resume=api.repo(f'actions/runs/{args.journal_run_id}')
         if resume.get('repository',{}).get('full_name')!=args.repository or resume.get('path','').split('@')[0]!='.github/workflows/resume-publication.yml' or resume.get('event')!='workflow_dispatch' or resume.get('head_branch')!='main':
@@ -123,15 +129,18 @@ def restore(args):
         for item in previous:
             match=re.fullmatch(rf'publication-resume-{args.journal_run_id}-(\d+)',item['name'])
             if match: matches.append((int(match[1]),item))
-        if matches:
-            import tempfile
+        import tempfile
+        for _, prior_artifact in sorted(matches,key=lambda item:item[0],reverse=True):
             with tempfile.TemporaryDirectory(prefix='pomotui-resume-journal-') as tmp:
-                extract(api,max(matches,key=lambda item:item[0])[1],Path(tmp))
+                extract(api,prior_artifact,Path(tmp))
+                if not (Path(tmp)/'restore.json').is_file() or not (Path(tmp)/'publication.json').is_file():
+                    continue
                 retained=json.loads((Path(tmp)/'restore.json').read_text())
                 value=json.loads((Path(tmp)/'publication.json').read_text())
                 if retained.get('origin',{}).get('run_id')!=args.run_id or value.get('candidate_sha256')!=origin['candidate_sha256']:
                     raise ValueError('recovery journal belongs to another original publication')
                 atomic(args.journal,value)
+                break
     return dict(restored=True, source_commit=source, origin=origin)
 
 

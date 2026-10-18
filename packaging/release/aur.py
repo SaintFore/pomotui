@@ -52,6 +52,7 @@ class AurChannel:
         self.channel = channel
         self.package = PACKAGES[channel]
         self.remote = remote or f'ssh://aur@aur.archlinux.org/{self.package}.git'
+        self.read_remote=self.remote if '://' not in self.remote or self.remote.startswith('file://') else f'https://aur.archlinux.org/{self.package}.git'
         self.rpc_url = rpc_url or 'https://aur.archlinux.org/rpc/v5/info'
         self.known_hosts = Path(known_hosts or Path(__file__).parents[1] / 'aur/known_hosts').resolve()
         self.acceptance = Path(acceptance) if acceptance else None
@@ -218,7 +219,7 @@ class AurChannel:
 
     def verify(self):
         with tempfile.TemporaryDirectory(prefix='pomotui-aur-verify-') as tmp:
-            run('git', 'clone', '--quiet', '--branch', 'master', self.remote, tmp, env=self.env)
+            run('git', 'clone', '--quiet', '--branch', 'master', self.read_remote, tmp, env=self.env)
             commit = run('git', 'rev-parse', 'HEAD', cwd=tmp, env=self.env)
             for name in FILES:
                 if (Path(tmp) / name).read_bytes() != (self.directory / self.channel / name).read_bytes():
