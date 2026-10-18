@@ -9,18 +9,19 @@ use pomotui_platform::{
     elapsed_during_recovery, read_sync_file, replace_sync_file,
 };
 use pomotui_protocol::{
-    ActionChainSummary, ChainLinkSummary, Command, DurableHealth, DurableHealthState,
-    EndedChainSummary, Handler, PendingReviewSummary, ProtocolError, RecentSessionSummary,
-    ReminderDelivery, Request, Response, RewardMilestoneSummary, RewardUnlockSummary, SessionKind,
-    Snapshot, SyncStatus, TaskFocusSummary, TaskSummary, TodaySummary,
+    ActionChainSummary, ChainBreakSource, ChainLinkSummary, Command, DurableHealth,
+    DurableHealthState, EndedChainSummary, Handler, PendingReviewSummary, ProtocolError,
+    RecentSessionSummary, ReminderDelivery, Request, Response, RewardMilestoneSummary,
+    RewardUnlockSummary, SessionKind, Snapshot, SyncStatus, TaskFocusSummary, TaskSummary,
+    TodaySummary,
 };
 use pomotui_sync::{
     ActivityProjection, ClaimEvidence, Document as SyncDocument, EntityId,
-    FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant, Record as SyncRecord, RecordId,
-    RecordPayload, ReviewedTaskKind, RewardMilestoneProjection, RewardProjection,
-    SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome, SessionReviewJudgment,
-    SessionReviewProjection, SyncPlan, TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
-    project_reward_debt, project_session_reviews,
+    FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant, ProjectedChainBreakSource,
+    Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind, RewardMilestoneProjection,
+    RewardProjection, SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome,
+    SessionReviewJudgment, SessionReviewProjection, SyncPlan, TaskProjection,
+    TaskStatus as SyncTaskStatus, plan_sync, project_reward_debt, project_session_reviews,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -245,10 +246,14 @@ struct ChainLinkState {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ChainBreakState {
     id: u64,
-    session_id: u64,
-    task_id: u64,
-    task_title: String,
-    actual_seconds: u64,
+    #[serde(default)]
+    source: ChainBreakSource,
+    #[serde(default)]
+    reservation_entity_id: Option<EntityId>,
+    session_id: Option<u64>,
+    task_id: Option<u64>,
+    task_title: Option<String>,
+    actual_seconds: Option<u64>,
     reflection: String,
     chain_entry_title: Option<String>,
 }
@@ -832,6 +837,7 @@ impl Service {
                         })
                         .collect(),
                     break_id: chain.chain_break.id,
+                    break_source: chain.chain_break.source,
                     break_task_title: chain.chain_break.task_title.clone(),
                     break_actual_seconds: chain.chain_break.actual_seconds,
                     break_reflection: chain.chain_break.reflection.clone(),
@@ -1216,7 +1222,7 @@ impl Service {
             .sync
             .records
             .iter()
-            .filter(|r| matches!(r.payload, RecordPayload::SessionReviewed { .. }))
+            .filter(|r| r.payload.chain_judgment().is_some())
             .map(|r| r.entity_id.clone())
             .collect();
         Some(ClaimEvidence {
@@ -1434,11 +1440,13 @@ impl Service {
         let review_task_title = review.task_title.expect("review Task snapshot validated");
         let review_actual_seconds = review.actual_seconds;
         let chain_break = ChainBreakState {
+            source: ChainBreakSource::SessionReview,
+            reservation_entity_id: None,
             id: self.next_chain_entry_id,
-            session_id: review_session_id,
-            task_id: review_task_id,
-            task_title: review_task_title.clone(),
-            actual_seconds: review_actual_seconds,
+            session_id: Some(review_session_id),
+            task_id: Some(review_task_id),
+            task_title: Some(review_task_title.clone()),
+            actual_seconds: Some(review_actual_seconds),
             reflection: reflection.clone(),
             chain_entry_title: chain_entry_title.clone(),
         };
@@ -1886,16 +1894,25 @@ impl Service {
                         reflection: entry.reflection.clone(),
                         chain_entry_title: entry.chain_entry_title.clone(),
                     })
-                    .chain(std::iter::once(SubmittedSessionReviewSync {
-                        entry_id: chain.chain_break.id,
-                        session_id: chain.chain_break.session_id,
-                        task_id: chain.chain_break.task_id,
-                        task_title: chain.chain_break.task_title.clone(),
-                        actual_seconds: chain.chain_break.actual_seconds,
-                        judgment: SessionReviewJudgment::Failed,
-                        reflection: Some(chain.chain_break.reflection.clone()),
-                        chain_entry_title: chain.chain_break.chain_entry_title.clone(),
-                    }))
+                    .chain(
+                        std::iter::once(&chain.chain_break)
+                            .filter(|entry| entry.source == ChainBreakSource::SessionReview)
+                            .map(|entry| SubmittedSessionReviewSync {
+                                entry_id: entry.id,
+                                session_id: entry.session_id.expect("legacy Session Review source"),
+                                task_id: entry.task_id.expect("legacy Session Review Task"),
+                                task_title: entry
+                                    .task_title
+                                    .clone()
+                                    .expect("legacy Session Review Task title"),
+                                actual_seconds: entry
+                                    .actual_seconds
+                                    .expect("legacy Session Review duration"),
+                                judgment: SessionReviewJudgment::Failed,
+                                reflection: Some(entry.reflection.clone()),
+                                chain_entry_title: entry.chain_entry_title.clone(),
+                            }),
+                    )
                     .collect::<Vec<_>>()
             })
             .chain(
@@ -2294,6 +2311,71 @@ impl Service {
         &mut self,
         projection: &SessionReviewProjection,
     ) -> Result<(), String> {
+        fn entry_id(
+            next_entry_id: &mut u64,
+            entity_id: &EntityId,
+            mappings: &mut std::collections::BTreeMap<EntityId, u64>,
+        ) -> u64 {
+            if let Some(id) = mappings.get(entity_id) {
+                *id
+            } else {
+                let id = *next_entry_id;
+                *next_entry_id = next_entry_id.saturating_add(1);
+                mappings.insert(entity_id.clone(), id);
+                id
+            }
+        }
+        fn build_link(
+            service: &mut Service,
+            review: &pomotui_sync::ProjectedSessionReview,
+            next_entry_id: &mut u64,
+        ) -> Result<ChainLinkState, String> {
+            let session_id = service
+                .sync
+                .session_entities
+                .iter()
+                .find_map(|(local, global)| (global == &review.session_entity_id).then_some(*local))
+                .ok_or_else(|| "projected Session Review source Session is not local".to_owned())?;
+            let task_id = if review.task_kind == ReviewedTaskKind::SystemVoid {
+                service
+                    .void_task_id
+                    .ok_or_else(|| "system Void Task is unavailable".to_owned())?
+            } else {
+                service
+                    .sync
+                    .task_entities
+                    .iter()
+                    .find_map(|(local, global)| {
+                        (global == &review.task_entity_id).then_some(*local)
+                    })
+                    .ok_or_else(|| "projected Session Review Task is not local".to_owned())?
+            };
+            if service
+                .history
+                .records()
+                .iter()
+                .find(|record| record.id == session_id)
+                .is_some_and(|record| record.task_id.is_none())
+            {
+                service
+                    .history
+                    .attribute(session_id, TaskId::new(task_id), &review.task_title)
+                    .map_err(str::to_owned)?;
+            }
+            Ok(ChainLinkState {
+                id: entry_id(
+                    next_entry_id,
+                    &review.review_entity_id,
+                    &mut service.sync.session_review_entries,
+                ),
+                session_id,
+                task_id,
+                task_title: review.task_title.clone(),
+                actual_seconds: review.actual_seconds,
+                reflection: review.reflection.clone(),
+                chain_entry_title: review.chain_entry_title.clone(),
+            })
+        }
         let existing_chain_ids = self
             .ended_chains
             .iter()
@@ -2323,65 +2405,6 @@ impl Service {
         self.reward_unlocks
             .retain(|reward| !deleted_chain_ids.contains(&reward.chain_id));
         let mut next_entry_id = self.next_chain_entry_id;
-        let mut entry_id =
-            |entity_id: &EntityId, mappings: &mut std::collections::BTreeMap<EntityId, u64>| {
-                if let Some(id) = mappings.get(entity_id) {
-                    *id
-                } else {
-                    let id = next_entry_id;
-                    next_entry_id = next_entry_id.saturating_add(1);
-                    mappings.insert(entity_id.clone(), id);
-                    id
-                }
-            };
-        let mut build_link =
-            |review: &pomotui_sync::ProjectedSessionReview| -> Result<ChainLinkState, String> {
-                let session_id = self
-                    .sync
-                    .session_entities
-                    .iter()
-                    .find_map(|(local, global)| {
-                        (global == &review.session_entity_id).then_some(*local)
-                    })
-                    .ok_or_else(|| {
-                        "projected Session Review source Session is not local".to_owned()
-                    })?;
-                let task_id = if review.task_kind == ReviewedTaskKind::SystemVoid {
-                    self.void_task_id
-                        .ok_or_else(|| "system Void Task is unavailable".to_owned())?
-                } else {
-                    self.sync
-                        .task_entities
-                        .iter()
-                        .find_map(|(local, global)| {
-                            (global == &review.task_entity_id).then_some(*local)
-                        })
-                        .ok_or_else(|| "projected Session Review Task is not local".to_owned())?
-                };
-                if self
-                    .history
-                    .records()
-                    .iter()
-                    .find(|record| record.id == session_id)
-                    .is_some_and(|record| record.task_id.is_none())
-                {
-                    self.history
-                        .attribute(session_id, TaskId::new(task_id), &review.task_title)
-                        .map_err(str::to_owned)?;
-                }
-                Ok(ChainLinkState {
-                    id: entry_id(
-                        &review.review_entity_id,
-                        &mut self.sync.session_review_entries,
-                    ),
-                    session_id,
-                    task_id,
-                    task_title: review.task_title.clone(),
-                    actual_seconds: review.actual_seconds,
-                    reflection: review.reflection.clone(),
-                    chain_entry_title: review.chain_entry_title.clone(),
-                })
-            };
         let mut ended_chains = Vec::new();
         let mut used_chain_ids = std::collections::BTreeSet::new();
         let mut next_chain_id = 1_u64;
@@ -2389,13 +2412,67 @@ impl Service {
             let links = chain
                 .links
                 .iter()
-                .map(&mut build_link)
+                .map(|review| build_link(self, review, &mut next_entry_id))
                 .collect::<Result<Vec<_>, _>>()?;
             let break_review = chain
                 .chain_break
                 .as_ref()
                 .ok_or_else(|| "ended projected chain has no Chain Break".to_owned())?;
-            let break_link = build_link(break_review)?;
+            let (source, session_id, reservation_entity_id) = match &break_review.source {
+                ProjectedChainBreakSource::SessionReview { session_entity_id } => (
+                    ChainBreakSource::SessionReview,
+                    Some(
+                        self.sync
+                            .session_entities
+                            .iter()
+                            .find_map(|(local, global)| {
+                                (global == session_entity_id).then_some(*local)
+                            })
+                            .ok_or_else(|| {
+                                "projected Chain Break source Session is not local".to_owned()
+                            })?,
+                    ),
+                    None,
+                ),
+                ProjectedChainBreakSource::ReservationReview {
+                    reservation_entity_id,
+                } => (
+                    ChainBreakSource::ReservationReview,
+                    None,
+                    Some(reservation_entity_id.clone()),
+                ),
+            };
+            let task_id = if break_review.task_kind == Some(ReviewedTaskKind::SystemVoid) {
+                Some(
+                    self.void_task_id
+                        .ok_or_else(|| "system Void Task is unavailable".to_owned())?,
+                )
+            } else {
+                break_review
+                    .task_entity_id
+                    .as_ref()
+                    .map(|entity| {
+                        self.sync
+                            .task_entities
+                            .iter()
+                            .find_map(|(local, global)| (global == entity).then_some(*local))
+                            .ok_or_else(|| "projected Chain Break Task is not local".to_owned())
+                    })
+                    .transpose()?
+            };
+            if let (Some(session_id), Some(task_id), Some(title)) =
+                (session_id, task_id, break_review.task_title.as_deref())
+                && self
+                    .history
+                    .records()
+                    .iter()
+                    .find(|record| record.id == session_id)
+                    .is_some_and(|record| record.task_id.is_none())
+            {
+                self.history
+                    .attribute(session_id, TaskId::new(task_id), title)
+                    .map_err(str::to_owned)?;
+            }
             let chain_id = existing_chain_ids
                 .get(&break_review.review_entity_id)
                 .copied()
@@ -2413,13 +2490,19 @@ impl Service {
                 id: chain_id,
                 links,
                 chain_break: ChainBreakState {
-                    id: break_link.id,
-                    session_id: break_link.session_id,
-                    task_id: break_link.task_id,
-                    task_title: break_link.task_title,
-                    actual_seconds: break_link.actual_seconds,
+                    source,
+                    reservation_entity_id,
+                    id: entry_id(
+                        &mut next_entry_id,
+                        &break_review.review_entity_id,
+                        &mut self.sync.session_review_entries,
+                    ),
+                    session_id,
+                    task_id,
+                    task_title: break_review.task_title.clone(),
+                    actual_seconds: break_review.actual_seconds,
                     reflection: break_review.reflection.clone().unwrap_or_default(),
-                    chain_entry_title: break_link.chain_entry_title,
+                    chain_entry_title: break_review.chain_entry_title.clone(),
                 },
             });
         }
@@ -2427,7 +2510,7 @@ impl Service {
             .current_chain
             .links
             .iter()
-            .map(&mut build_link)
+            .map(|review| build_link(self, review, &mut next_entry_id))
             .collect::<Result<Vec<_>, _>>()?;
         self.ended_chains = ended_chains;
         self.chain_links = chain_links;
@@ -5233,6 +5316,10 @@ mod tests {
         assert_ne!(snapshot.action_chain.id, old_chain_id);
         assert!(snapshot.pending_review.is_none());
         assert_eq!(snapshot.recent_ended_chains[0].id, old_chain_id);
+        assert_eq!(
+            snapshot.recent_ended_chains[0].break_source,
+            pomotui_protocol::ChainBreakSource::SessionReview
+        );
         assert_eq!(
             snapshot.recent_ended_chains[0].break_reflection,
             "The slice was still too large"
