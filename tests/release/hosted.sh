@@ -39,8 +39,8 @@ for attempt in $(seq 1 60); do
     kill -0 "$boot_pid"
     sleep 2
 done
-old=$(find "$out/work/artifacts" -name 'pomotui-0.3.0-*.pkg.tar.zst' -printf '%f\n')
-candidate=$(find "$out/work/artifacts" -name 'pomotui-*.r*.pkg.tar.zst' -printf '%f\n')
+old=$(find "$out/work/artifacts" -name 'pomotui-0.3.0-*.pkg.tar.zst' ! -name 'pomotui-debug-*' -printf '%f\n')
+candidate=$(find "$out/work/artifacts" -name 'pomotui-*.r*.pkg.tar.zst' ! -name 'pomotui-debug-*' -printf '%f\n')
 [[ -n "$old" && -n "$candidate" ]]
 cp tests/release/acceptance.sh "$out/acceptance.sh"
 sudo timeout 180 systemd-run --machine=pomotui-acceptance --wait --pipe /usr/bin/bash /acceptance/acceptance.sh "/acceptance/work/artifacts/$old" "/acceptance/work/artifacts/$candidate" /acceptance/result 2>&1 | tee "$out/scenario.log"
