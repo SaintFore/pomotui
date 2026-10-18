@@ -955,6 +955,131 @@ impl Service {
         self.apply_deferred_task_deletions()
     }
 
+    fn fail_reservation(
+        &mut self,
+        id: &str,
+        reflection: &str,
+        confirmed: bool,
+    ) -> Result<(), String> {
+        if !confirmed {
+            let rewards = self
+                .reward_unlocks
+                .iter()
+                .filter(|unlock| {
+                    unlock.chain_id == self.current_chain_id && unlock.state == "unlocked"
+                })
+                .map(|unlock| unlock.name.as_str())
+                .collect::<Vec<_>>();
+            return Err(format!(
+                "Reservation failure ends Action Chain of {} links; unclaimed rewards becoming unavailable: {}. Confirm with --confirm",
+                self.current_chain_length,
+                if rewards.is_empty() {
+                    "none".into()
+                } else {
+                    rewards.join(", ")
+                }
+            ));
+        }
+        let reflection = reflection.trim();
+        if reflection.is_empty() {
+            return Err("Failed Reservation Review requires a Reflection".into());
+        }
+        let reservation = self
+            .reservation
+            .as_ref()
+            .ok_or("No Focus Reservation to review")?
+            .clone();
+        if reservation.id != id {
+            return Err("Focus Reservation identity has changed".into());
+        }
+        let reservation_entity_id = EntityId::parse(id)?;
+        let task_entity_id = reservation
+            .task_id
+            .and_then(|local| self.sync.task_entities.get(&local).cloned());
+        let review_entity_id = EntityId::random();
+        let entry_id = self.next_chain_entry_id;
+        self.sync
+            .session_review_entries
+            .insert(review_entity_id.clone(), entry_id);
+        self.sync.records.push(SyncRecord::in_beginning(
+            self.sync.beginning.clone(),
+            RecordId::random(),
+            review_entity_id,
+            self.next_sync_mutation_time(),
+            RecordPayload::ReservationFailed {
+                reservation_entity_id: reservation_entity_id.clone(),
+                decided_at: self.wall,
+                task_entity_id,
+                task_title: reservation.task_title.clone(),
+                reflection: reflection.into(),
+            },
+        ));
+        self.sync.records.sort();
+        self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+        self.ended_chains.push(EndedChainState {
+            id: self.current_chain_id,
+            links: std::mem::take(&mut self.chain_links),
+            chain_break: ChainBreakState {
+                id: entry_id,
+                source: ChainBreakSource::ReservationReview,
+                reservation_entity_id: Some(reservation_entity_id),
+                session_id: None,
+                task_id: reservation.task_id,
+                task_title: reservation.task_title,
+                actual_seconds: None,
+                reflection: reflection.into(),
+                chain_entry_title: None,
+            },
+        });
+        for unlock in &mut self.reward_unlocks {
+            if unlock.chain_id == self.current_chain_id && unlock.state == "unlocked" {
+                unlock.state = "unavailable".into();
+            }
+        }
+        self.current_chain_id = self.current_chain_id.saturating_add(1);
+        self.current_chain_length = 0;
+        self.reservation = None;
+        Ok(())
+    }
+
+    fn commit_reservation_failure(
+        &mut self,
+        id: &str,
+        reflection: &str,
+        confirmed: bool,
+        key: Option<&str>,
+    ) -> Response {
+        let reservation_backup = self.reservation_backup();
+        let chain_backup = (
+            self.current_chain_id,
+            self.current_chain_length,
+            self.chain_links.clone(),
+            self.next_chain_entry_id,
+            self.ended_chains.clone(),
+            self.reward_unlocks.clone(),
+        );
+        let result = self
+            .fail_reservation(id, reflection, confirmed)
+            .and_then(|()| self.persist(key));
+        match result {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(error) => {
+                self.restore_reservation_mutation(reservation_backup);
+                (
+                    self.current_chain_id,
+                    self.current_chain_length,
+                    self.chain_links,
+                    self.next_chain_entry_id,
+                    self.ended_chains,
+                    self.reward_unlocks,
+                ) = chain_backup;
+                self.durable_rejected(error)
+            }
+        }
+    }
+
     fn reservation_backup(&self) -> ReservationMutationBackup {
         (
             self.timer.clone(),
@@ -3116,6 +3241,18 @@ impl Handler for Service {
                 use_current_task,
             } => self.create_reservation(minutes, task_id, use_current_task),
             Command::ReservationSuccess { id } => self.fulfill_reservation(&id),
+            Command::ReservationFailure {
+                id,
+                reflection,
+                confirmed,
+            } => {
+                return self.commit_reservation_failure(
+                    &id,
+                    &reflection,
+                    confirmed,
+                    mutation_key.as_deref(),
+                );
+            }
             Command::ConfigureReservation { minutes } => {
                 return self.commit_reservation_configuration(minutes, mutation_key.as_deref());
             }
@@ -3998,7 +4135,7 @@ impl PersistedService {
         };
         let clock = PlatformClock::default();
         let persisted = Self {
-            data_format_version: 5,
+            data_format_version: 6,
             timer: PersistedTimer {
                 session,
                 current_task: state.current_task.map(TaskId::get),
@@ -4068,9 +4205,9 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
-        if !matches!(persisted.data_format_version, 0 | 2 | 3 | 4 | 5) {
+        if !matches!(persisted.data_format_version, 0 | 2 | 3 | 4 | 5 | 6) {
             return Err(format!(
-                "unsupported persisted-state format {}; supported formats are unversioned released state and formats 2, 3, 4, and 5",
+                "unsupported persisted-state format {}; supported formats are unversioned released state and formats 2, 3, 4, 5, and 6",
                 persisted.data_format_version
             ));
         }

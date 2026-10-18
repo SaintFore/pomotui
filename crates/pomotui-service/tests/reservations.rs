@@ -320,3 +320,380 @@ fn failed_default_commit_restores_toml_and_runtime_default() {
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn taskless_reservation_failure_creates_a_real_break_without_a_session() {
+    let mut service = Service::new();
+    let issued = snapshot(send(
+        &mut service,
+        "reserve",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ))
+    .reservation
+    .unwrap();
+    let failed = snapshot(send(
+        &mut service,
+        "fail",
+        Command::ReservationFailure {
+            id: issued.id.clone(),
+            reflection: "Could not begin".into(),
+            confirmed: true,
+        },
+    ));
+    assert!(failed.reservation.is_none());
+    assert_eq!(failed.action_chain.length, 0);
+    assert_eq!(failed.recent_ended_chains.len(), 1);
+    let chain_break = &failed.recent_ended_chains[0];
+    assert_eq!(
+        chain_break.break_source,
+        pomotui_protocol::ChainBreakSource::ReservationReview
+    );
+    assert_eq!(chain_break.break_task_title, None);
+    assert_eq!(chain_break.break_actual_seconds, None);
+    assert!(failed.recent_history.is_empty());
+    let replayed = snapshot(send(
+        &mut service,
+        "fail",
+        Command::ReservationFailure {
+            id: issued.id.clone(),
+            reflection: "Could not begin".into(),
+            confirmed: true,
+        },
+    ));
+    assert_eq!(replayed.recent_ended_chains.len(), 1);
+    assert!(matches!(
+        send(
+            &mut service,
+            "again",
+            Command::ReservationFailure {
+                id: issued.id,
+                reflection: "again".into(),
+                confirmed: true,
+            }
+        ),
+        Response::Error { .. }
+    ));
+}
+
+#[test]
+fn failure_requires_confirmation_and_reflection_without_consuming_the_reservation() {
+    let mut service = Service::new();
+    let issued = snapshot(send(
+        &mut service,
+        "reserve",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ))
+    .reservation
+    .unwrap();
+    for (key, reflection, confirmed) in
+        [("unconfirmed", "interrupted", false), ("blank", "  ", true)]
+    {
+        assert!(matches!(
+            send(
+                &mut service,
+                key,
+                Command::ReservationFailure {
+                    id: issued.id.clone(),
+                    reflection: reflection.into(),
+                    confirmed,
+                }
+            ),
+            Response::Error { .. }
+        ));
+        let state = snapshot(send(&mut service, "state", Command::Status));
+        assert_eq!(state.reservation.unwrap().id, issued.id);
+        assert!(state.recent_ended_chains.is_empty());
+    }
+}
+
+#[test]
+fn failure_commit_failure_preserves_reservation_chain_and_rewards_across_restart() {
+    use pomotui_platform::install_persistent_save_state_failure_trigger;
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-reservation-failure-{}",
+        pomotui_sync::RecordId::random()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("state.sqlite3");
+    let mut service = Service::open(&path).unwrap();
+    let issued = snapshot(send(
+        &mut service,
+        "reserve",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ))
+    .reservation
+    .unwrap();
+    install_persistent_save_state_failure_trigger(&path).unwrap();
+    assert!(matches!(
+        send(
+            &mut service,
+            "fail",
+            Command::ReservationFailure {
+                id: issued.id.clone(),
+                reflection: "interrupted".into(),
+                confirmed: true
+            }
+        ),
+        Response::Error { .. }
+    ));
+    let state = snapshot(send(&mut service, "state", Command::Status));
+    assert_eq!(state.reservation.unwrap().id, issued.id);
+    assert!(state.recent_ended_chains.is_empty());
+    assert!(state.recent_history.is_empty());
+    drop(service);
+    let mut reopened = Service::open(&path).unwrap();
+    let state = snapshot(send(&mut reopened, "state-reopened", Command::Status));
+    assert_eq!(state.reservation.unwrap().id, issued.id);
+    assert!(state.recent_ended_chains.is_empty());
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn reservation_failure_identity_rewards_archive_and_fresh_start_converge_across_devices() {
+    use pomotui_sync::{EntityId, RecordId, RecordPayload};
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-reservation-convergence-{}",
+        RecordId::random()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let paths = [root.join("a.sync"), root.join("b.sync")];
+    let databases = [root.join("a.db"), root.join("b.db")];
+    let mut a = Service::open(&databases[0]).unwrap();
+    let mut b = Service::open(&databases[1]).unwrap();
+    for (service, path) in [(&mut a, &paths[0]), (&mut b, &paths[1])] {
+        service.enable_background_sync();
+        assert!(matches!(
+            send(
+                service,
+                "enable",
+                Command::SyncEnable { path: path.clone() }
+            ),
+            Response::Data { .. }
+        ));
+    }
+    snapshot(send(
+        &mut a,
+        "milestone-claimed",
+        Command::RewardCreate {
+            name: "Coffee".into(),
+            threshold: 1,
+            budget: None,
+        },
+    ));
+    snapshot(send(
+        &mut a,
+        "milestone-unclaimed",
+        Command::RewardCreate {
+            name: "Walk".into(),
+            threshold: 1,
+            budget: None,
+        },
+    ));
+    // Import a genuine ended Session and its explicitly submitted review.
+    let session = EntityId::random();
+    let review = EntityId::random();
+    let records = vec![
+        pomotui_sync::Record::new(
+            RecordId::random(),
+            session.clone(),
+            pomotui_sync::MutationInstant::from_millis(1000).unwrap(),
+            RecordPayload::SessionEnded {
+                ended_at: 1,
+                kind: pomotui_sync::SessionKind::Focus,
+                outcome: pomotui_sync::SessionOutcome::Stopped,
+                planned_seconds: 60,
+                actual_seconds: 30,
+                task_entity_id: None,
+                task_title: None,
+            },
+        ),
+        pomotui_sync::Record::new(
+            RecordId::random(),
+            review,
+            pomotui_sync::MutationInstant::from_millis(1000).unwrap(),
+            RecordPayload::SessionReviewed {
+                session_entity_id: session,
+                judgment: pomotui_sync::SessionReviewJudgment::Successful,
+                task_entity_id: EntityId::random(),
+                task_kind: pomotui_sync::ReviewedTaskKind::SystemVoid,
+                task_title: "Void".into(),
+                actual_seconds: 30,
+                reflection: None,
+                chain_entry_title: Some("Work".into()),
+            },
+        ),
+    ];
+    a.apply_sync_records(&paths[0], &records).unwrap();
+    let before = snapshot(send(&mut a, "before", Command::Status));
+    assert_eq!(before.action_chain.length, 1);
+    let claimed = before
+        .current_chain_rewards
+        .iter()
+        .find(|reward| reward.name == "Coffee")
+        .unwrap()
+        .id;
+    snapshot(send(
+        &mut a,
+        "claim",
+        Command::RewardClaim { unlock_id: claimed },
+    ));
+    b.apply_sync_document(&paths[1], &a.sync_document_for(&paths[0]).unwrap())
+        .unwrap();
+    let b_reservation = snapshot(send(
+        &mut b,
+        "reserve-b",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ))
+    .reservation
+    .unwrap();
+    let issued = snapshot(send(
+        &mut a,
+        "reserve-a",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ))
+    .reservation
+    .unwrap();
+    let preview = send(
+        &mut a,
+        "preview",
+        Command::ReservationFailure {
+            id: issued.id.clone(),
+            reflection: "Interrupted".into(),
+            confirmed: false,
+        },
+    );
+    assert!(format!("{preview:?}").contains("Walk"));
+    let failed = snapshot(send(
+        &mut a,
+        "failure",
+        Command::ReservationFailure {
+            id: issued.id,
+            reflection: "Interrupted".into(),
+            confirmed: true,
+        },
+    ));
+    assert_eq!(failed.recent_ended_chains[0].length, 1);
+    let rewards = &failed.recent_ended_chains[0].rewards;
+    assert_eq!(
+        rewards
+            .iter()
+            .find(|reward| reward.name == "Coffee")
+            .unwrap()
+            .state,
+        "claimed"
+    );
+    assert_eq!(
+        rewards
+            .iter()
+            .find(|reward| reward.name == "Walk")
+            .unwrap()
+            .state,
+        "unavailable"
+    );
+    assert_eq!(failed.recent_history, before.recent_history);
+    let old_document = a.sync_document_for(&paths[0]).unwrap();
+    b.apply_sync_document(&paths[1], &old_document).unwrap();
+    b.apply_sync_document(&paths[1], &old_document).unwrap();
+    let imported = snapshot(send(&mut b, "imported", Command::Status));
+    assert_eq!(imported.reservation.unwrap().id, b_reservation.id);
+    assert_eq!(
+        imported.recent_ended_chains[0].break_source,
+        pomotui_protocol::ChainBreakSource::ReservationReview
+    );
+    assert_eq!(imported.recent_ended_chains[0].length, 1);
+    let ended = &failed.recent_ended_chains[0];
+    snapshot(send(
+        &mut a,
+        "edit",
+        Command::ChainEntryEdit {
+            id: ended.break_id,
+            reflection: Some("New explanation".into()),
+            chain_entry_title: Some("Missed appointment".into()),
+        },
+    ));
+    b.apply_sync_document(&paths[1], &a.sync_document_for(&paths[0]).unwrap())
+        .unwrap();
+    let edited = snapshot(send(&mut b, "edited", Command::Status));
+    assert_eq!(
+        edited.recent_ended_chains[0].break_reflection,
+        "New explanation"
+    );
+    assert_eq!(
+        edited.recent_ended_chains[0]
+            .break_chain_entry_title
+            .as_deref(),
+        Some("Missed appointment")
+    );
+    snapshot(send(
+        &mut a,
+        "delete",
+        Command::EndedChainDelete { id: ended.id },
+    ));
+    b.apply_sync_document(&paths[1], &a.sync_document_for(&paths[0]).unwrap())
+        .unwrap();
+    b.apply_sync_document(&paths[1], &old_document).unwrap();
+    assert!(
+        snapshot(send(&mut b, "deleted", Command::Status))
+            .recent_ended_chains
+            .is_empty()
+    );
+    drop(a);
+    a = Service::open(&databases[0]).unwrap();
+    assert!(
+        snapshot(send(&mut a, "restarted", Command::Status))
+            .recent_ended_chains
+            .is_empty()
+    );
+    snapshot(send(
+        &mut a,
+        "default",
+        Command::ConfigureReservation { minutes: 7 },
+    ));
+    snapshot(send(
+        &mut a,
+        "reserve-reset",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ));
+    let reset = snapshot(send(
+        &mut a,
+        "reset",
+        Command::FreshStart { confirmed: true },
+    ));
+    assert!(reset.reservation.is_none());
+    assert_eq!(reset.reservation_minutes, 7);
+    b.apply_sync_document(&paths[1], &a.sync_document_for(&paths[0]).unwrap())
+        .unwrap();
+    b.apply_sync_document(&paths[1], &old_document).unwrap();
+    let adopted = snapshot(send(&mut b, "reset-adopted", Command::Status));
+    assert!(adopted.reservation.is_none());
+    assert!(adopted.recent_ended_chains.is_empty());
+    assert!(adopted.recent_history.is_empty());
+    drop((a, b));
+    std::fs::remove_dir_all(root).unwrap();
+}

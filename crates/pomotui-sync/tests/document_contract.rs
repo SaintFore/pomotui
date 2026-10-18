@@ -94,7 +94,7 @@ fn format_four_is_validated_and_upgraded_to_current_format() {
         .and_then(|document| document.to_json())
         .expect("upgrade format four");
 
-    assert!(upgraded.contains("\"version\": 7"));
+    assert!(upgraded.contains(&format!("\"version\": {}", pomotui_sync::FORMAT_VERSION)));
     assert!(!upgraded.contains("\"version\": 4"));
 }
 
@@ -574,4 +574,131 @@ fn all_supported_legacy_formats_share_genesis_and_preserve_record_identity() {
             normalized
         );
     }
+}
+
+fn reservation_failure(record: u128, review: u128, reservation: u128, decided_at: i64) -> Record {
+    Record::new(
+        record_id(record),
+        entity_id(review),
+        MutationInstant::from_millis(decided_at * 1000).unwrap(),
+        RecordPayload::ReservationFailed {
+            reservation_entity_id: entity_id(reservation),
+            decided_at,
+            task_entity_id: None,
+            task_title: None,
+            reflection: "Could not begin".into(),
+        },
+    )
+}
+
+#[test]
+fn one_reservation_cannot_have_two_failure_facts() {
+    assert!(
+        Document::new(&[
+            reservation_failure(800, 810, 820, 100),
+            reservation_failure(801, 811, 820, 101),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn failed_reservations_share_review_order_and_archive_deletion_boundaries() {
+    let records = vec![
+        task_version(1, 16, 1000, "Work"),
+        ended_session(2, 20, Some(16)),
+        session_review(3, 30, 20, SessionReviewJudgment::Successful),
+        reservation_failure(4, 31, 50, 1_700_000_001),
+    ];
+    let before = plan_sync(&[], &records).unwrap();
+    assert_eq!(before.session_review_projection().ended_chains.len(), 1);
+    assert_eq!(
+        before.session_review_projection().ended_chains[0]
+            .links
+            .len(),
+        1
+    );
+    assert_eq!(before.activity_projections().len(), 1);
+    let deletion = Record::new(
+        record_id(5),
+        entity_id(31),
+        MutationInstant::from_millis(5000).unwrap(),
+        RecordPayload::EndedChainDeleted {
+            previous_chain_break_review_entity_id: None,
+            deleted_review_entity_ids: vec![entity_id(30), entity_id(31)],
+            observed_chain_break_review_entity_ids: vec![entity_id(31)],
+        },
+    );
+    let after = plan_sync(&records, &[deletion]).unwrap();
+    assert!(after.session_review_projection().ended_chains.is_empty());
+    assert!(
+        after
+            .session_review_projection()
+            .current_chain
+            .links
+            .is_empty()
+    );
+    let late = vec![
+        ended_session(6, 21, Some(16)),
+        session_review(7, 32, 21, SessionReviewJudgment::Successful),
+    ];
+    let with_late = plan_sync(after.retained_records(), &late).unwrap();
+    assert!(
+        with_late
+            .session_review_projection()
+            .ended_chains
+            .is_empty()
+    );
+    assert!(
+        with_late
+            .session_review_projection()
+            .current_chain
+            .links
+            .is_empty()
+    );
+}
+
+#[test]
+fn frozen_format_seven_non_genesis_upgrade_preserves_identity_and_checksum() {
+    let frozen = include_str!("fixtures/format-7-fresh-start.json");
+    let input: serde_json::Value = serde_json::from_str(frozen).unwrap();
+    let upgraded = Document::from_json(frozen).unwrap();
+    assert_eq!(
+        upgraded.beginning(),
+        &pomotui_sync::Beginning::parse(2, "00000000-0000-4000-8000-000000000001").unwrap()
+    );
+    let output: serde_json::Value = serde_json::from_str(&upgraded.to_json().unwrap()).unwrap();
+    assert_eq!(output["version"], 8);
+    assert_eq!(output["records"], input["records"]);
+    assert_eq!(output["integrity"], input["integrity"]);
+}
+
+#[test]
+fn mixed_judgments_use_one_identity_tie_break_order_in_both_delivery_orders() {
+    let records = vec![
+        task_version(1, 16, 1000, "Work"),
+        ended_session(2, 20, Some(16)),
+        session_review(3, 30, 20, SessionReviewJudgment::Successful),
+        reservation_failure(4, 29, 50, 1_700_000_000),
+        reservation_failure(5, 31, 51, 1_700_000_000),
+    ];
+    let forward = plan_sync(&[], &records).unwrap();
+    let mut reversed = records.clone();
+    reversed.reverse();
+    let backward = plan_sync(&[], &reversed).unwrap();
+    assert_eq!(
+        forward.session_review_projection(),
+        backward.session_review_projection()
+    );
+    let chains = &forward.session_review_projection().ended_chains;
+    assert_eq!(chains.len(), 2);
+    assert!(chains[0].links.is_empty());
+    assert_eq!(chains[1].links.len(), 1);
+    assert!(
+        forward
+            .session_review_projection()
+            .current_chain
+            .links
+            .is_empty()
+    );
 }

@@ -1,0 +1,30 @@
+{
+  "beginning": {
+    "generation": 2,
+    "id": "00000000-0000-4000-8000-000000000001"
+  },
+  "format": "pomotui.sync",
+  "version": 7,
+  "integrity": {
+    "record_count": 1,
+    "records_sha256": "70d043aa3925a3ae3d54c7483c7323be1cab25dab8e3ffee67660f856b8318d7"
+  },
+  "records": [
+    {
+      "beginning": {
+        "generation": 2,
+        "id": "00000000-0000-4000-8000-000000000001"
+      },
+      "id": "00000000-0000-4000-8000-000000000002",
+      "entity_id": "00000000-0000-4000-8000-000000000003",
+      "mutation_time": 1000,
+      "payload": {
+        "type": "task_version",
+        "data": {
+          "title": "After reset",
+          "status": "open"
+        }
+      }
+    }
+  ]
+}
