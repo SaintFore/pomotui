@@ -69,3 +69,27 @@ nspawn environment provides the required actual pacman and systemd user-manager
 boundary without depending on nested virtualization. This evidence establishes
 initial feasibility; it does not establish the remaining session/data/failure
 scenarios or constitute a complete production publication gate.
+
+## Domain state across upgrades (#21)
+
+`scenarios/domain-state.py` extends the same three-argument acceptance boundary.
+Each scenario reinstalls v0.3.0 in isolated state, creates work through the public
+v6 socket, and upgrades through pacman. It checks the candidate process and
+executable before comparing public snapshots. It covers Running and Paused
+Sessions, attributed History, Pending Review, a successful review and claimed
+reward, reservation countdown and pending judgment, settings, and upgrades of
+both immutable released migration fixtures. Backup bytes are preserved across
+upgrade; independent backup restoration remains covered by `legacy_migration`.
+
+The Running Session check observes continued task attribution, planned duration,
+clock progression, and one resulting History record whose identity matches its
+Pending Review. The live public snapshot does not expose a Current Session ID;
+this is the strongest identity observation available at the approved seam.
+
+Reservation expiry uses a real one-minute deadline and never submits a judgment.
+Separate upgrades cover a live countdown and an already pending judgment.
+Corrupt databases, future schema versions, and future durable-state formats are
+injected only as unsupported input; startup must fail with its diagnostic while
+preserving the original database bytes. No database query is used to assert
+business state. Each scenario retains before/after snapshots, candidate process
+identity, pacman output, and failure diagnostics under `result/domain-state`.

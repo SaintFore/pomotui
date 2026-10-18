@@ -60,4 +60,4 @@ as_user systemctl --user show pomotui.service > "$output/candidate-unit.txt"
 printf 'old_pid=%s\ncandidate_pid=%s\nold_service_sha256=%s\ncandidate_service_sha256=%s\n' "$old_pid" "$new_pid" "$old_hash" "$new_hash" >> "$output/identity.txt"
 echo 'PASS: clean install and real package upgrade served by candidate'
 
-python /acceptance/scenarios/domain-state.py "$old" "$candidate" "$output" "$user" "$uid"
+python "$(dirname "${BASH_SOURCE[0]}")/scenarios/domain-state.py" "$old" "$candidate" "$output" "$user" "$uid"

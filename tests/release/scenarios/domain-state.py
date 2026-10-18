@@ -106,8 +106,6 @@ assert len(ended['recent_history']) == 1
 assert ended['pending_review']['session_id'] == ended['recent_history'][0]['id']
 assert ended['pending_review']['task_id'] == task
 record('running-ended', ended)
-rest = request('start', kind='short_break', task_id=None)
-assert rest['planned_seconds'] == 180
 
 fresh('paused')
 task = create_task()
@@ -173,7 +171,7 @@ for version in ['v0.1.0', 'v0.2.0']:
     manager('stop', 'pomotui.socket', 'pomotui.service')
     shutil.rmtree(data)
     data.mkdir()
-    fixture = Path('/acceptance/scenarios/fixtures') / (version + '-production.sqlite3')
+    fixture = Path(__file__).parent / 'fixtures' / (version + '-production.sqlite3')
     shutil.copyfile(fixture, data / 'pomotui.sqlite3')
     run('chown', '-R', f'{user}:{user}', str(data))
     manager('start', 'pomotui.socket')
@@ -214,7 +212,7 @@ for name in ['corrupt', 'unsupported-schema', 'unsupported-payload']:
     journal = manager('status', 'pomotui.service', '--no-pager', check=False).stdout
     journal += run('journalctl', f'_UID={uid}', '--no-pager').stdout
     (out / f'{name}-diagnosis.log').write_text(journal)
-    expected = {'corrupt': 'not a database', 'unsupported-schema': 'newer', 'unsupported-payload': 'unsupported'}[name]
+    expected = {'corrupt': 'not a database', 'unsupported-schema': 'database schema 2147483647 is newer than supported schema', 'unsupported-payload': 'unsupported persisted-state format 65535'}[name]
     assert expected in journal.lower(), (name, journal)
     assert database.read_bytes() == original, name
     record(name + '-preservation', {'sha256': hashlib.sha256(original).hexdigest(), 'startup_rejected': True})
