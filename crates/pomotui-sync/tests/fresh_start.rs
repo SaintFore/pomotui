@@ -22,9 +22,15 @@ fn beginning_tampering_and_invalid_tokens_are_rejected_before_adoption() {
     assert!(Document::from_json(&tampered).is_err());
     let invalid = source.replace("\"generation\": 1", "\"generation\": 0");
     assert!(Document::from_json(&invalid).is_err());
-    let legacy = source.replace("\"version\": 7", "\"version\": 6");
+    let legacy = source.replace(
+        &format!("\"version\": {}", pomotui_sync::FORMAT_VERSION),
+        "\"version\": 6",
+    );
     assert!(Document::from_json(&legacy).is_err());
-    let unsupported = source.replace("\"version\": 7", "\"version\": 8");
+    let unsupported = source.replace(
+        &format!("\"version\": {}", pomotui_sync::FORMAT_VERSION),
+        "\"version\": 65535",
+    );
     assert!(Document::from_json(&unsupported).is_err());
 }
 

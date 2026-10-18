@@ -53,6 +53,16 @@ fn success(n: u128, time: i64) -> Vec<Record> {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn two_devices_replay_claim_debt_and_offline_repayments_after_restart() {
+    replay_claim_debt_and_offline_repayments(false);
+}
+
+#[test]
+fn reservation_breaks_replay_claim_debt_archive_deletion_and_repayments_after_restart() {
+    replay_claim_debt_and_offline_repayments(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn replay_claim_debt_and_offline_repayments(reservation_failure: bool) {
     let root = std::env::temp_dir().join(format!("pomotui-debt-{}", RecordId::random().as_str()));
     std::fs::create_dir_all(&root).unwrap();
     let mut records = (1..8)
@@ -94,6 +104,20 @@ fn two_devices_replay_claim_debt_and_offline_repayments_after_restart() {
     {
         *judgment = pomotui_sync::SessionReviewJudgment::Failed;
         *reflection = Some("late break".into());
+    }
+    if reservation_failure {
+        late = vec![Record::new(
+            RecordId::random(),
+            id(20),
+            MutationInstant::from_millis(65_000).unwrap(),
+            RecordPayload::ReservationFailed {
+                reservation_entity_id: id(120),
+                decided_at: 65,
+                task_entity_id: None,
+                task_title: None,
+                reflection: "late reservation failure".into(),
+            },
+        )];
     }
     let paths = [
         root.join("replica-a/activity.sync"),
@@ -161,6 +185,20 @@ fn two_devices_replay_claim_debt_and_offline_repayments_after_restart() {
     {
         *judgment = pomotui_sync::SessionReviewJudgment::Failed;
         *reflection = Some("inverse correction".into());
+    }
+    if reservation_failure {
+        inverse = vec![Record::new(
+            RecordId::random(),
+            id(24),
+            MutationInstant::from_millis(69_000).unwrap(),
+            RecordPayload::ReservationFailed {
+                reservation_entity_id: id(124),
+                decided_at: 69,
+                task_entity_id: None,
+                task_title: None,
+                reflection: "inverse reservation correction".into(),
+            },
+        )];
     }
     for (service, path) in devices.iter_mut().zip(&paths) {
         service.apply_sync_records(path, &inverse).unwrap();

@@ -35,6 +35,11 @@ pub enum Command {
     ReservationSuccess {
         id: String,
     },
+    ReservationFailure {
+        id: String,
+        reflection: String,
+        confirmed: bool,
+    },
     ConfigureReservation {
         minutes: u64,
     },
