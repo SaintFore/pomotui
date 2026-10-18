@@ -1,7 +1,7 @@
 use pomotui_domain::{
-    CurrentSession, History, SessionDurations, SessionKind as DomainKind, SessionOutcome,
-    SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, Timer, TimerState,
-    Transition,
+    CurrentSession, FocusReservation, History, SessionDurations, SessionKind as DomainKind,
+    SessionOutcome, SessionRecord, SessionState, TaskError, TaskId, TaskStatus, TaskStore, Timer,
+    TimerState, Transition,
 };
 use pomotui_platform::{
     Clock, DesktopReminder, PendingReminderEffect, PlatformClock, RecoveryObservation,
@@ -261,14 +261,26 @@ type ReservationMutationBackup = (
 );
 
 fn validate_reservation_minutes(minutes: u64) -> Result<u64, String> {
-    minutes
-        .checked_mul(60)
-        .filter(|seconds| *seconds > 0)
-        .ok_or_else(|| "reservation_minutes must be positive and fit a duration in seconds".into())
+    FocusReservation::seconds_for_minutes(minutes)
+        .map_err(|_| "reservation_minutes must be positive and fit a duration in seconds".into())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 struct ReservationState {
+    id: String,
+    task_id: Option<u64>,
+    task_title: Option<String>,
+    timing: FocusReservation,
+}
+
+impl ReservationState {
+    fn remaining(&self, now: u64) -> u64 {
+        self.timing.remaining_seconds(now)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedReservation {
     id: String,
     task_id: Option<u64>,
     task_title: Option<String>,
@@ -278,10 +290,56 @@ struct ReservationState {
     awaiting_review: bool,
 }
 
-impl ReservationState {
-    fn remaining(&self, now: u64) -> u64 {
-        self.remaining_seconds
-            .saturating_sub(now.saturating_sub(self.observed_at))
+impl PersistedReservation {
+    fn capture(reservation: &ReservationState, now: u64) -> Self {
+        Self {
+            id: reservation.id.clone(),
+            task_id: reservation.task_id,
+            task_title: reservation.task_title.clone(),
+            duration_seconds: reservation.timing.duration_seconds(),
+            remaining_seconds: reservation.remaining(now),
+            observed_at: now,
+            awaiting_review: reservation.timing.is_awaiting_review(),
+        }
+    }
+
+    fn restore(self, elapsed: u64, now: u64) -> Result<ReservationState, String> {
+        EntityId::parse(&self.id)
+            .map_err(|error| format!("invalid reservation identity: {error}"))?;
+        if self.task_id.is_some() != self.task_title.is_some() {
+            return Err("invalid reservation Task identity/title pair".into());
+        }
+        if let (Some(task_id), Some(title)) = (self.task_id, &self.task_title) {
+            if task_id == 0 {
+                return Err("invalid reservation Task identity".into());
+            }
+            // Validate the original snapshot without normalizing it or requiring
+            // the Task still to exist in the live TaskStore.
+            pomotui_domain::TaskTitle::restore(title.clone())
+                .map_err(|error| format!("invalid reservation Task title: {error}"))?;
+        }
+        // Validate the saved state before subtracting recovery time: otherwise an
+        // invalid remaining value or phase could be concealed by elapsed time.
+        let saved = FocusReservation::restore(
+            self.duration_seconds,
+            self.remaining_seconds,
+            0,
+            self.awaiting_review,
+        )
+        .map_err(|error| format!("invalid reservation timing: {error}"))?;
+        let timing = FocusReservation::restore(
+            saved.duration_seconds(),
+            saved.remaining_seconds(elapsed),
+            now,
+            saved.is_awaiting_review(),
+        )
+        .map_err(|error| format!("invalid recovered reservation timing: {error}"))?;
+        Ok(ReservationState {
+            id: self.id,
+            task_id: self.task_id,
+            task_title: self.task_title,
+            timing,
+        })
     }
 }
 
@@ -948,8 +1006,8 @@ impl Service {
         if use_current_task && task_id.is_some() {
             return Err("Choose either the current Task or an explicit Task".into());
         }
-        let duration_seconds =
-            validate_reservation_minutes(minutes.unwrap_or(self.reservation_minutes))?;
+        let timing = FocusReservation::new(minutes.unwrap_or(self.reservation_minutes), self.now)
+            .map_err(|error| error.to_string())?;
         let task_id = if use_current_task {
             self.timer.current_task().map(TaskId::get)
         } else {
@@ -967,10 +1025,7 @@ impl Service {
             id: EntityId::random().as_str().into(),
             task_id,
             task_title,
-            duration_seconds,
-            remaining_seconds: duration_seconds,
-            observed_at: self.now,
-            awaiting_review: false,
+            timing,
         });
         Ok(())
     }
@@ -989,24 +1044,10 @@ impl Service {
         let task_id = reservation
             .task_id
             .filter(|id| self.tasks.get(TaskId::new(*id)).is_ok());
-        if !matches!(self.timer.current_session(), CurrentSession::Pending(_)) {
-            if matches!(self.timer.current_session(), CurrentSession::Running(session) if session.kind() == DomainKind::Focus)
-                || matches!(self.timer.current_session(), CurrentSession::Paused(session) if session.kind() == DomainKind::Focus)
-            {
-                return Err("Cannot replace a Focus Session with a reservation".into());
-            }
-            let planned = self.timer.planned_seconds();
-            let transition = self.timer.stop(self.now);
-            self.apply_transition(transition, planned)?;
-        }
-        let mut state = self.timer.state();
-        state.session = SessionState::Pending {
-            kind: DomainKind::Focus,
-        };
-        state.current_task = task_id.map(TaskId::new);
-        self.timer = Timer::restore(state).map_err(|error| error.to_string())?;
         let planned = self.timer.planned_seconds();
-        let transition = self.timer.start(self.now, task_id.map(TaskId::new));
+        let transition = self
+            .timer
+            .start_reserved_focus(self.now, task_id.map(TaskId::new));
         self.apply_transition(transition, planned)?;
         self.reservation = None;
         self.apply_deferred_task_deletions()
@@ -1206,14 +1247,14 @@ impl Service {
             reservation: self.reservation.as_ref().map(|reservation| {
                 pomotui_protocol::ReservationSummary {
                     id: reservation.id.clone(),
-                    state: if reservation.awaiting_review {
+                    state: if reservation.timing.is_awaiting_review() {
                         pomotui_protocol::ReservationStatus::AwaitingReview
                     } else {
                         pomotui_protocol::ReservationStatus::Countdown
                     },
                     task_id: reservation.task_id,
                     task_title: reservation.task_title.clone(),
-                    duration_seconds: reservation.duration_seconds,
+                    duration_seconds: reservation.timing.duration_seconds(),
                     remaining_seconds: reservation.remaining(self.now),
                 }
             }),
@@ -1432,12 +1473,8 @@ impl Service {
         self.now = now;
         self.wall = wall;
         if let Some(reservation) = &mut self.reservation
-            && !reservation.awaiting_review
-            && reservation.remaining(self.now) == 0
+            && reservation.timing.advance(self.now)
         {
-            reservation.awaiting_review = true;
-            reservation.remaining_seconds = 0;
-            reservation.observed_at = self.now;
             let reminder_key = format!("reservation-{}", reservation.id);
             let effects = if self.reminders_enabled {
                 vec![ReminderEffectKind::Notification]
@@ -3185,7 +3222,7 @@ impl Service {
             if let Some(id) = effect.session_key.strip_prefix("reservation-")
                 && (!self.reminders_enabled
                     || !self.reservation.as_ref().is_some_and(|reservation| {
-                        reservation.id == id && reservation.awaiting_review
+                        reservation.id == id && reservation.timing.is_awaiting_review()
                     }))
             {
                 let discarded = self
@@ -3378,7 +3415,7 @@ impl Handler for Service {
                 if kind == SessionKind::Focus
                     && let Some(reservation) = &self.reservation
                 {
-                    if reservation.awaiting_review {
+                    if reservation.timing.is_awaiting_review() {
                         return Self::rejected(
                             "Reservation Review must be resolved before starting another Focus Session",
                         );
@@ -4100,7 +4137,7 @@ struct PersistedService {
     #[serde(default)]
     pending_review: Option<PendingReviewState>,
     #[serde(default)]
-    reservation: Option<ReservationState>,
+    reservation: Option<PersistedReservation>,
     #[serde(default = "pomotui_protocol::default_reservation_minutes")]
     reservation_minutes: u64,
     #[serde(default)]
@@ -4277,11 +4314,10 @@ impl PersistedService {
             current_chain_length: service.current_chain_length,
             pending_review: service.pending_review.clone(),
             reservation_minutes: service.reservation_minutes,
-            reservation: service.reservation.clone().map(|mut reservation| {
-                reservation.remaining_seconds = reservation.remaining(service.now);
-                reservation.observed_at = service.now;
-                reservation
-            }),
+            reservation: service
+                .reservation
+                .as_ref()
+                .map(|reservation| PersistedReservation::capture(reservation, service.now)),
             chain_links: service.chain_links.clone(),
             next_chain_entry_id: service.next_chain_entry_id,
             void_task_id: service.void_task_id,
@@ -4376,13 +4412,27 @@ impl PersistedService {
             },
         };
         validate_reservation_minutes(persisted.reservation_minutes)?;
-        let reservation = persisted.reservation.map(|mut reservation| {
-            reservation.remaining_seconds = reservation
-                .remaining_seconds
-                .saturating_sub(recovery_elapsed);
-            reservation.observed_at = current_observation.monotonic_seconds;
-            reservation
-        });
+        let reservation = persisted
+            .reservation
+            .map(|reservation| {
+                reservation.restore(recovery_elapsed, current_observation.monotonic_seconds)
+            })
+            .transpose()?;
+        if reservation.is_some()
+            && (persisted.pending_review.is_some()
+                || matches!(
+                    session,
+                    SessionState::Running {
+                        kind: DomainKind::Focus,
+                        ..
+                    } | SessionState::Paused {
+                        kind: DomainKind::Focus,
+                        ..
+                    }
+                ))
+        {
+            return Err("invalid reservation alongside a Focus Session or Pending Review".into());
+        }
         let timer = Timer::restore(TimerState {
             session,
             current_task: persisted.timer.current_task.map(TaskId::new),

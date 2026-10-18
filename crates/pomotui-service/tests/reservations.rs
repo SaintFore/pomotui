@@ -697,3 +697,116 @@ fn reservation_failure_identity_rewards_archive_and_fresh_start_converge_across_
     drop((a, b));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn recovery_rejects_reservations_that_cannot_be_created_or_validly_advanced() {
+    use pomotui_platform::SqliteRepository;
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-reservation-validation-{}",
+        pomotui_sync::RecordId::random()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("state.sqlite3");
+    let mut service = Service::open(&path).unwrap();
+    snapshot(send(
+        &mut service,
+        "reserve",
+        Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        },
+    ));
+    drop(service);
+    let mut repository = SqliteRepository::open(&path).unwrap();
+    let valid: serde_json::Value =
+        serde_json::from_str(&repository.current_session_payload().unwrap().unwrap()).unwrap();
+    let invalid_fields = [
+        ("duration_seconds", serde_json::json!(0)),
+        ("duration_seconds", serde_json::json!(59)),
+        ("remaining_seconds", serde_json::json!(601)),
+        ("awaiting_review", serde_json::json!(true)),
+        ("id", serde_json::json!("not-an-identity")),
+        ("task_id", serde_json::json!(123)),
+        ("task_title", serde_json::json!("No matching task identity")),
+    ];
+    for (field, value) in invalid_fields {
+        let mut invalid = valid.clone();
+        invalid["reservation"][field] = value;
+        repository.save_state(&invalid.to_string()).unwrap();
+        assert!(
+            Service::open(&path).is_err(),
+            "invalid reservation {field} was accepted"
+        );
+    }
+    let mut invalid = valid.clone();
+    invalid["pending_review"] = serde_json::json!({ "session_id": 999, "actual_seconds": 0, "task_id": null, "task_title": null });
+    repository.save_state(&invalid.to_string()).unwrap();
+    assert!(
+        Service::open(&path).is_err(),
+        "reservation cannot coexist with Pending Review"
+    );
+    let mut invalid = valid;
+    invalid["timer"]["session"] = serde_json::json!({ "state": "running", "kind": "focus", "planned_seconds": 1500, "accumulated_seconds": 0, "started_at": 0, "task_id": null });
+    repository.save_state(&invalid.to_string()).unwrap();
+    assert!(
+        Service::open(&path).is_err(),
+        "reservation cannot coexist with running Focus"
+    );
+    drop(repository);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recovered_pending_judgment_with_a_deleted_task_remains_valid() {
+    use pomotui_platform::SqliteRepository;
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-reservation-recovery-valid-{}",
+        pomotui_sync::RecordId::random()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("state.sqlite3");
+    let mut service = Service::open(&path).unwrap();
+    send(
+        &mut service,
+        "task",
+        Command::TaskCreate {
+            title: "Captured deleted task".into(),
+        },
+    );
+    let issued = snapshot(send(
+        &mut service,
+        "reserve",
+        Command::Reserve {
+            minutes: None,
+            task_id: Some(1),
+            use_current_task: false,
+        },
+    ))
+    .reservation
+    .unwrap();
+    send(&mut service, "delete", Command::TaskDelete { id: 1 });
+    drop(service);
+    let mut repository = SqliteRepository::open(&path).unwrap();
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&repository.current_session_payload().unwrap().unwrap()).unwrap();
+    saved["reservation"]["remaining_seconds"] = serde_json::json!(0);
+    saved["reservation"]["awaiting_review"] = serde_json::json!(true);
+    repository.save_state(&saved.to_string()).unwrap();
+    let mut service = Service::open(&path).unwrap();
+    let status = snapshot(send(&mut service, "status", Command::Status));
+    assert_eq!(
+        status.reservation.unwrap().state,
+        pomotui_protocol::ReservationStatus::AwaitingReview
+    );
+    let started = snapshot(send(
+        &mut service,
+        "success",
+        Command::ReservationSuccess { id: issued.id },
+    ));
+    assert_eq!(started.state, "running");
+    assert_eq!(started.current_task_id, None);
+    drop(service);
+    drop(repository);
+    std::fs::remove_dir_all(root).unwrap();
+}
