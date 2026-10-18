@@ -17,7 +17,7 @@ mkdir -p /previous/package /previous/artifacts
 cp packaging/aur/PKGBUILD packaging/aur/pomotui.install /previous/package/
 tar --exclude=target --exclude=.git --transform="s,^,pomotui-$version/," -czf "/previous/package/pomotui-$version.tar.gz" .
 cd /previous/package
-sed -i "s|^source=.*|source=(\"pomotui-$version.tar.gz\")|; s/^sha256sums=.*/sha256sums=('SKIP')/" PKGBUILD
+sed -i "s/^pkgver=.*/pkgver=$version/; s|^source=.*|source=(\"pomotui-$version.tar.gz\")|; s/^sha256sums=.*/sha256sums=('SKIP')/" PKGBUILD
 makepkg --noconfirm --nocheck
 cp pomotui-*.pkg.tar.zst /previous/artifacts/
 BUILD
