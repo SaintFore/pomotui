@@ -135,10 +135,11 @@ terminals. Its primary controls are:
 | `h`/`l`, `←`/`→`                   | Switch Dashboard, Chain, Chain Archive, Today, Review, and History                              |
 | `Enter`                            | Start Focus with the selected Task                                                              |
 | `Space`                            | Start, pause, or resume the Current Session                                                     |
+| `a` / `b`                          | Reserve Focus (or review/cancel an existing reservation) / begin reserved Focus now              |
 | `X` / `K`                          | Choose how to stop / skip the Current Session                                                   |
 | `S` / `Enter` in Pending Review    | Review as successful, using the existing or selected Task (`Void` asks for a Chain Entry Title) |
 | `F` in Pending Review              | Review as failed                                                                                |
-| `p`                                | Reopen the Pending Review dialog                                                                |
+| `p`                                | Reopen Session Review or Reservation Review                                                                |
 | `j` / `k` on Chain                 | Select a Chain Link                                                                             |
 | `E` on Chain                       | Edit the selected Chain Link's Reflection                                                       |
 | `T` on Chain or open Chain Archive | Edit the selected Chain Entry's display title                                                   |
@@ -370,6 +371,31 @@ Poll `sync status` until `in_progress` is `false`, `last_success` is set, and
 Pomotui could count records; it does not mean the current format version is
 unknown. Resume file replication only after the rebuilt file validates, then
 use `sync now`—not `sync rebuild`—on the other upgraded computers.
+
+## Reserve a Focus Session
+
+Press `a` in the TUI while Pending. `Enter` reserves the Current Task; `j/k`
+chooses another Task and `0` reserves without a Task. The default window is ten
+minutes. In Settings (`s`), press `a` to edit and save the default, or set
+`reservation_minutes = 10` at the root of `config.toml`.
+
+Press `b` to begin reserved Focus now. On expiry, use `S` for success or `F` to
+enter a Reflection and then `Y` to confirm failure. `Esc` postpones judgment and
+`p` reopens it; rest remains available. Cancellation uses the same judgment.
+Success starts Focus from now and ends any ongoing rest; failure ends the Action
+Chain and expires unclaimed rewards. Success itself earns no link or reward.
+
+```sh
+pomotui reserve                       # current Task, configured default
+pomotui reserve --minutes 15 --no-task
+pomotui reservation status --json     # obtain the reservation ID
+pomotui reservation success ID
+pomotui reservation failure ID "Unexpected errand" --confirm
+pomotui reservation minutes 12        # persist default for future reservations
+```
+
+The service retains reservations and expiry reminders when frontends close or
+the service restarts. See the [user guide](docs/user-guide.md) for details.
 
 ## Configuration and data
 

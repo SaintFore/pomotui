@@ -364,8 +364,8 @@ reward. Breaks preserve debt and repayment; actual chain length remains factual.
 successes. Editing or deleting a milestone does not forgive its obligation.
 
 New claims retain immutable support and observed-review identities in the same
-portable activity file. Format 7 accepts formats 4, 5 and 6 without changing old
-Record IDs; persisted format 4 accepts the supported unversioned, format 2, and format 3
+portable activity file. Format 8 accepts formats 4, 5, 6 and 7 without changing old
+Record IDs; persisted format 6 accepts the supported unversioned and formats 2 through 5
 states. Upgrade all Devices before synchronizing: older software rejects the new
 format. Legacy claims without observed support remain claimed and accrue no
 inferred debt. Missing evidence cannot be reconstructed from a claim timestamp.
@@ -376,7 +376,7 @@ Run `pomotui fresh-start --confirm` while the Timer Service is running to begin 
 
 The beginning is committed locally even while the exchange path is inaccessible. Sync status reports that it awaits synchronization. Once published, another device adopts the beginning and clears its retired business state atomically; its sync status keeps a notice that Fresh Start arrived from another device. Old files, conflict copies, delayed offline work and restored old databases cannot bring retired work back after the winning beginning is observed. Concurrent Fresh Starts select the same winner deterministically; work made under a losing beginning is retired too.
 
-The exchange document retains the beginning even with no records. Format 7 verifies both that metadata and immutable record membership. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
+The exchange document retains the beginning even with no records. Format 8 verifies both that metadata and immutable record membership, and preserves format 7 beginnings. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
 
 `pomotui reset --all-data --confirm` retains its existing local database backup/removal behavior and stopped-service requirement.
 
@@ -427,3 +427,37 @@ completion sound. The committed `awaiting_review` state survives delivery failur
 and service restarts. Notifications use the existing bounded retry mechanism;
 successful delivery is not repeated after restart. Resolving a reservation cancels
 any remaining expiry retry, and Fresh Start clears outstanding reminders.
+
+
+### Reservation judgment and the TUI
+
+In the TUI press `a` from any Pending Session: `Enter` reserves the Current Task,
+`j/k` chooses another Task, and `0` reserves without a Task. Running, Paused,
+existing reservations and Pending Reviews block new reservations. Press `b`
+during countdown to begin reserved Focus immediately, even if a break was next
+or is currently running. Space retains its ordinary rest controls; when the
+Pending Session is Focus, Space also starts the reserved target.
+
+Expiry opens Reservation Review. `S` succeeds and immediately starts Focus,
+ending an ongoing or paused break; no earlier time is credited. `F` asks for a
+required Reflection and then shows the chain length and unclaimed rewards that
+will be lost. Press `Y` to confirm failure; Enter does not confirm this
+destructive decision. `Esc` postpones judgment, and `p` or `a` reopens it. Rest
+remains available while Focus and new reservations are blocked. An expiry prompt
+waits until an existing text editor closes so typed text cannot become a judgment.
+Cancelling a reservation uses this same review; closing its dialog never cancels
+the commitment.
+
+For CLI failure, use
+`pomotui reservation failure ID "Reason" --confirm`. Failure ends
+the Action Chain, expires its unlocked but unclaimed rewards, and preserves
+claimed rewards and existing Reward Debt. Its archive entry identifies a
+Reservation Review and has no Focus Session or duration. The failure synchronizes
+with Shared Activity; the live reservation remains local and another Device's
+start cannot fulfill it. Repeated judgments cannot apply to a new reservation.
+
+In Settings (`s`), press `a`, edit the positive whole-minute default, and press
+Enter to save through the Timer Service. The service writes the root TOML setting
+and updates its default immediately; snapshots remain authoritative and failures
+are reported. Changes apply only to later reservations, and Fresh Start preserves
+the configured default while clearing outstanding reservations and judgments.
