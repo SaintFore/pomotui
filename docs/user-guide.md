@@ -440,7 +440,7 @@ Pending Session is Focus, Space also starts the reserved target.
 
 Expiry opens Reservation Review. `S` succeeds and immediately starts Focus,
 ending an ongoing or paused break; no earlier time is credited. `F` asks for a
-required Reflection and then shows the chain length and unclaimed rewards that
+Reflection (optional; press Enter to leave it blank) and then shows the chain length and unclaimed rewards that
 will be lost. Press `Y` to confirm failure; Enter does not confirm this
 destructive decision. `Esc` postpones judgment, and `p` or `a` reopens it. Rest
 remains available while Focus and new reservations are blocked. An expiry prompt
@@ -449,7 +449,9 @@ Cancelling a reservation uses this same review; closing its dialog never cancels
 the commitment.
 
 For CLI failure, use
-`pomotui reservation failure ID "Reason" --confirm`. Failure ends
+`pomotui reservation failure ID --confirm`; optionally include a reason as
+`pomotui reservation failure ID "Reason" --confirm`. The cancellation alias
+`pomotui reservation cancel failure ID --confirm` uses the same judgment. Failure ends
 the Action Chain, expires its unlocked but unclaimed rewards, and preserves
 claimed rewards and existing Reward Debt. Its archive entry identifies a
 Reservation Review and has no Focus Session or duration. The failure synchronizes

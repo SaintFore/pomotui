@@ -1079,9 +1079,6 @@ impl Service {
             ));
         }
         let reflection = reflection.trim();
-        if reflection.is_empty() {
-            return Err("Failed Reservation Review requires a Reflection".into());
-        }
         let reservation = self
             .reservation
             .as_ref()
@@ -1114,28 +1111,17 @@ impl Service {
         ));
         self.sync.records.sort();
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
-        self.ended_chains.push(EndedChainState {
-            id: self.current_chain_id,
-            links: std::mem::take(&mut self.chain_links),
-            chain_break: ChainBreakState {
-                id: entry_id,
-                source: ChainBreakSource::ReservationReview,
-                reservation_entity_id: Some(reservation_entity_id),
-                session_id: None,
-                task_id: reservation.task_id,
-                task_title: reservation.task_title,
-                actual_seconds: None,
-                reflection: reflection.into(),
-                chain_entry_title: None,
-            },
+        self.end_current_chain(ChainBreakState {
+            id: entry_id,
+            source: ChainBreakSource::ReservationReview,
+            reservation_entity_id: Some(reservation_entity_id),
+            session_id: None,
+            task_id: reservation.task_id,
+            task_title: reservation.task_title,
+            actual_seconds: None,
+            reflection: reflection.into(),
+            chain_entry_title: None,
         });
-        for unlock in &mut self.reward_unlocks {
-            if unlock.chain_id == self.current_chain_id && unlock.state == "unlocked" {
-                unlock.state = "unavailable".into();
-            }
-        }
-        self.current_chain_id = self.current_chain_id.saturating_add(1);
-        self.current_chain_length = 0;
         self.reservation = None;
         Ok(())
     }
@@ -2008,6 +1994,11 @@ impl Service {
             chain_entry_title: chain_entry_title.clone(),
         })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+        self.end_current_chain(chain_break);
+        Ok(())
+    }
+
+    fn end_current_chain(&mut self, chain_break: ChainBreakState) {
         self.ended_chains.push(EndedChainState {
             id: self.current_chain_id,
             links: std::mem::take(&mut self.chain_links),
@@ -2020,7 +2011,6 @@ impl Service {
         }
         self.current_chain_id = self.current_chain_id.saturating_add(1);
         self.current_chain_length = 0;
-        Ok(())
     }
 
     fn edit_chain_entry(

@@ -37,6 +37,7 @@ pub enum Command {
     },
     ReservationFailure {
         id: String,
+        /// Optional user explanation; empty means none, preserving the wire shape.
         reflection: String,
         confirmed: bool,
     },

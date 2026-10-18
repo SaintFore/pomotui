@@ -1274,12 +1274,9 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn submit_text_entry(&mut self) -> Option<Action> {
         let title = self.input.trim().to_owned();
-        if title.is_empty() {
+        if title.is_empty() && self.overlay != Overlay::ReservationFailureReflection {
             self.message = Some(
                 match self.overlay {
-                    Overlay::ReservationFailureReflection => {
-                        text(self.language, "Reflection is required", "请填写复盘")
-                    }
                     Overlay::ReservationMinutes => text(
                         self.language,
                         "Enter positive whole minutes",
@@ -2303,7 +2300,11 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
             lines.push(Line::from(format!(
                 "    {}: {}",
                 text(language, "Reflection", "复盘"),
-                chain.break_reflection
+                if chain.break_reflection.is_empty() {
+                    "—"
+                } else {
+                    &chain.break_reflection
+                }
             )));
         }
     }
@@ -4290,7 +4291,7 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
         ),
         Overlay::ReservationFailureReflection => (
             text(app.language, "RESERVATION FAILURE", "预约失败"),
-            text(app.language, "Reflection (required)", "复盘（必填）"),
+            text(app.language, "Reflection (optional)", "复盘（选填）"),
         ),
         Overlay::CreateTask => (
             text(app.language, "CREATE TASK", "新建任务"),
@@ -4881,36 +4882,36 @@ mod tests {
     }
 
     #[test]
-    fn reservation_cancellation_requires_reflection_and_explicit_failure_confirmation() {
-        let mut app = App::new(
-            Some(reserved_snapshot("pending", SessionKind::Focus, false)),
-            Theme::RanPaperDark,
-        );
-        app.key('a');
-        assert_eq!(app.overlay, Overlay::ReservationReview);
-        app.key('f');
-        assert_eq!(app.key('\n'), None);
-        assert_eq!(app.overlay, Overlay::ReservationFailureReflection);
-        for character in "Unexpected errand".chars() {
-            app.key(character);
+    fn reservation_cancellation_allows_empty_reflection_but_requires_explicit_confirmation() {
+        for reflection in ["", "Unexpected errand"] {
+            let mut app = App::new(
+                Some(reserved_snapshot("pending", SessionKind::Focus, false)),
+                Theme::RanPaperDark,
+            );
+            app.key('a');
+            assert_eq!(app.overlay, Overlay::ReservationReview);
+            app.key('f');
+            for character in reflection.chars() {
+                app.key(character);
+            }
+            assert_eq!(app.key('\n'), None);
+            assert_eq!(app.overlay, Overlay::ConfirmReservationFailure);
+            assert_eq!(
+                app.key('\n'),
+                None,
+                "Enter used to submit text must never confirm failure"
+            );
+            assert_eq!(
+                app.key('y'),
+                Some(Action::Command(
+                    pomotui_protocol::Command::ReservationFailure {
+                        id: "reservation-a".into(),
+                        reflection: reflection.into(),
+                        confirmed: true,
+                    }
+                ))
+            );
         }
-        app.key('\n');
-        assert_eq!(app.overlay, Overlay::ConfirmReservationFailure);
-        assert_eq!(
-            app.key('\n'),
-            None,
-            "Enter used to submit text must never confirm failure"
-        );
-        assert_eq!(
-            app.key('y'),
-            Some(Action::Command(
-                pomotui_protocol::Command::ReservationFailure {
-                    id: "reservation-a".into(),
-                    reflection: "Unexpected errand".into(),
-                    confirmed: true,
-                }
-            ))
-        );
     }
 
     #[test]

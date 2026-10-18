@@ -202,6 +202,7 @@ pub enum RecordPayload {
         decided_at: i64,
         task_entity_id: Option<EntityId>,
         task_title: Option<String>,
+        /// Optional user explanation; empty means none in document version 8.
         reflection: String,
     },
     ChainEntryVersion {
@@ -906,7 +907,9 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                         } => Some((reflection.clone(), chain_entry_title.clone())),
                         _ => None,
                     })
-                    .unwrap_or_else(|| (Some(reflection.clone()), None));
+                    .unwrap_or_else(|| {
+                        ((!reflection.is_empty()).then(|| reflection.clone()), None)
+                    });
                 Some((
                     *decided_at,
                     record.entity_id.clone(),
@@ -1191,14 +1194,10 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                 decided_at,
                 task_entity_id,
                 task_title,
-                reflection,
                 ..
             } => {
                 chrono::DateTime::from_timestamp(*decided_at, 0)
                     .ok_or("invalid reservation judgment timestamp")?;
-                if reflection.trim().is_empty() {
-                    return Err("failed Reservation Review requires a Reflection".into());
-                }
                 if task_entity_id.is_some() && task_title.is_none() {
                     return Err("reservation Task identity requires a title".into());
                 }

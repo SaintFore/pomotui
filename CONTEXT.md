@@ -69,7 +69,7 @@ An Action Chain that is no longer current because the user submitted a failed Se
 _Avoid_: Deleted chain, failed Task
 
 **Chain Break**:
-The non-counting terminal record appended after a failed Session Review or Reservation Review. A Session Review break retains its Focus Session's Current Task identity, title snapshot and exact actual duration; reviewing the Void Task also requires a Chain Entry Title. A Reservation Review break identifies its reservation and has no Session or actual focus duration. Both retain a required Reflection, support a Chain Entry Title, and never increase chain length.
+The non-counting terminal record appended after a failed Session Review or Reservation Review. A Session Review break retains its Focus Session's Current Task identity, title snapshot and exact actual duration; reviewing the Void Task also requires a Chain Entry Title. A Reservation Review break identifies its reservation and has no Session or actual focus duration. Session Review breaks require a Reflection; Reservation Review breaks permit an optional Reflection. Both support a Chain Entry Title and never increase chain length.
 _Avoid_: Failed Chain Link, deleted Session, automatic failure
 
 **Chain Entry Title**:
@@ -77,7 +77,7 @@ The user-controlled display title of a Chain Link or Chain Break. It initially f
 _Avoid_: Task title, comment, Action Node title
 
 **Reflection**:
-User-authored text attached during or after Session Review or Reservation Review to describe progress, interruption, failure context, or a useful next step. It is optional for a successful review and required before a failed review can be submitted. It may be revised later without changing the immutable Session Review result. It is labelled `复盘` in Simplified Chinese and `Reflection` in English.
+User-authored text attached during or after Session Review or Reservation Review to describe progress, interruption, failure context, or a useful next step. It is optional for Reservation Review and successful Session Review, and required before a failed Session Review can be submitted. It may be revised later without changing the immutable Session Review result. It is labelled `复盘` in Simplified Chinese and `Reflection` in English.
 _Avoid_: Comment, Task description, Session Outcome
 
 **Reward Milestone**:
@@ -149,5 +149,5 @@ The user's per-Device commitment to begin a Focus Session within a chosen time w
 _Avoid_: Pending Session, scheduled automatic start, reservation chain
 
 **Reservation Review**:
-The user's explicit judgment of whether a Focus Reservation was fulfilled by starting on time, including when the user forgot to record the start. Success preserves the Action Chain without adding a Chain Link or reward progress; failure ends it with the existing consequences for unclaimed and claimed rewards, while expiry alone makes no failure judgment. Starting early fulfills the reservation; confirming success begins Focus at confirmation time without backdating and ends an ongoing Break Session. A pending judgment is durable and allows rest but blocks new Focus and reservations. Cancellation requires the same judgment, and failure requires a Reflection and explicit confirmation. Reservation state remains local; failed judgments join Shared Activity.
+The user's explicit judgment of whether a Focus Reservation was fulfilled by starting on time, including when the user forgot to record the start. Success preserves the Action Chain without adding a Chain Link or reward progress; failure ends it with the existing consequences for unclaimed and claimed rewards, while expiry alone makes no failure judgment. Starting early fulfills the reservation; confirming success begins Focus at confirmation time without backdating and ends an ongoing Break Session. A pending judgment is durable and allows rest but blocks new Focus and reservations. Cancellation requires the same judgment, and failure requires explicit confirmation and permits an optional Reflection. Reservation state remains local; failed judgments join Shared Activity.
 _Avoid_: Session Review, automatic failure, successful focus
