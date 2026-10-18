@@ -120,6 +120,13 @@ class CandidateTest(unittest.TestCase):
         result = self.cli('verify', '--output', str(self.output), ok=False)
         self.assertIn('source identity mismatch', result.stderr)
 
+    def test_changed_source_checksum_blocks_the_normal_build_entrypoint(self):
+        self.plan()
+        archive = self.output / 'pomotui-0.3.0-source.tar.gz'
+        archive.write_bytes(archive.read_bytes() + b'changed source bytes')
+        result = self.cli('build', '--output', str(self.output), ok=False)
+        self.assertIn('source identity mismatch: archive/checksum', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
