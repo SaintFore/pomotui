@@ -54,6 +54,13 @@ grep -q 'XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/
 POMOTUI_TEST_SOCKET_EXIT=1 post_upgrade 2> "$test_root/disabled.err"
 ! grep -q 'restart\|reset-failed\|enable --now' "$test_root/calls"
 test ! -s "$test_root/disabled.err"
+# Replacing stable with Git is a pacman post_install, with existing user intent.
+: > "$test_root/calls"
+SUDO_USER=tester POMOTUI_TEST_SOCKET_EXIT=1 post_install > "$test_root/replacement-disabled.out" 2> "$test_root/replacement-disabled.err"
+! grep -q 'restart\|reset-failed\|enable --now' "$test_root/calls"
+: > "$test_root/calls"
+post_install > "$test_root/replacement-enabled.out" 2> "$test_root/replacement-enabled.err"
+grep -q 'restart pomotui.service' "$test_root/calls"
 # User-unit conflict is precise and leaves recovery untouched.
 : > "$test_root/calls"
 POMOTUI_TEST_FRAGMENT=/home/tester/.config/systemd/user/pomotui.service post_upgrade 2> "$test_root/conflict.err"

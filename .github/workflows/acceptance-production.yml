@@ -1,0 +1,36 @@
+name: Nonpublishing production adapter proof
+on:
+  push:
+    branches: [implement/spec19-ticket24]
+permissions:
+  contents: read
+jobs:
+  adapter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Public interface regression checks
+        run: |
+          python3 -m unittest discover -s tests/release -p '*_test.py'
+          sh packaging/tests/aur-install.sh
+      - name: Build nonpublishing real stable and Git candidate
+        run: |
+          tests/release/stable-candidate-fixture.sh "$RUNNER_TEMP/candidate"
+          python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+      - name: Exercise actual candidate packages through full real upgrade gate
+        run: tests/release/verify-candidate.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/acceptance"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-adapter-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/acceptance/**/*.log
+            ${{ runner.temp }}/acceptance/**/*.txt
+            ${{ runner.temp }}/acceptance/**/*.json
+            ${{ runner.temp }}/acceptance/**/*.sha256
+            ${{ runner.temp }}/candidate/candidate.json
+            ${{ runner.temp }}/candidate/build.log
+          include-hidden-files: true
