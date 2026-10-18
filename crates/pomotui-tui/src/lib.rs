@@ -84,6 +84,11 @@ pub enum View {
 pub enum Overlay {
     None,
     PendingReview,
+    CreateReservation,
+    ReservationReview,
+    ReservationFailureReflection,
+    ConfirmReservationFailure,
+    ReservationMinutes,
     Palette,
     Settings,
     Help,
@@ -137,6 +142,13 @@ pub enum Action {
     Quit,
 }
 
+#[derive(Clone, Copy, Default)]
+enum ReservationTaskChoice {
+    #[default]
+    Current,
+    Selected,
+}
+
 pub struct App {
     pub snapshot: Option<Snapshot>,
     pub theme: Theme,
@@ -170,6 +182,9 @@ pub struct App {
     pending_failure_void_title: Option<String>,
     last_prompted_review_id: Option<u64>,
     completion: Option<CompletionPlayback>,
+    reservation_task_choice: ReservationTaskChoice,
+    reservation_review_id: Option<String>,
+    last_prompted_reservation_id: Option<String>,
 }
 
 struct CompletionPlayback {
@@ -189,7 +204,7 @@ impl App {
         } else {
             Overlay::None
         };
-        Self {
+        let mut app = Self {
             snapshot,
             theme,
             language: Language::English,
@@ -231,7 +246,12 @@ impl App {
             pending_failure_void_title: None,
             last_prompted_review_id,
             completion: None,
-        }
+            reservation_task_choice: ReservationTaskChoice::Current,
+            reservation_review_id: None,
+            last_prompted_reservation_id: None,
+        };
+        app.prompt_reservation();
+        app
     }
 
     pub fn replace_snapshot(&mut self, snapshot: Option<Snapshot>) {
@@ -246,6 +266,7 @@ impl App {
             self.overlay = Overlay::None;
         }
         self.snapshot = snapshot;
+        self.prompt_reservation();
         let link_count = self
             .snapshot
             .as_ref()
@@ -269,6 +290,72 @@ impl App {
             .as_ref()
             .map_or(0, |snapshot| snapshot.reward_milestones.len());
         self.reward_cursor = self.reward_cursor.min(reward_count.saturating_sub(1));
+    }
+
+    fn prompt_reservation(&mut self) {
+        let reservation = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.reservation.as_ref());
+        let current_id = reservation.map(|reservation| reservation.id.clone());
+        if self.reservation_review_id.is_some() && self.reservation_review_id != current_id {
+            if matches!(
+                self.overlay,
+                Overlay::ReservationReview
+                    | Overlay::ReservationFailureReflection
+                    | Overlay::ConfirmReservationFailure
+            ) {
+                self.overlay = Overlay::None;
+                self.input.clear();
+                self.input_cursor = 0;
+            }
+            self.reservation_review_id = None;
+            self.pending_failure_reflection = None;
+        }
+        if self.overlay == Overlay::None
+            && reservation.is_some_and(|reservation| {
+                reservation.state == pomotui_protocol::ReservationStatus::AwaitingReview
+                    && self.last_prompted_reservation_id.as_ref() != Some(&reservation.id)
+            })
+        {
+            self.open_reservation_review();
+        }
+    }
+
+    fn open_reservation_review(&mut self) {
+        if let Some(reservation) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.reservation.as_ref())
+        {
+            self.reservation_review_id = Some(reservation.id.clone());
+            self.last_prompted_reservation_id = Some(reservation.id.clone());
+            self.overlay = Overlay::ReservationReview;
+        }
+    }
+
+    fn begin_reservation(&mut self) {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.reservation.is_some())
+        {
+            self.open_reservation_review();
+        } else if self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.state == "pending" && snapshot.pending_review.is_none()
+        }) {
+            self.reservation_task_choice = ReservationTaskChoice::Current;
+            self.overlay = Overlay::CreateReservation;
+        } else {
+            self.message = Some(
+                text(
+                    self.language,
+                    "Reserve from Pending after resolving any review",
+                    "请在待开始且已完成判断时预约",
+                )
+                .into(),
+            );
+        }
     }
 
     pub fn key(&mut self, key: char) -> Option<Action> {
@@ -479,6 +566,27 @@ impl App {
             {
                 self.overlay = Overlay::PendingReview;
             }
+            InputKey::Char('a') => self.begin_reservation(),
+            InputKey::Char('p')
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.reservation.is_some()) =>
+            {
+                self.open_reservation_review();
+            }
+            InputKey::Char('b')
+                if self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.reservation.as_ref())
+                    .is_some_and(|reservation| {
+                        reservation.state == pomotui_protocol::ReservationStatus::Countdown
+                    }) =>
+            {
+                let id = self.snapshot.as_ref()?.reservation.as_ref()?.id.clone();
+                return Some(self.emit(pomotui_protocol::Command::ReservationSuccess { id }));
+            }
             InputKey::Char('s') => self.overlay = Overlay::Settings,
             InputKey::Char('n') if self.view == View::Rewards => {
                 self.begin_text_entry(Overlay::CreateReward);
@@ -635,9 +743,84 @@ impl App {
                 }
                 _ => None,
             },
+            Overlay::CreateReservation => match key {
+                InputKey::Char('j') | InputKey::Down => {
+                    if matches!(
+                        self.reservation_task_choice,
+                        ReservationTaskChoice::Selected
+                    ) {
+                        self.move_task(true);
+                    }
+                    self.reservation_task_choice = ReservationTaskChoice::Selected;
+                    None
+                }
+                InputKey::Char('k') | InputKey::Up => {
+                    self.move_task(false);
+                    self.reservation_task_choice = ReservationTaskChoice::Selected;
+                    None
+                }
+                InputKey::Enter => Some(
+                    self.emit(pomotui_protocol::Command::Reserve {
+                        minutes: None,
+                        task_id: matches!(
+                            self.reservation_task_choice,
+                            ReservationTaskChoice::Selected
+                        )
+                        .then(|| self.selected_task().map(|task| task.id))
+                        .flatten(),
+                        use_current_task: matches!(
+                            self.reservation_task_choice,
+                            ReservationTaskChoice::Current
+                        ),
+                    }),
+                ),
+                InputKey::Char('0') => Some(self.emit(pomotui_protocol::Command::Reserve {
+                    minutes: None,
+                    task_id: None,
+                    use_current_task: false,
+                })),
+                _ => None,
+            },
+            Overlay::ReservationReview => match key {
+                InputKey::Char('s' | 'S') => {
+                    let id = self.reservation_review_id.clone()?;
+                    Some(self.emit(pomotui_protocol::Command::ReservationSuccess { id }))
+                }
+                InputKey::Char('f' | 'F') => {
+                    self.begin_text_entry(Overlay::ReservationFailureReflection);
+                    None
+                }
+                _ => None,
+            },
+            Overlay::ConfirmReservationFailure => match key {
+                InputKey::Char('y' | 'Y') => {
+                    let id = self.reservation_review_id.clone()?;
+                    let reflection = self.pending_failure_reflection.take()?;
+                    Some(self.emit(pomotui_protocol::Command::ReservationFailure {
+                        id,
+                        reflection,
+                        confirmed: true,
+                    }))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::ReservationReview;
+                    self.pending_failure_reflection = None;
+                    None
+                }
+                _ => None,
+            },
             Overlay::Settings => {
                 if matches!(key, InputKey::Char('t') | InputKey::Left | InputKey::Right) {
                     self.theme = self.theme.next();
+                }
+                if key == InputKey::Char('a') {
+                    self.begin_text_entry(Overlay::ReservationMinutes);
+                    self.input = self
+                        .snapshot
+                        .as_ref()
+                        .map_or(10, |snapshot| snapshot.reservation_minutes)
+                        .to_string();
+                    self.input_cursor = self.input.len();
                 }
                 if key == InputKey::Char('g') {
                     self.language = match self.language {
@@ -657,7 +840,9 @@ impl App {
             | Overlay::EditChainTitle
             | Overlay::CreateReward
             | Overlay::UpdateReward
-            | Overlay::ReviewFailureVoidTitle => match key {
+            | Overlay::ReviewFailureVoidTitle
+            | Overlay::ReservationFailureReflection
+            | Overlay::ReservationMinutes => match key {
                 InputKey::Char(value) if !value.is_control() => {
                     self.clamp_input_cursor();
                     self.input.insert(self.input_cursor, value);
@@ -1072,7 +1257,8 @@ impl App {
                     chain
                         .break_chain_entry_title
                         .clone()
-                        .unwrap_or_else(|| chain.break_task_title.clone()),
+                        .or_else(|| chain.break_task_title.clone())
+                        .unwrap_or_default(),
                 ),
                 _ => None,
             })
@@ -1085,20 +1271,60 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn submit_text_entry(&mut self) -> Option<Action> {
         let title = self.input.trim().to_owned();
-        if title.is_empty() {
+        if title.is_empty() && self.overlay != Overlay::ReservationFailureReflection {
             self.message = Some(
-                text(
-                    self.language,
-                    "Task title cannot be empty",
-                    "任务标题不能为空",
-                )
+                match self.overlay {
+                    Overlay::ReservationMinutes => text(
+                        self.language,
+                        "Enter positive whole minutes",
+                        "请输入正整数分钟",
+                    ),
+                    _ => text(
+                        self.language,
+                        "Task title cannot be empty",
+                        "任务标题不能为空",
+                    ),
+                }
                 .into(),
             );
             return None;
         }
         let command = match self.overlay {
+            Overlay::ReservationMinutes => {
+                let Ok(minutes) = title.parse::<u64>() else {
+                    self.message = Some(
+                        text(
+                            self.language,
+                            "Enter positive whole minutes",
+                            "请输入正整数分钟",
+                        )
+                        .into(),
+                    );
+                    return None;
+                };
+                if minutes == 0 || minutes.checked_mul(60).is_none() {
+                    self.message = Some(
+                        text(
+                            self.language,
+                            "Enter positive whole minutes",
+                            "请输入正整数分钟",
+                        )
+                        .into(),
+                    );
+                    return None;
+                }
+                pomotui_protocol::Command::ConfigureReservation { minutes }
+            }
+            Overlay::ReservationFailureReflection => {
+                self.pending_failure_reflection = Some(title);
+                self.input.clear();
+                self.input_cursor = 0;
+                self.overlay = Overlay::ConfirmReservationFailure;
+                return None;
+            }
             Overlay::CreateTask => pomotui_protocol::Command::TaskCreate { title },
             Overlay::RenameTask => {
                 let id = self.selected_task()?.id;
@@ -1222,6 +1448,18 @@ impl App {
     }
 
     fn toggle_session(&mut self) -> Option<Action> {
+        if let Some(snapshot) = &self.snapshot
+            && snapshot.state == "pending"
+            && snapshot.kind == SessionKind::Focus
+            && let Some(reservation) = &snapshot.reservation
+        {
+            if reservation.state == pomotui_protocol::ReservationStatus::AwaitingReview {
+                self.open_reservation_review();
+                return None;
+            }
+            let id = reservation.id.clone();
+            return Some(self.emit(pomotui_protocol::Command::ReservationSuccess { id }));
+        }
         let command = match self
             .snapshot
             .as_ref()
@@ -1261,6 +1499,11 @@ impl App {
 
     fn run_palette_item(&mut self) -> Option<Action> {
         match PALETTE_ITEMS[self.palette_index].command {
+            PaletteCommand::ReserveFocus => {
+                self.overlay = Overlay::None;
+                self.begin_reservation();
+                None
+            }
             PaletteCommand::Toggle => self.toggle_session(),
             PaletteCommand::Stop => {
                 self.overlay = Overlay::StopChoice;
@@ -1380,6 +1623,7 @@ enum PaletteCommand {
     History,
     Settings,
     Help,
+    ReserveFocus,
 }
 
 struct PaletteItem {
@@ -1388,7 +1632,7 @@ struct PaletteItem {
     command: PaletteCommand,
 }
 
-const PALETTE_ITEMS: [PaletteItem; 16] = [
+const PALETTE_ITEMS: [PaletteItem; 17] = [
     PaletteItem {
         label: "Start / pause / resume Current Session",
         hint: "Space",
@@ -1469,6 +1713,11 @@ const PALETTE_ITEMS: [PaletteItem; 16] = [
         hint: "?",
         command: PaletteCommand::Help,
     },
+    PaletteItem {
+        label: "Reserve Focus / review reservation",
+        hint: "a",
+        command: PaletteCommand::ReserveFocus,
+    },
 ];
 
 fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
@@ -1492,6 +1741,7 @@ fn palette_label(item: &PaletteItem, language: Language) -> &'static str {
         PaletteCommand::History => "打开时段历史",
         PaletteCommand::Settings => "打开设置",
         PaletteCommand::Help => "打开帮助",
+        PaletteCommand::ReserveFocus => "预约专注 / 判断预约",
     }
 }
 
@@ -1914,7 +2164,8 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                 let title = chain
                     .break_chain_entry_title
                     .as_deref()
-                    .unwrap_or(&chain.break_task_title);
+                    .or(chain.break_task_title.as_deref())
+                    .unwrap_or(text(language, "Reservation", "预约"));
                 let style = if index == app.archive_cursor {
                     Style::default()
                         .fg(colors.background)
@@ -1928,7 +2179,15 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                         "{marker} {} {} · {title} · {}",
                         text(language, "Length", "长度"),
                         chain.length,
-                        chain_duration(chain.break_actual_seconds)
+                        if chain.break_source
+                            == pomotui_protocol::ChainBreakSource::ReservationReview
+                        {
+                            text(language, "Reservation failure", "预约失败").into()
+                        } else {
+                            chain
+                                .break_actual_seconds
+                                .map_or_else(|| "—".into(), chain_duration)
+                        }
                     ),
                     style,
                 )));
@@ -2020,21 +2279,32 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
             let break_title = chain
                 .break_chain_entry_title
                 .as_deref()
-                .unwrap_or(&chain.break_task_title);
+                .or(chain.break_task_title.as_deref())
+                .unwrap_or(text(language, "Reservation", "预约"));
             lines.push(Line::from(Span::styled(
                 format!(
                     "{} └─ {}. {} · {break_title} · {}",
                     if selected { "›" } else { " " },
                     index + 1,
-                    text(language, "CHAIN BREAK", "行动链中断"),
-                    chain_duration(chain.break_actual_seconds)
+                    if chain.break_source == pomotui_protocol::ChainBreakSource::ReservationReview {
+                        text(language, "RESERVATION FAILURE", "预约失败")
+                    } else {
+                        text(language, "CHAIN BREAK", "行动链中断")
+                    },
+                    chain
+                        .break_actual_seconds
+                        .map_or_else(|| "—".into(), chain_duration)
                 ),
                 style,
             )));
             lines.push(Line::from(format!(
                 "    {}: {}",
                 text(language, "Reflection", "复盘"),
-                chain.break_reflection
+                if chain.break_reflection.is_empty() {
+                    "—"
+                } else {
+                    &chain.break_reflection
+                }
             )));
         }
     }
@@ -3055,6 +3325,70 @@ fn parse_reward_input(input: &str) -> Result<(u64, String, Option<u64>), ()> {
     }
 }
 
+fn reservation_timer_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &Snapshot,
+    reservation: &pomotui_protocol::ReservationSummary,
+    colors: Colors,
+    language: Language,
+) {
+    let awaiting = reservation.state == pomotui_protocol::ReservationStatus::AwaitingReview;
+    let heading = if awaiting {
+        text(language, "RESERVATION REVIEW", "预约待判断")
+    } else {
+        text(language, "FOCUS RESERVATION", "专注预约")
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            if awaiting {
+                text(language, "Awaiting your judgment", "等待你的判断").into()
+            } else {
+                clock(reservation.remaining_seconds)
+            },
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(reservation.task_title.as_deref().unwrap_or(text(
+            language,
+            "No Task",
+            "无任务",
+        ))),
+        Line::from(if awaiting {
+            text(language, "p review · Esc later", "p 判断 · Esc 稍后")
+        } else {
+            text(
+                language,
+                "b start Focus · a review/cancel",
+                "b 开始专注 · a 判断/取消",
+            )
+        }),
+        Line::from(chain_status(snapshot, language)),
+        Line::from(format!(
+            "{}: {} · {}",
+            text(language, "Session", "时段"),
+            kind_label(&snapshot.kind, language),
+            clock(snapshot.remaining_seconds)
+        )),
+    ];
+    if snapshot.kind != SessionKind::Focus {
+        lines.push(Line::from(text(
+            language,
+            "Space controls rest · Focus ends rest",
+            "空格控制休息 · 开始专注会结束休息",
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false })
+            .block(panel(heading, colors)),
+        area,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
 fn timer_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3067,6 +3401,10 @@ fn timer_panel(
         disconnected_timer_panel(frame, area, colors, language);
         return;
     };
+    if let Some(reservation) = &snapshot.reservation {
+        reservation_timer_panel(frame, area, snapshot, reservation, colors, language);
+        return;
+    }
     let state_colors = session_colors(Some(snapshot), colors);
     let heading = session_heading(snapshot, language);
     let task = snapshot.current_task.as_deref().unwrap_or(text(
@@ -3080,10 +3418,16 @@ fn timer_panel(
         .map_or(0, |task| task.focus_seconds);
     let title = if narrow {
         format!(
-            "{heading}  ·  {} {}/{}",
+            "{heading}  ·  {} {}/{} · {}",
             text(language, "Round", "轮次"),
             snapshot.completed_rounds.saturating_add(1),
-            snapshot.rounds_per_cycle
+            snapshot.rounds_per_cycle,
+            text(language, "a reserve", "a 预约")
+        )
+    } else if snapshot.state == "pending" {
+        format!(
+            "{heading} · {}",
+            text(language, "a reserve Focus", "a 预约专注")
         )
     } else {
         heading.to_owned()
@@ -3299,10 +3643,17 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
     }
     let width = area.width.saturating_sub(4).min(76);
     let height = match app.overlay {
+        Overlay::CreateReservation
+        | Overlay::ReservationReview
+        | Overlay::ConfirmReservationFailure
+        | Overlay::ConfirmReviewFailure => 14.min(area.height.saturating_sub(2)),
+        Overlay::ReservationFailureReflection | Overlay::ReservationMinutes => {
+            7.min(area.height.saturating_sub(2))
+        }
         Overlay::PendingReview => 11.min(area.height.saturating_sub(2)),
         Overlay::Palette => area.height.saturating_sub(4).min(21),
         Overlay::Help => area.height.saturating_sub(2).min(22),
-        Overlay::Settings => 17.min(area.height.saturating_sub(2)),
+        Overlay::Settings => 19.min(area.height.saturating_sub(2)),
         Overlay::RewardManager => 16.min(area.height.saturating_sub(2)),
         Overlay::CreateTask
         | Overlay::RenameTask
@@ -3313,7 +3664,6 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::StopChoice
         | Overlay::ReviewVoidTitle
         | Overlay::ReviewFailureReflection
-        | Overlay::ConfirmReviewFailure
         | Overlay::EditReflection
         | Overlay::EditChainTitle
         | Overlay::CreateReward
@@ -3329,6 +3679,11 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
     };
     frame.render_widget(Clear, modal);
     match app.overlay {
+        Overlay::CreateReservation => reservation_create_overlay(frame, modal, app, colors),
+        Overlay::ReservationReview => reservation_review_overlay(frame, modal, app, colors),
+        Overlay::ConfirmReservationFailure => {
+            confirm_review_failure_overlay(frame, modal, app, colors);
+        }
         Overlay::PendingReview => pending_review_overlay(frame, modal, app, colors),
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
         Overlay::Help => help_overlay(frame, modal, app, colors),
@@ -3342,7 +3697,9 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         | Overlay::EditChainTitle
         | Overlay::CreateReward
         | Overlay::UpdateReward
-        | Overlay::ReviewFailureVoidTitle => {
+        | Overlay::ReviewFailureVoidTitle
+        | Overlay::ReservationMinutes
+        | Overlay::ReservationFailureReflection => {
             text_entry_overlay(frame, modal, app, colors);
         }
         Overlay::ConfirmDelete => confirm_delete_overlay(frame, modal, app, colors),
@@ -3358,6 +3715,110 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         }
         Overlay::None => {}
     }
+}
+
+fn reservation_create_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let Some(snapshot) = &app.snapshot else {
+        return;
+    };
+    let task = if matches!(app.reservation_task_choice, ReservationTaskChoice::Selected) {
+        app.selected_task().map(|task| task.title.as_str())
+    } else {
+        snapshot.current_task.as_deref()
+    };
+    let lines = vec![
+        Line::from(format!(
+            "{} {} min",
+            text(app.language, "Begin within", "在此时间内开始"),
+            snapshot.reservation_minutes
+        )),
+        Line::from(format!(
+            "{}: {}",
+            text(app.language, "Task", "任务"),
+            task.unwrap_or(text(app.language, "No Task", "无任务"))
+        )),
+        Line::from(""),
+        Line::from(text(
+            app.language,
+            "Enter reserve · j/k choose Task · 0 reserve without Task",
+            "Enter 预约 · j/k 选择任务 · 0 无任务预约",
+        )),
+        Line::from(text(
+            app.language,
+            "Failure ends the Action Chain and unclaimed rewards.",
+            "确认预约失败会结束行动链，未领取奖励失效。",
+        )),
+        Line::from(text(
+            app.language,
+            "Esc back · s then a edits the default in Settings",
+            "Esc 返回 · 设置中按 a 修改默认时限",
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(
+                text(app.language, "RESERVE FOCUS", "预约专注"),
+                colors,
+            )),
+        area,
+    );
+}
+
+fn reservation_review_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let Some(reservation) = app
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.reservation.as_ref())
+    else {
+        return;
+    };
+    let lines = vec![
+        Line::from(reservation.task_title.as_deref().unwrap_or(text(
+            app.language,
+            "No Task",
+            "无任务",
+        ))),
+        Line::from(text(
+            app.language,
+            "Did you begin within the reservation window?",
+            "你是否已在约定时间内开始？",
+        )),
+        Line::from(text(
+            app.language,
+            "S success: start Focus now; no backdating",
+            "S 成功：现在开始专注，不补记时间",
+        )),
+        Line::from(text(
+            app.language,
+            "Any running or paused break will end.",
+            "正在进行或暂停的休息将结束。",
+        )),
+        Line::from(text(
+            app.language,
+            "F failure: Reflection, then confirm the chain break",
+            "F 失败：填写复盘，再确认断链",
+        )),
+        Line::from(text(
+            app.language,
+            "Esc later · p reopen · rest remains available",
+            "Esc 稍后 · p 重新打开 · 仍可休息",
+        )),
+        Line::from(text(
+            app.language,
+            "Cancellation requires the same judgment.",
+            "取消预约也需要相同判断。",
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(
+                text(app.language, "RESERVATION REVIEW", "预约判断"),
+                colors,
+            )),
+        area,
+    );
 }
 
 fn pending_review_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
@@ -3432,32 +3893,53 @@ fn confirm_review_failure_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, 
             "这将结束行动链，当前长度"
         )
     ))];
+    let is_reservation = app.overlay == Overlay::ConfirmReservationFailure;
     if let Some(snapshot) = &app.snapshot {
-        for reward in snapshot
+        let rewards: Vec<_> = snapshot
             .current_chain_rewards
             .iter()
             .filter(|reward| reward.state == "unlocked")
-        {
+            .collect();
+        lines.push(Line::from(format!(
+            "{}: {}",
+            text(app.language, "Unclaimed rewards lost", "失效的未领取奖励数"),
+            rewards.len()
+        )));
+        for reward in rewards.iter().take(3) {
             lines.push(Line::from(format!(
                 "{}: {}",
                 text(app.language, "Will become unavailable", "将变为不可领取"),
-                reward.name
+                truncate(&reward.name, usize::from(area.width.saturating_sub(28)))
             )));
         }
     }
     lines.extend([
         Line::from(""),
-        Line::from(text(
-            app.language,
-            "Enter/Y confirm · N cancel",
-            "Enter/Y 确认 · N 取消",
-        )),
+        Line::from(if is_reservation {
+            text(
+                app.language,
+                "Y confirm failure · N back · Esc later",
+                "Y 确认失败 · N 返回 · Esc 稍后",
+            )
+        } else {
+            text(
+                app.language,
+                "Enter/Y confirm · N cancel",
+                "Enter/Y 确认 · N 取消",
+            )
+        }),
     ]);
     frame.render_widget(
-        Paragraph::new(lines).block(panel(
-            text(app.language, "CONFIRM FAILED REVIEW", "确认失败复盘"),
-            colors,
-        )),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(
+                if is_reservation {
+                    text(app.language, "CONFIRM RESERVATION FAILURE", "确认预约失败")
+                } else {
+                    text(app.language, "CONFIRM FAILED REVIEW", "确认失败复盘")
+                },
+                colors,
+            )),
         area,
     );
 }
@@ -3551,7 +4033,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             )),
             Line::from("  Enter  确认所选任务          Space  开始/暂停/继续"),
             Line::from("  X      停止当前时段          K      跳过当前时段"),
-            Line::from("  p      重新打开待复盘窗口"),
+            Line::from("  p 重新判断   a 预约/判断预约   b 开始预约专注"),
             Line::from(""),
             Line::from(Span::styled(
                 "任务",
@@ -3591,7 +4073,8 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             )),
             Line::from("  Enter  confirm selected Task             Space  start/pause/resume"),
             Line::from("  X      stop Current Session              K      skip Current Session"),
-            Line::from("  p      reopen Pending Review dialog"),
+            Line::from("  p      reopen review · a reserve / review reservation"),
+            Line::from("  b      begin reserved Focus now"),
             Line::from(""),
             Line::from(Span::styled(
                 "TASKS",
@@ -3654,6 +4137,13 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
             text(app.language, "switch and save language", "切换并保存语言"),
         )),
         Line::from(""),
+        Line::from(format!(
+            "  a  {}: {} min",
+            text(app.language, "Reservation default", "预约默认时限"),
+            app.snapshot
+                .as_ref()
+                .map_or(10, |snapshot| snapshot.reservation_minutes)
+        )),
         Line::from(Span::styled(
             text(app.language, "CONFIGURATION", "配置"),
             Style::default()
@@ -3791,6 +4281,18 @@ fn confirm_reward_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, c
 
 fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let (title, label) = match app.overlay {
+        Overlay::ReservationMinutes => (
+            text(app.language, "RESERVATION DEFAULT", "预约默认时限"),
+            text(
+                app.language,
+                "Positive whole minutes (future reservations only)",
+                "正整数分钟（仅影响之后的预约）",
+            ),
+        ),
+        Overlay::ReservationFailureReflection => (
+            text(app.language, "RESERVATION FAILURE", "预约失败"),
+            text(app.language, "Reflection (optional)", "复盘（选填）"),
+        ),
         Overlay::CreateTask => (
             text(app.language, "CREATE TASK", "新建任务"),
             text(app.language, "Task title", "任务标题"),
@@ -4325,8 +4827,356 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
+    fn reserved_snapshot(state: &str, kind: SessionKind, awaiting: bool) -> Snapshot {
+        let mut snapshot = snapshot(state, kind);
+        snapshot.reservation = Some(pomotui_protocol::ReservationSummary {
+            id: "reservation-a".into(),
+            state: if awaiting {
+                pomotui_protocol::ReservationStatus::AwaitingReview
+            } else {
+                pomotui_protocol::ReservationStatus::Countdown
+            },
+            task_id: Some(1),
+            task_title: Some("Reserved work".into()),
+            duration_seconds: 600,
+            remaining_seconds: if awaiting { 0 } else { 321 },
+        });
+        snapshot
+    }
+
+    #[test]
+    fn expired_reservation_is_deferred_during_text_input_then_can_be_dismissed_and_reopened() {
+        let mut app = App::new(
+            Some(reserved_snapshot("pending", SessionKind::ShortBreak, false)),
+            Theme::RanPaperDark,
+        );
+        app.key('n');
+        let expired = reserved_snapshot("pending", SessionKind::ShortBreak, true);
+        app.replace_snapshot(Some(expired.clone()));
+        assert_eq!(app.overlay, Overlay::CreateTask);
+        assert_eq!(app.key('f'), None);
+        assert_eq!(app.input, "f");
+        app.key('\u{1b}');
+        app.replace_snapshot(Some(expired.clone()));
+        assert_eq!(app.overlay, Overlay::ReservationReview);
+        assert_eq!(app.key('\n'), None, "no implicit success on Enter");
+        app.key('\u{1b}');
+        app.replace_snapshot(Some(expired.clone()));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(
+            app.key(' '),
+            Some(Action::Command(pomotui_protocol::Command::Start {
+                kind: SessionKind::ShortBreak,
+                task_id: None
+            }))
+        );
+        app.key('p');
+        assert_eq!(
+            app.key('s'),
+            Some(Action::Command(
+                pomotui_protocol::Command::ReservationSuccess {
+                    id: "reservation-a".into()
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn reservation_cancellation_allows_empty_reflection_but_requires_explicit_confirmation() {
+        for reflection in ["", "Unexpected errand"] {
+            let mut app = App::new(
+                Some(reserved_snapshot("pending", SessionKind::Focus, false)),
+                Theme::RanPaperDark,
+            );
+            app.key('a');
+            assert_eq!(app.overlay, Overlay::ReservationReview);
+            app.key('f');
+            for character in reflection.chars() {
+                app.key(character);
+            }
+            assert_eq!(app.key('\n'), None);
+            assert_eq!(app.overlay, Overlay::ConfirmReservationFailure);
+            assert_eq!(
+                app.key('\n'),
+                None,
+                "Enter used to submit text must never confirm failure"
+            );
+            assert_eq!(
+                app.key('y'),
+                Some(Action::Command(
+                    pomotui_protocol::Command::ReservationFailure {
+                        id: "reservation-a".into(),
+                        reflection: reflection.into(),
+                        confirmed: true,
+                    }
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn stale_reservation_failure_dialog_cannot_judge_a_replacement_reservation() {
+        let mut app = App::new(
+            Some(reserved_snapshot("pending", SessionKind::Focus, true)),
+            Theme::RanPaperDark,
+        );
+        app.key('f');
+        app.key('x');
+        app.key('\n');
+        let mut replacement = reserved_snapshot("pending", SessionKind::Focus, false);
+        replacement.reservation.as_mut().unwrap().id = "reservation-b".into();
+        app.replace_snapshot(Some(replacement));
+        assert_eq!(app.key('y'), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn reservation_default_editor_uses_service_snapshot_and_emits_persistent_setting() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.reservation_minutes = 17;
+        let mut app = App::new(Some(state), Theme::RanPaperDark);
+        app.key('s');
+        app.key('a');
+        assert_eq!(app.input, "17");
+        app.handle_key(InputKey::KillToStart);
+        app.key('0');
+        assert_eq!(app.key('\n'), None);
+        assert_eq!(app.overlay, Overlay::ReservationMinutes);
+        app.handle_key(InputKey::KillToStart);
+        for c in "25".chars() {
+            app.key(c);
+        }
+        assert_eq!(
+            app.key('\n'),
+            Some(Action::Command(
+                pomotui_protocol::Command::ConfigureReservation { minutes: 25 }
+            ))
+        );
+        assert_eq!(
+            app.snapshot.as_ref().unwrap().reservation_minutes,
+            17,
+            "only service updates the setting"
+        );
+    }
+
+    #[test]
+    fn reservation_dialogs_show_judgment_and_reward_consequences_in_both_languages() {
+        for language in [Language::English, Language::SimplifiedChinese] {
+            for (width, height) in [(110, 36), (42, 30)] {
+                let mut state = reserved_snapshot("running", SessionKind::ShortBreak, true);
+                state.action_chain.length = 20;
+                state.current_chain_rewards = (1..=5)
+                    .map(|id| pomotui_protocol::RewardUnlockSummary {
+                        id,
+                        name:
+                            "A very long reward name that must not hide the confirmation controls"
+                                .into(),
+                        threshold: id,
+                        budget: None,
+                        state: "unlocked".into(),
+                    })
+                    .collect();
+                let mut app = App::new(Some(state), Theme::RanPaperDark);
+                app.language = language;
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| render(frame, &mut app)).unwrap();
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                let compact = rendered.split_whitespace().collect::<String>();
+                assert!(
+                    compact.contains(
+                        &text(language, "RESERVATION REVIEW", "预约判断")
+                            .split_whitespace()
+                            .collect::<String>()
+                    ),
+                    "{rendered}"
+                );
+                assert!(
+                    compact.contains(
+                        &text(language, "break will end", "休息将结束")
+                            .split_whitespace()
+                            .collect::<String>()
+                    ),
+                    "{rendered}"
+                );
+                app.key('f');
+                app.key('x');
+                app.key('\n');
+                terminal.draw(|frame| render(frame, &mut app)).unwrap();
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                let compact = rendered.split_whitespace().collect::<String>();
+                assert!(
+                    compact.contains(
+                        &text(language, "Unclaimed rewards lost", "失效的未领取奖励数")
+                            .split_whitespace()
+                            .collect::<String>()
+                    ),
+                    "{rendered}"
+                );
+                assert!(
+                    compact.contains(
+                        &text(language, "Y confirm failure", "Y 确认失败")
+                            .split_whitespace()
+                            .collect::<String>()
+                    ),
+                    "{rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reservation_break_archive_labels_source_without_a_session_duration() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        let mut ended = ended_chain(5, "Missed writing", 7);
+        ended.break_source = pomotui_protocol::ChainBreakSource::ReservationReview;
+        ended.break_actual_seconds = None;
+        state.recent_ended_chains = vec![ended];
+        let mut app = App::new(Some(state), Theme::RanPaperDark);
+        app.view = View::ChainArchive;
+        app.archive_detail_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("RESERVATION FAILURE"), "{rendered}");
+        assert!(
+            !rendered.contains("0m"),
+            "reservation must not imply a Focus Session"
+        );
+    }
+
+    #[test]
+    fn reservation_creation_is_unavailable_during_running_paused_or_pending_session_review() {
+        for state in ["running", "paused"] {
+            let mut app = App::new(
+                Some(snapshot(state, SessionKind::Focus)),
+                Theme::RanPaperDark,
+            );
+            assert_eq!(app.key('a'), None);
+            assert_eq!(app.overlay, Overlay::None);
+        }
+        let mut state = snapshot("pending", SessionKind::ShortBreak);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 9,
+            actual_seconds: 90,
+            task_id: Some(1),
+            task_title: Some("Work".into()),
+            is_void: false,
+        });
+        let mut app = App::new(Some(state), Theme::RanPaperDark);
+        app.key('\u{1b}');
+        assert_eq!(app.key('a'), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn reservation_countdown_shows_reserved_target_and_can_start_during_rest() {
+        for language in [Language::English, Language::SimplifiedChinese] {
+            for (width, height) in [(110, 36), (42, 30)] {
+                let mut app = App::new(
+                    Some(reserved_snapshot("running", SessionKind::ShortBreak, false)),
+                    Theme::RanPaperDark,
+                );
+                app.language = language;
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| render(frame, &mut app)).unwrap();
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                assert!(rendered.contains("05:21"), "{rendered}");
+                assert!(rendered.contains("Reserved work"), "{rendered}");
+                assert_eq!(
+                    app.key('b'),
+                    Some(Action::Command(
+                        pomotui_protocol::Command::ReservationSuccess {
+                            id: "reservation-a".into()
+                        }
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reservation_space_starts_reserved_target_instead_of_selected_task() {
+        let mut app = App::new(
+            Some(reserved_snapshot("pending", SessionKind::Focus, false)),
+            Theme::RanPaperDark,
+        );
+        assert_eq!(
+            app.key(' '),
+            Some(Action::Command(
+                pomotui_protocol::Command::ReservationSuccess {
+                    id: "reservation-a".into()
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn reservation_can_use_current_selected_or_no_task_in_any_pending_kind() {
+        for kind in [
+            SessionKind::Focus,
+            SessionKind::ShortBreak,
+            SessionKind::LongBreak,
+        ] {
+            let mut app = App::new(Some(snapshot("pending", kind)), Theme::RanPaperDark);
+            assert_eq!(app.key('a'), None);
+            assert_eq!(
+                app.key('\n'),
+                Some(Action::Command(pomotui_protocol::Command::Reserve {
+                    minutes: None,
+                    task_id: None,
+                    use_current_task: true,
+                }))
+            );
+            app.key('a');
+            assert_eq!(
+                app.key('0'),
+                Some(Action::Command(pomotui_protocol::Command::Reserve {
+                    minutes: None,
+                    task_id: None,
+                    use_current_task: false,
+                }))
+            );
+            app.key('a');
+            app.key('j');
+            assert_eq!(
+                app.key('\n'),
+                Some(Action::Command(pomotui_protocol::Command::Reserve {
+                    minutes: None,
+                    task_id: Some(1),
+                    use_current_task: false,
+                }))
+            );
+        }
+    }
+
     fn snapshot(state: &str, kind: SessionKind) -> Snapshot {
         Snapshot {
+            reservation: None,
+            reservation_minutes: 10,
             state: state.into(),
             kind,
             remaining_seconds: 90,
@@ -4412,8 +5262,9 @@ mod tests {
                 chain_entry_title: None,
             }],
             break_id,
-            break_task_title: title.into(),
-            break_actual_seconds: 32,
+            break_source: pomotui_protocol::ChainBreakSource::SessionReview,
+            break_task_title: Some(title.into()),
+            break_actual_seconds: Some(32),
             break_reflection: "Stopped on an unclear next step".into(),
             break_chain_entry_title: None,
             rewards: vec![],

@@ -61,3 +61,19 @@ Real transport commands, versions, barriers, results and limitations are recorde
 in [Syncthing acceptance](syncthing-acceptance.md). Daily checks remain
 `cargo test --workspace`; the real runner is opt-in because it requires Syncthing
 and permission to open isolated localhost sockets.
+
+
+## Focus Reservations in the TUI
+
+| Guarantee | Automated evidence |
+|---|---|
+| Any eligible Pending type reserves current, selected, or no Task | TUI `reservation_can_use_current_selected_or_no_task_in_any_pending_kind` |
+| Running, Paused and Pending Review cannot create reservations | TUI `reservation_creation_is_unavailable_during_running_paused_or_pending_session_review` |
+| Reserved target/countdown render in both layouts and languages, early start works during rest | TUI `reservation_countdown_shows_reserved_target_and_can_start_during_rest` |
+| Space starts the reserved Focus target, without choosing a different Task | TUI `reservation_space_starts_reserved_target_instead_of_selected_task` |
+| Expiry defers during text entry; dismiss/reopen and rest remain available | TUI `expired_reservation_is_deferred_during_text_input_then_can_be_dismissed_and_reopened` |
+| Cancellation allows optional Reflection and requires explicit destructive confirmation | TUI `reservation_cancellation_allows_empty_reflection_but_requires_explicit_confirmation` |
+| Stale dialogs cannot fail a replacement reservation | TUI `stale_reservation_failure_dialog_cannot_judge_a_replacement_reservation` |
+| Setting uses the authoritative service default, validates and submits persisted changes | TUI `reservation_default_editor_uses_service_snapshot_and_emits_persistent_setting`; service reservation config/restart tests |
+| EN/zh-CN wide/narrow judgment and reward warnings remain visible | TUI `reservation_dialogs_show_judgment_and_reward_consequences_in_both_languages` |
+| Archive distinguishes reservation failure without inventing duration | TUI `reservation_break_archive_labels_source_without_a_session_duration` |

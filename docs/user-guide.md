@@ -66,6 +66,32 @@ Waybar custom-module example:
 }
 ```
 
+### Reservation status in Waybar and the tray
+
+`pomotui waybar` reads the Timer Service even when the TUI is closed. A Focus
+Reservation takes display priority: `reservation MM:SS` uses CSS classes
+`reservation` and `countdown`; `reservation awaiting review` uses `reservation`
+and `awaiting_review`. The percentage follows the reservation window. The tooltip
+shows its target Task (`No task` when unattributed), plus the underlying Session's
+kind, state, remaining time, and round, including a Break Session that is still
+running. Task markup is escaped for Waybar tooltips.
+
+```css
+#custom-pomotui.reservation.countdown { color: #c7a66a; }
+#custom-pomotui.reservation.awaiting_review { color: #e07868; }
+```
+
+Early Focus start restores the ordinary Session display. Expiry waits for your
+judgment; use the TUI or CLI to resolve it. A Waybar click cannot bypass that
+judgment. Restarting the Timer Service restores the same reservation state.
+Without a reservation, the existing Session text, classes, and percentage remain
+unchanged.
+
+The macOS tray shows `◷ MM:SS` or `◷ Review`; its status menu shows the reservation
+target alongside the underlying Session. Start Focus is disabled while judgment
+is pending; use the TUI or CLI to judge success or failure. Service-side checks
+remain authoritative if a menu action races with expiry.
+
 ## TUI
 
 Press `g` in Settings to switch between English and Simplified Chinese and save
@@ -338,8 +364,8 @@ reward. Breaks preserve debt and repayment; actual chain length remains factual.
 successes. Editing or deleting a milestone does not forgive its obligation.
 
 New claims retain immutable support and observed-review identities in the same
-portable activity file. Format 7 accepts formats 4, 5 and 6 without changing old
-Record IDs; persisted format 4 accepts the supported unversioned, format 2, and format 3
+portable activity file. Format 8 accepts formats 4, 5, 6 and 7 without changing old
+Record IDs; persisted format 6 accepts the supported unversioned and formats 2 through 5
 states. Upgrade all Devices before synchronizing: older software rejects the new
 format. Legacy claims without observed support remain claimed and accrue no
 inferred debt. Missing evidence cannot be reconstructed from a claim timestamp.
@@ -350,7 +376,7 @@ Run `pomotui fresh-start --confirm` while the Timer Service is running to begin 
 
 The beginning is committed locally even while the exchange path is inaccessible. Sync status reports that it awaits synchronization. Once published, another device adopts the beginning and clears its retired business state atomically; its sync status keeps a notice that Fresh Start arrived from another device. Old files, conflict copies, delayed offline work and restored old databases cannot bring retired work back after the winning beginning is observed. Concurrent Fresh Starts select the same winner deterministically; work made under a losing beginning is retired too.
 
-The exchange document retains the beginning even with no records. Format 7 verifies both that metadata and immutable record membership. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
+The exchange document retains the beginning even with no records. Format 8 verifies both that metadata and immutable record membership, and preserves format 7 beginnings. Formats 4, 5 and 6 migrate to one universal legacy beginning without changing record identities. A Fresh Start after observing another reset causally supersedes it; clock time does not choose the winner.
 
 `pomotui reset --all-data --confirm` retains its existing local database backup/removal behavior and stopped-service requirement.
 
@@ -381,3 +407,59 @@ The opt-in [real Syncthing acceptance run](syncthing-acceptance.md) uses tempora
 profiles and two separate exchange directories. Its deterministic companion tests
 remain the daily development checks. Neither setup requires syncing SQLite or
 copying a companion reset file.
+
+### Focus Reservations from the CLI
+
+Use `pomotui reserve` while the Current Session is Pending to commit to beginning a Focus Session within the configured window. It defaults to the Current Task; use `--task ID` to choose another Task or `--no-task` to leave the Focus Session unattributed. `--minutes N` changes only this reservation's window.
+
+The initial default is ten minutes. Set `reservation_minutes = 10` at the root of the TOML configuration, or use `pomotui reservation minutes N` to save a new default immediately. The command preserves other settings and TOML tables. An explicit configuration-file value is loaded at service startup; changing the default never retimes an issued reservation.
+
+`pomotui reservation status --json` includes a stable reservation ID, its task, original duration, remaining seconds, and `countdown` or `awaiting_review` state. During countdown, `pomotui start focus` fulfills the reservation and starts the reserved task immediately, even when the next recommended Session is a Break Session. At expiry the service waits for judgment rather than automatically starting or failing. Use `pomotui reservation success ID` to confirm success and start from the current time. Earlier unrecorded focus time is not backfilled. Success alone does not add an Action Chain link or reward progress.
+
+A reservation survives closing the CLI and restarting the Timer Service. A Break Session may run during its countdown or pending judgment; fulfilling the reservation stops that break, preserving its actual history, and begins Focus. Pending judgment blocks ordinary starts of another Focus Session and new reservations. After Focus begins, the existing stop and Session Review choices remain available.
+
+
+The Timer Service observes reservation expiry and sends a desktop notification even
+when no TUI, CLI, or Waybar frontend is open. The notification asks you to review
+whether you started on time; it does not start Focus or break the Action Chain.
+Reservation reminders obey `reminder_enabled` and do not play the Session
+completion sound. The committed `awaiting_review` state survives delivery failures
+and service restarts. Notifications use the existing bounded retry mechanism;
+successful delivery is not repeated after restart. Resolving a reservation cancels
+any remaining expiry retry, and Fresh Start clears outstanding reminders.
+
+
+### Reservation judgment and the TUI
+
+In the TUI press `a` from any Pending Session: `Enter` reserves the Current Task,
+`j/k` chooses another Task, and `0` reserves without a Task. Running, Paused,
+existing reservations and Pending Reviews block new reservations. Press `b`
+during countdown to begin reserved Focus immediately, even if a break was next
+or is currently running. Space retains its ordinary rest controls; when the
+Pending Session is Focus, Space also starts the reserved target.
+
+Expiry opens Reservation Review. `S` succeeds and immediately starts Focus,
+ending an ongoing or paused break; no earlier time is credited. `F` asks for a
+Reflection (optional; press Enter to leave it blank) and then shows the chain length and unclaimed rewards that
+will be lost. Press `Y` to confirm failure; Enter does not confirm this
+destructive decision. `Esc` postpones judgment, and `p` or `a` reopens it. Rest
+remains available while Focus and new reservations are blocked. An expiry prompt
+waits until an existing text editor closes so typed text cannot become a judgment.
+Cancelling a reservation uses this same review; closing its dialog never cancels
+the commitment.
+
+For CLI failure, use
+`pomotui reservation failure ID --confirm`; optionally include a reason as
+`pomotui reservation failure ID "Reason" --confirm`. The cancellation alias
+`pomotui reservation cancel failure ID --confirm` uses the same judgment. Failure ends
+the Action Chain, expires its unlocked but unclaimed rewards, and preserves
+claimed rewards and existing Reward Debt. Its archive entry identifies a
+Reservation Review and has no Focus Session or duration. The failure synchronizes
+with Shared Activity; the live reservation remains local and another Device's
+start cannot fulfill it. Repeated judgments cannot apply to a new reservation.
+
+In Settings (`s`), press `a`, edit the positive whole-minute default, and press
+Enter to save through the Timer Service. The service writes the root TOML setting
+and updates its default immediately; snapshots remain authoritative and failures
+are reported. Changes apply only to later reservations, and Fresh Start preserves
+the configured default while clearing outstanding reservations and judgments.

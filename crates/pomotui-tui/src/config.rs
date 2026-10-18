@@ -9,6 +9,7 @@ use std::path::PathBuf;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub focus_minutes: u16,
+    pub reservation_minutes: u64,
     pub short_break_minutes: u16,
     pub long_break_minutes: u16,
     pub rounds_per_cycle: u8,
@@ -73,6 +74,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             focus_minutes: 25,
+            reservation_minutes: 10,
             short_break_minutes: 5,
             long_break_minutes: 15,
             rounds_per_cycle: 4,
@@ -90,6 +92,13 @@ impl Default for Config {
 
 pub fn parse(source: &str) -> Result<Config, String> {
     let config: Config = toml::from_str(source).map_err(|error| error.to_string())?;
+    if config
+        .reservation_minutes
+        .checked_mul(60)
+        .is_none_or(|seconds| seconds == 0)
+    {
+        return Err("reservation_minutes must be positive and fit a duration in seconds".into());
+    }
     if config.focus_minutes == 0 {
         return Err("focus_minutes must be nonzero".into());
     }

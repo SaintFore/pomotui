@@ -2,7 +2,9 @@
 
 use core::fmt;
 
+mod reservations;
 mod tasks;
+pub use reservations::FocusReservation;
 
 pub use tasks::{
     DailySummary, History, SessionRecord, Task, TaskError, TaskStatus, TaskStore, TaskSyncFact,
@@ -491,6 +493,34 @@ impl Timer {
             },
         });
         Ok(Transition::none())
+    }
+
+    /// Starts the Focus Session promised by a reservation. Any Pending Session
+    /// can yield to Focus; a running or paused Break ends with its actual time.
+    /// A bypassed Pending Break does not create a Session History event.
+    ///
+    /// # Errors
+    /// Rejects replacing a running or paused Focus Session, or invalid time.
+    pub fn start_reserved_focus(
+        &mut self,
+        now: u64,
+        task_id: Option<TaskId>,
+    ) -> Result<Transition, DomainError> {
+        let transition = match self.current {
+            CurrentSession::Pending(_) => Transition::none(),
+            CurrentSession::Running(session) if session.kind != SessionKind::Focus => {
+                self.stop(now)?
+            }
+            CurrentSession::Paused(session) if session.kind != SessionKind::Focus => {
+                self.stop(now)?
+            }
+            _ => return Err(DomainError::InvalidTransition),
+        };
+        self.current = CurrentSession::Pending(PendingSession {
+            kind: SessionKind::Focus,
+        });
+        self.start(now, task_id)?;
+        Ok(transition)
     }
 
     /// Freezes a Running Session.

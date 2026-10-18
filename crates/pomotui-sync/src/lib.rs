@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 7;
+pub const FORMAT_VERSION: u16 = 8;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -197,6 +197,14 @@ pub enum RecordPayload {
         reflection: Option<String>,
         chain_entry_title: Option<String>,
     },
+    ReservationFailed {
+        reservation_entity_id: EntityId,
+        decided_at: i64,
+        task_entity_id: Option<EntityId>,
+        task_title: Option<String>,
+        /// Optional user explanation; empty means none in document version 8.
+        reflection: String,
+    },
     ChainEntryVersion {
         reflection: Option<String>,
         chain_entry_title: Option<String>,
@@ -324,13 +332,13 @@ impl Document {
         if document.format != FORMAT_NAME {
             return Err("unsupported sync document format".into());
         }
-        if !matches!(document.version, 4 | 5 | 6 | FORMAT_VERSION) {
+        if !matches!(document.version, 4 | 5 | 6 | 7 | FORMAT_VERSION) {
             return Err(format!(
                 "unsupported sync document version {}; upgrade this device’s Timer Service to read this exchange file",
                 document.version
             ));
         }
-        if document.version < FORMAT_VERSION
+        if document.version < 7
             && (document.beginning != Beginning::default()
                 || document
                     .records
@@ -339,11 +347,19 @@ impl Document {
         {
             return Err("legacy sync document contains Fresh Start metadata".into());
         }
+        if document.version < 8
+            && document
+                .records
+                .iter()
+                .any(|record| matches!(record.payload, RecordPayload::ReservationFailed { .. }))
+        {
+            return Err("reservation failure requires sync document version 8".into());
+        }
         validate_records(&document.records)?;
         if document.integrity.record_count != document.records.len() {
             return Err("sync document integrity check failed".into());
         }
-        let expected_checksum = if document.version < FORMAT_VERSION {
+        let expected_checksum = if document.version < 7 {
             #[derive(Serialize)]
             struct LegacyRecord<'a> {
                 id: &'a RecordId,
@@ -552,10 +568,47 @@ pub struct ProjectedSessionReview {
     pub chain_entry_title: Option<String>,
 }
 
+/// The source identity is separate from the optional task and Session data.
+/// A Reservation Review never needs a fabricated ended Session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectedChainBreakSource {
+    SessionReview { session_entity_id: EntityId },
+    ReservationReview { reservation_entity_id: EntityId },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedChainBreak {
+    pub review_entity_id: EntityId,
+    pub source: ProjectedChainBreakSource,
+    pub task_entity_id: Option<EntityId>,
+    pub task_kind: Option<ReviewedTaskKind>,
+    pub task_title: Option<String>,
+    pub actual_seconds: Option<u64>,
+    pub reflection: Option<String>,
+    pub chain_entry_title: Option<String>,
+}
+
+impl From<ProjectedSessionReview> for ProjectedChainBreak {
+    fn from(review: ProjectedSessionReview) -> Self {
+        Self {
+            review_entity_id: review.review_entity_id,
+            source: ProjectedChainBreakSource::SessionReview {
+                session_entity_id: review.session_entity_id,
+            },
+            task_entity_id: Some(review.task_entity_id),
+            task_kind: Some(review.task_kind),
+            task_title: Some(review.task_title),
+            actual_seconds: Some(review.actual_seconds),
+            reflection: review.reflection,
+            chain_entry_title: review.chain_entry_title,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProjectedChain {
     pub links: Vec<ProjectedSessionReview>,
-    pub chain_break: Option<ProjectedSessionReview>,
+    pub chain_break: Option<ProjectedChainBreak>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -715,18 +768,63 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
     }
 }
 
+impl RecordPayload {
+    /// Identifies facts that affect Action Chain boundaries and claim evidence.
+    /// Keep this shared by chain projection, debt accounting and tombstone validation.
+    #[must_use]
+    pub const fn chain_judgment(&self) -> Option<SessionReviewJudgment> {
+        match self {
+            Self::SessionReviewed { judgment, .. } => Some(*judgment),
+            Self::ReservationFailed { .. } => Some(SessionReviewJudgment::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// One definition of Review Order shared by chains, debt and deletion boundaries.
+pub struct ChainEntryOrder {
+    session_ends: BTreeMap<EntityId, i64>,
+}
+
+impl ChainEntryOrder {
+    #[must_use]
+    pub fn new(records: &[Record]) -> Self {
+        Self {
+            session_ends: records
+                .iter()
+                .filter_map(|record| match record.payload {
+                    RecordPayload::SessionEnded { ended_at, .. } => {
+                        Some((record.entity_id.clone(), ended_at))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn key(&self, record: &Record) -> Option<(i64, EntityId)> {
+        match &record.payload {
+            RecordPayload::SessionReviewed {
+                session_entity_id, ..
+            } => Some((
+                *self.session_ends.get(session_entity_id)?,
+                record.entity_id.clone(),
+            )),
+            RecordPayload::ReservationFailed { decided_at, .. } => {
+                Some((*decided_at, record.entity_id.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Projects immutable Session Reviews in source-Session end order. Session Review identity is
 /// the stable tie-breaker, so arrival order can never affect chain boundaries.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
-    let session_ends = records
-        .iter()
-        .filter_map(|record| match record.payload {
-            RecordPayload::SessionEnded { ended_at, .. } => Some((&record.entity_id, ended_at)),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
+    let order = ChainEntryOrder::new(records);
     let mut entry_versions = BTreeMap::<&EntityId, &Record>::new();
     let mut deleted_intervals = Vec::new();
     for record in records {
@@ -773,10 +871,8 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                         _ => None,
                     })
                     .unwrap_or_else(|| (reflection.clone(), chain_entry_title.clone()));
-                Some((
-                    *session_ends.get(session_entity_id)?,
-                    record.entity_id.clone(),
-                    ProjectedSessionReview {
+                Some((order.key(record)?.0, record.entity_id.clone(), {
+                    let review = ProjectedSessionReview {
                         review_entity_id: record.entity_id.clone(),
                         record_id: record.id.clone(),
                         session_entity_id: session_entity_id.clone(),
@@ -787,7 +883,48 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                         actual_seconds: *actual_seconds,
                         reflection,
                         chain_entry_title,
-                    },
+                    };
+                    if *judgment == SessionReviewJudgment::Successful {
+                        Ok(review)
+                    } else {
+                        Err(review.into())
+                    }
+                }))
+            }
+            RecordPayload::ReservationFailed {
+                reservation_entity_id,
+                decided_at,
+                task_entity_id,
+                task_title,
+                reflection,
+            } => {
+                let (reflection, chain_entry_title) = entry_versions
+                    .get(&record.entity_id)
+                    .and_then(|version| match &version.payload {
+                        RecordPayload::ChainEntryVersion {
+                            reflection,
+                            chain_entry_title,
+                        } => Some((reflection.clone(), chain_entry_title.clone())),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        ((!reflection.is_empty()).then(|| reflection.clone()), None)
+                    });
+                Some((
+                    *decided_at,
+                    record.entity_id.clone(),
+                    Err(ProjectedChainBreak {
+                        review_entity_id: record.entity_id.clone(),
+                        source: ProjectedChainBreakSource::ReservationReview {
+                            reservation_entity_id: reservation_entity_id.clone(),
+                        },
+                        task_entity_id: task_entity_id.clone(),
+                        task_kind: None,
+                        task_title: task_title.clone(),
+                        actual_seconds: None,
+                        reflection,
+                        chain_entry_title,
+                    }),
                 ))
             }
             _ => None,
@@ -813,10 +950,10 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
         if deleted_positions.contains(&index) {
             continue;
         }
-        if review.judgment == SessionReviewJudgment::Successful {
+        if let Ok(review) = review {
             projection.current_chain.links.push(review);
-        } else {
-            projection.current_chain.chain_break = Some(review);
+        } else if let Err(chain_break) = review {
+            projection.current_chain.chain_break = Some(chain_break);
             let ended = std::mem::take(&mut projection.current_chain);
             projection.ended_chains.push(ended);
         }
@@ -879,6 +1016,7 @@ pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
                     | RecordPayload::SessionEnded { .. }
                     | RecordPayload::SessionDeleted
                     | RecordPayload::SessionReviewed { .. }
+                    | RecordPayload::ReservationFailed { .. }
                     | RecordPayload::ChainEntryVersion { .. }
                     | RecordPayload::EndedChainDeleted { .. }
                     | RecordPayload::RewardMilestoneVersion { .. }
@@ -1052,6 +1190,21 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                     return Err("synchronized Chain Entry version must change text".into());
                 }
             }
+            RecordPayload::ReservationFailed {
+                decided_at,
+                task_entity_id,
+                task_title,
+                ..
+            } => {
+                chrono::DateTime::from_timestamp(*decided_at, 0)
+                    .ok_or("invalid reservation judgment timestamp")?;
+                if task_entity_id.is_some() && task_title.is_none() {
+                    return Err("reservation Task identity requires a title".into());
+                }
+                if let Some(title) = task_title {
+                    pomotui_domain::TaskTitle::parse(title).map_err(|e| e.to_string())?;
+                }
+            }
             RecordPayload::SessionReviewed {
                 task_title,
                 judgment,
@@ -1077,7 +1230,9 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             RecordPayload::TaskVersion { .. } | RecordPayload::TaskDeleted => ("Task", false),
             RecordPayload::SessionEnded { .. } => ("Session", true),
             RecordPayload::SessionDeleted => ("Session", false),
-            RecordPayload::SessionReviewed { .. } => ("Review", true),
+            RecordPayload::SessionReviewed { .. } | RecordPayload::ReservationFailed { .. } => {
+                ("Review", true)
+            }
             RecordPayload::ChainEntryVersion { .. } | RecordPayload::EndedChainDeleted { .. } => {
                 ("Review", false)
             }
@@ -1114,14 +1269,8 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     let failed_reviews = records
         .iter()
         .filter_map(|record| {
-            matches!(
-                record.payload,
-                RecordPayload::SessionReviewed {
-                    judgment: SessionReviewJudgment::Failed,
-                    ..
-                }
-            )
-            .then_some(&record.entity_id)
+            (record.payload.chain_judgment() == Some(SessionReviewJudgment::Failed))
+                .then_some(&record.entity_id)
         })
         .collect::<std::collections::BTreeSet<_>>();
     for record in records {
@@ -1162,6 +1311,27 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             _ => None,
         })
         .collect::<BTreeMap<_, _>>();
+    let mut failed_reservations = std::collections::BTreeSet::new();
+    for record in records {
+        if let RecordPayload::ReservationFailed {
+            reservation_entity_id,
+            task_entity_id,
+            ..
+        } = &record.payload
+        {
+            if !failed_reservations.insert(reservation_entity_id) {
+                return Err("synchronized reservation has more than one failure Review".into());
+            }
+            if task_entity_id
+                .as_ref()
+                .is_some_and(|task| !task_entities.contains(task))
+            {
+                return Err(
+                    "synchronized Reservation Review references unknown Task identity".into(),
+                );
+            }
+        }
+    }
     let mut reviewed_sessions = std::collections::BTreeSet::new();
     for record in records {
         if let RecordPayload::SessionReviewed {
@@ -1203,9 +1373,11 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     }
     let reviews = records
         .iter()
-        .filter_map(|record| match record.payload {
-            RecordPayload::SessionReviewed { judgment, .. } => Some((&record.entity_id, judgment)),
-            _ => None,
+        .filter_map(|record| {
+            record
+                .payload
+                .chain_judgment()
+                .map(|judgment| (&record.entity_id, judgment))
         })
         .collect::<BTreeMap<_, _>>();
     for record in records {
@@ -1234,23 +1406,14 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             _ => {}
         }
     }
+    let order = ChainEntryOrder::new(records);
     let review_order_key = |identity: &EntityId| {
-        records.iter().find_map(|record| {
-            (&record.entity_id == identity).then(|| match &record.payload {
-                RecordPayload::SessionReviewed {
-                    session_entity_id, ..
-                } => records.iter().find_map(|candidate| {
-                    (&candidate.entity_id == session_entity_id).then(|| {
-                        if let RecordPayload::SessionEnded { ended_at, .. } = candidate.payload {
-                            Some((ended_at, identity.clone()))
-                        } else {
-                            None
-                        }
-                    })?
-                }),
-                _ => None,
-            })?
-        })
+        records
+            .iter()
+            .find(|record| {
+                &record.entity_id == identity && record.payload.chain_judgment().is_some()
+            })
+            .and_then(|record| order.key(record))
     };
     for record in records {
         if let RecordPayload::EndedChainDeleted {
@@ -1386,25 +1549,10 @@ pub struct RewardDebt {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
-    let ends = records
-        .iter()
-        .filter_map(|r| match &r.payload {
-            RecordPayload::SessionEnded { ended_at, .. } => Some((&r.entity_id, *ended_at)),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
+    let order = ChainEntryOrder::new(records);
     let mut reviews = records
         .iter()
-        .filter_map(|r| match &r.payload {
-            RecordPayload::SessionReviewed {
-                session_entity_id,
-                judgment,
-                ..
-            } => ends
-                .get(session_entity_id)
-                .map(|end| ((*end, r.entity_id.clone()), *judgment)),
-            _ => None,
-        })
+        .filter_map(|record| Some((order.key(record)?, record.payload.chain_judgment()?)))
         .collect::<BTreeMap<_, _>>()
         .into_iter()
         .collect::<Vec<_>>();

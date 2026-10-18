@@ -153,3 +153,38 @@ fn invalid_transitions_cannot_create_another_running_session() {
         CurrentSession::Running(_)
     ));
 }
+
+#[test]
+fn reserved_focus_stops_actual_break_without_resetting_cycle_or_skipping() {
+    let mut timer = timer(4);
+    timer.start(100, None).unwrap();
+    timer.advance(125).unwrap();
+    timer.start(130, None).unwrap();
+    let transition = timer
+        .start_reserved_focus(133, Some(TaskId::new(9)))
+        .unwrap();
+    assert_eq!(
+        transition.events(),
+        &[DomainEvent::SessionEnded {
+            kind: SessionKind::ShortBreak,
+            outcome: SessionOutcome::Stopped,
+            actual_seconds: 3,
+            task_id: None
+        }]
+    );
+    assert_eq!(timer.focus_cycle().completed_rounds(), 1);
+    assert_eq!(timer.current_task(), Some(TaskId::new(9)));
+    assert_eq!(timer.remaining_seconds(133), 25);
+    assert!(timer.start_reserved_focus(134, None).is_err());
+    assert_eq!(timer.current_task(), Some(TaskId::new(9)));
+}
+
+#[test]
+fn recovered_zero_countdown_advances_once_without_automatically_failing() {
+    let mut reservation = pomotui_domain::FocusReservation::restore(600, 0, 500, false).unwrap();
+    assert!(!reservation.is_awaiting_review());
+    assert!(reservation.advance(500));
+    assert!(reservation.is_awaiting_review());
+    assert!(!reservation.advance(900));
+    assert_eq!(reservation.remaining_seconds(900), 0);
+}

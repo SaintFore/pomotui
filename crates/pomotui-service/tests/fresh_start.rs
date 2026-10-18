@@ -268,7 +268,7 @@ fn format_three_genesis_state_upgrades_to_format_four_on_next_write() {
     );
     let saved: serde_json::Value =
         serde_json::from_str(&repository.current_session_payload().unwrap().unwrap()).unwrap();
-    assert_eq!(saved["data_format_version"], 4);
+    assert_eq!(saved["data_format_version"], 6);
     drop(reopened);
     drop(repository);
     std::fs::remove_dir_all(root).unwrap();
