@@ -52,6 +52,69 @@ class AurTest(candidate_test.CandidateTest):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         return result
 
+    def test_a_newer_verified_descendant_is_reconciled_without_downgrade(self):
+        from recovery_fixture import trusted_run
+        old_output=self.output
+        old_acceptance=self.acceptance
+        old_manifest=json.loads((old_output/'candidate.json').read_text())
+        (self.repo/'packaging/aur/pomotui.install').write_text('Newer shared hook\n')
+        self.git('add','.')
+        self.git('commit','-qm','Newer accepted source')
+        self.git('branch','-M','main')
+        self.git('remote','add','origin',str(self.repo))
+        self.output=old_output.parent/'newer'
+        self.plan()
+        newer=built_candidate(self.output)
+        (self.output/'acceptance.json').write_text(json.dumps(acceptance(self.output)))
+        (self.output/'checks.json').write_text(json.dumps({'source_commit':newer['source_commit'],'passed':True}))
+        self.acceptance=self.output/'acceptance.json'
+        self.visible_version=newer['git_version']+'-1'
+        env=os.environ.copy();env['GITHUB_RUN_ID']='123'
+        self.aur('publish',env=env)
+        head=subprocess.check_output(['git','--git-dir',str(self.remote),'rev-parse','master'])
+        newer_output=self.output
+        self.output=old_output;self.acceptance=old_acceptance
+        with trusted_run(newer_output,newer['source_commit']) as (api,state):
+            (old_output/'checks.json').write_text(json.dumps({'passed':True,'source_commit':old_manifest['source_commit']}))
+            command=[sys.executable,str(ROOT/'packaging/release/git_refresh.py'),'publish',
+                '--source',old_manifest['source_commit'],'--candidate',str(old_output),
+                '--acceptance',str(old_acceptance),'--checks',str(old_output/'checks.json'),
+                '--remote',str(self.remote),'--rpc-url',f'http://127.0.0.1:{self.http.server_port}/rpc',
+                '--provenance-api-url',api,'--source-repository',str(self.repo),'--discovery-attempts','1']
+            reconciled=subprocess.run(command,text=True,capture_output=True)
+            self.assertEqual(reconciled.returncode,0,reconciled.stderr)
+            observed=json.loads(reconciled.stdout)
+            self.assertEqual(observed['stage'],'superseded-discoverable')
+            self.assertEqual(observed['source_commit'],old_manifest['source_commit'])
+            self.assertEqual(observed['actual_source_commit'],newer['source_commit'])
+            self.assertEqual(observed['actual_version'],self.visible_version)
+            self.assertEqual(subprocess.check_output(['git','--git-dir',str(self.remote),'rev-parse','master']),head)
+            state['conclusion']='failure'
+            rejected=self.aur('verify','--provenance-api-url',api,'--source-repository',str(self.repo),ok=False)
+            self.assertIn('provenance',rejected.stderr)
+            self.assertEqual(subprocess.check_output(['git','--git-dir',str(self.remote),'rev-parse','master']),head)
+
+    def test_competing_remote_writers_retry_rejected_fast_forward_without_duplicate_commit(self):
+        manifest=json.loads((self.output/'candidate.json').read_text())
+        checks=self.output/'checks.json';checks.write_text(json.dumps({'passed':True,'source_commit':manifest['source_commit']}))
+        hook=self.remote/'hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nsleep 1\n')
+        hook.chmod(0o755)
+        command=[sys.executable,str(ROOT/'packaging/release/git_refresh.py'),'publish',
+            '--source',manifest['source_commit'],'--candidate',str(self.output),
+            '--acceptance',str(self.acceptance),'--checks',str(checks),'--remote',str(self.remote),
+            '--rpc-url',f'http://127.0.0.1:{self.http.server_port}/rpc','--retry-delay','0',
+            '--discovery-attempts','1']
+        processes=[subprocess.Popen(command+['--output',str(self.output.parent/f'attempt-{i}.json')],
+            text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE) for i in range(2)]
+        outcomes=[(process,process.communicate(timeout=30)) for process in processes]
+        self.assertTrue(all(process.returncode==0 for process,_ in outcomes),outcomes)
+        count=subprocess.check_output(['git','--git-dir',str(self.remote),'rev-list','--count','master'],text=True).strip()
+        self.assertEqual(count,'1')
+        journals=[json.loads((self.output.parent/f'attempt-{i}.json').read_text()) for i in range(2)]
+        self.assertTrue(all(journal['aggregate']=='complete' for journal in journals))
+        self.assertTrue(any(len(journal['attempts'])==2 for journal in journals),'real rejected push should reconcile remote state')
+
     def test_normal_git_orchestrator_publishes_the_exact_checked_snapshot(self):
         manifest = json.loads((self.output / 'candidate.json').read_text())
         checks = self.output.parent / 'checks.json'

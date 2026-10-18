@@ -13,6 +13,7 @@ on:
         value: ${{ jobs.gate.outputs.artifact }}
 permissions:
   contents: read
+  actions: read
 jobs:
   gate:
     runs-on: ubuntu-24.04
@@ -33,9 +34,18 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           [[ "$CANDIDATE_INTENT" == git || "$CANDIDATE_INTENT" == stable ]]
+      - name: Restore the original accepted bytes on same-run retry
+        id: restore
+        run: >-
+          python3 packaging/release/restore.py --optional --run-id "${{ github.run_id }}"
+          --intent "$CANDIDATE_INTENT" --source "$SOURCE_COMMIT"
+          --candidate "$RUNNER_TEMP/candidate" --selection "$RUNNER_TEMP/restored-selection"
+          --output "$RUNNER_TEMP/restore.json"
       - name: Install repository Rust toolchain
+        if: steps.restore.outputs.restored != 'true'
         run: rustup toolchain install
       - name: Applicable checks for the recorded source
+        if: steps.restore.outputs.restored != 'true'
         run: |
           cargo fmt --all --check
           sh packaging/tests/aur-install.sh
@@ -48,6 +58,7 @@ jobs:
           tests/reservations-e2e.sh
           sh tests/reservation-failure-e2e.sh
       - name: Prepare candidate from the same source
+        if: steps.restore.outputs.restored != 'true'
         run: |
           if [[ "$CANDIDATE_INTENT" == stable ]]; then
             python3 packaging/release/candidate.py plan --source "$SOURCE_COMMIT" --intent stable --notes RELEASE_NOTES.md --output "$RUNNER_TEMP/candidate"
@@ -59,8 +70,10 @@ jobs:
           (pathlib.Path(os.environ['RUNNER_TEMP'])/'candidate/checks.json').write_text(json.dumps({'source_commit':os.environ['SOURCE_COMMIT'],'passed':True})+'\n')
           PY
       - name: Build recorded real packages
+        if: steps.restore.outputs.restored != 'true'
         run: python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
       - name: Required clean install, domain, migration and lifecycle acceptance
+        if: steps.restore.outputs.restored != 'true'
         run: |
           tests/release/verify-candidate.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/acceptance"
           cp "$RUNNER_TEMP/acceptance/acceptance.json" "$RUNNER_TEMP/candidate/acceptance.json"
@@ -69,6 +82,7 @@ jobs:
         run: python3 packaging/release/release.py pack --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/portable"
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 90
           name: verified-candidate-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.intent }}
           path: ${{ runner.temp }}/portable
           include-hidden-files: true
@@ -76,6 +90,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 90
           name: gate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.intent }}
           path: |
             ${{ runner.temp }}/acceptance/**/*.log

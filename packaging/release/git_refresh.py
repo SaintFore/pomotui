@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from aur import AurChannel
+from recovery import Journal, locked
 
 RELEVANT = ('crates/', 'packaging/', 'assets/', 'completions/', 'scripts/', 'tests/release/')
 ROOT_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs'}
@@ -37,12 +38,25 @@ def publish(args):
     manifest = json.loads((args.candidate / 'candidate.json').read_text())
     if manifest['source_commit'] != args.source:
         raise ValueError('Git publication source differs from verified workflow source')
-    subprocess.run([sys.executable, str(Path(__file__).with_name('release.py')), 'verify-gates',
-        '--candidate', str(args.candidate), '--acceptance', str(args.acceptance),
-        '--checks', str(args.checks)], check=True, stdout=subprocess.DEVNULL)
-    return AurChannel(args.candidate, 'aur-git', args.remote, args.rpc_url,
-                      acceptance=args.acceptance, discovery_attempts=args.discovery_attempts,
-                      discovery_delay=args.discovery_delay).publish()
+    with locked(args.output):
+        journal=Journal(args.output,args.candidate)
+        def attempt():
+            subprocess.run([sys.executable, str(Path(__file__).with_name('release.py')), 'verify-gates',
+                '--candidate', str(args.candidate), '--acceptance', str(args.acceptance),
+                '--checks', str(args.checks)], check=True, stdout=subprocess.DEVNULL)
+            client=AurChannel(args.candidate, 'aur-git', args.remote, args.rpc_url,
+                acceptance=args.acceptance, discovery_attempts=args.discovery_attempts,
+                discovery_delay=args.discovery_delay,observer=journal.event,
+                provenance_api_url=args.provenance_api_url,source_repository=args.source_repository)
+            previous=journal.value['channels'].get('aur-git',{}).get('stage')
+            result=client.verify() if previous in ('remote-verified','pending-indexing','discoverable','superseded-discoverable') else client.publish()
+            journal.event(result)
+            journal.value['aggregate']='complete' if result['stage'] in ('discoverable','superseded-discoverable') else 'pending-indexing'
+            journal.save()
+            if journal.value['aggregate']!='complete':
+                raise ValueError('AUR remote verified; pending indexing, resume same candidate without another push')
+            return result
+        return journal.execute(attempt,args.retry_attempts,args.retry_delay)
 
 
 def main():
@@ -56,11 +70,16 @@ def main():
     selection.add_argument('--before')
     publication = commands.add_parser('publish')
     publication.add_argument('--source', required=True)
+    publication.add_argument('--output',type=Path)
+    publication.add_argument('--retry-attempts',type=int,default=3)
+    publication.add_argument('--retry-delay',type=float,default=2)
     publication.add_argument('--candidate', type=Path, required=True)
     publication.add_argument('--acceptance', type=Path, required=True)
     publication.add_argument('--checks', type=Path, required=True)
     publication.add_argument('--remote')
     publication.add_argument('--rpc-url')
+    publication.add_argument('--provenance-api-url')
+    publication.add_argument('--source-repository',type=Path)
     publication.add_argument('--discovery-attempts', type=int, default=6)
     publication.add_argument('--discovery-delay', type=float, default=10)
     args = parser.parse_args()
@@ -73,6 +92,7 @@ def main():
         else:
             result = select(args.repo, args.source, args.before)
     else:
+        args.output=args.output or args.candidate/'publication.json'
         result = publish(args)
     print(json.dumps(result))
 

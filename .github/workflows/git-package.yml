@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   select:
@@ -55,6 +56,14 @@ jobs:
         with:
           name: ${{ needs.gate.outputs.artifact }}
           path: ${{ runner.temp }}/candidate
+      - name: Restore original identity and previous publication journal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 packaging/release/restore.py --run-id "${{ github.run_id }}" --intent git
+          --source "${{ needs.select.outputs.source }}" --candidate "$RUNNER_TEMP/candidate"
+          --selection "$RUNNER_TEMP/selection" --journal "$RUNNER_TEMP/aur-git.json"
+          --output "$RUNNER_TEMP/restored-publication.json"
       - name: Verify exact candidate, checks and real upgrade evidence
         run: >-
           python3 packaging/release/release.py verify-gates
@@ -72,7 +81,7 @@ jobs:
           test -n "$AUR_SSH_PRIVATE_KEY" || { echo 'Configure AUR_SSH_PRIVATE_KEY before publication.' >&2; exit 1; }
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$AUR_SSH_KEY_FILE"
           python3 packaging/release/aur.py preflight --candidate "$RUNNER_TEMP/candidate" --channel aur-git > "$RUNNER_TEMP/preflight.json"
-          python3 packaging/release/git_refresh.py publish --source "${{ needs.select.outputs.source }}" --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" > "$RUNNER_TEMP/aur-git.json"
+          python3 packaging/release/git_refresh.py publish --source "${{ needs.select.outputs.source }}" --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" --output "$RUNNER_TEMP/aur-git.json"
       - name: Report delivery stage
         if: always()
         run: |
@@ -84,8 +93,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: git-publication-${{ needs.select.outputs.source }}
+          retention-days: 90
+          name: git-publication-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/preflight.json
             ${{ runner.temp }}/aur-git.json
+            ${{ runner.temp }}/restored-publication.json
           if-no-files-found: warn
