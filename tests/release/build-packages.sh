@@ -14,7 +14,12 @@ for identity in old candidate; do
     cd "/work/$identity"
     version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
     # Candidate package identity is explicitly experimental, not a stable release.
-    if [[ "$identity" == candidate ]]; then version="$version.r$(cat /work/candidate-count).g$(cat /work/candidate-short)"; fi
+    if [[ "$identity" == candidate ]]; then
+        build_version="$version-acceptance.$(cat /work/candidate-count).$(cat /work/candidate-short)"
+        sed -i "0,/^version = /s/^version = .*/version = \"$build_version\"/" Cargo.toml
+        cargo update --workspace --offline
+        version="$version.r$(cat /work/candidate-count).g$(cat /work/candidate-short)"
+    fi
     mkdir -p /work/package-$identity
     cp packaging/aur/PKGBUILD packaging/aur/pomotui.install /work/package-$identity/
     tar --exclude=target --exclude=.git --transform="s,^,pomotui-$version/," -czf "/work/package-$identity/pomotui-$version.tar.gz" .
