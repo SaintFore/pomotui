@@ -1,63 +1,68 @@
-# Publish AUR packages
+# Verified Linux publication
 
-The **Publish AUR** GitHub Actions workflow publishes either checked-in recipe:
-`packaging/aur` for `pomotui`, or `packaging/aur/pomotui-git` for `pomotui-git`. It runs from GitHub's network and does not depend on the
-maintainer's local SSH connection. The workflow is manual; creating a GitHub
-release alone does not update AUR.
+The stable release decision belongs in a PR titled `release: vX.Y.Z`. Update the
+Cargo workspace version and matching lockfile entries, and include nonempty
+`RELEASE_NOTES.md`. A final-head approved review or an explicit merge by a
+maintainer with write/maintain/admin permission authorizes that release PR.
+The latter supports a solo maintainer without requiring another reviewer.
+After merge to `main`, the stable workflow records the source and version,
+checks and builds that candidate, and runs real Arch clean-install and upgrade
+acceptance before publishing. Ordinary merges never select a stable release.
 
-## One-time SSH setup
+Relevant source/packaging changes pushed to `main` refresh the Git package through
+the same required gate. Its `r<count>.g<commit12>` metadata is a tested snapshot;
+users still fetch latest upstream source when building `pomotui-git`. Rebuild with
+`paru -S pomotui-git`, or check VCS updates with `paru -Syu --devel`.
 
-Use a dedicated, unencrypted SSH key whose public key is registered with the AUR
-account maintaining the selected package. Add its private key to the `SaintFore/pomotui`
-repository secret named `AUR_SSH_PRIVATE_KEY`. Do not commit the private key or
-paste it into issues, workflow files, or logs.
+The previous manual AUR `publish=true` entry point and tag-triggered release
+publisher are removed. Do not create a tag first or hand-edit generated version,
+archive checksum or `.SRCINFO` values. The candidate generates them from the
+recorded source, and the stable recipe uses the exact retained source asset.
+A matching existing tag/release/asset can be verified and reused; conflicting
+identities are preserved and diagnosed, never overwritten.
+
+## One-time credentials and trust
+
+Use the existing dedicated unencrypted SSH key registered with the AUR owner
+account. Its private key belongs in the `SaintFore/pomotui` repository secret
+`AUR_SSH_PRIVATE_KEY`, never in commits, issues or logs:
 
 ```sh
 gh secret set AUR_SSH_PRIVATE_KEY --repo SaintFore/pomotui < /path/to/dedicated-aur-key
 ```
 
-The checked-in `packaging/aur/known_hosts` pins AUR's Ed25519 host key. Its
-fingerprint is `SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4`, verified
-against the [AUR homepage](https://aur.archlinux.org/). Check the official
-fingerprint before changing this file if AUR rotates its host key.
+Before public writes, preflight authenticates with strict SSH host verification,
+checks selected-package ownership and tests receive permission without pushing.
+Stable publication checks both required AUR targets before its GitHub writes.
+This preflight expects the existing owner credential; a co-maintainer-only key
+is rejected before publication and requires an explicit maintainer
+credential/permission repair.
 
-## Validate and publish
+`packaging/aur/known_hosts` pins AUR's Ed25519 host key, fingerprint
+`SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4`. Compare the
+[official AUR fingerprint](https://aur.archlinux.org/) before explicitly approving
+a changed key. Automation never replaces credentials, grants permissions or
+changes host trust automatically.
 
-Update the selected recipe's `PKGBUILD` and `.SRCINFO`, and the shared
-`packaging/aur/pomotui.install` hook in this repository. For `pomotui`, first
-publish the application's version tag; its source checksum must match that
-archive. For `pomotui-git`, record a current `r<count>.<commit>` version snapshot;
-`pkgver()` recalculates it from the latest source during each build. No new
-release tag is needed for the Git package.
+## Gates, delivery and recovery
 
-Run a validation without pushing (the default package is `pomotui`):
+Each candidate retains source/version identity, exact generated recipes,
+`source.bundle`, source archive, real packages, Linux archive and checksums.
+The Linux gate runs existing formatting/lint/tests/smoke checks, then installs
+those actual package bytes in disposable hosted Arch with a real systemd user
+manager. Its receipt binds the source, candidate manifest and each package hash.
+Failed checks, upgrade failures and timeouts block publication. macOS builds run
+independently and retain their own results.
 
-```sh
-gh workflow run aur.yml --repo SaintFore/pomotui --ref main -f package=pomotui -f publish=false
-```
+Package recovery applies only to enabled packaged sockets. Disabled sockets
+remain disabled, including stable/Git replacement; custom units and drop-ins are
+preserved with exact conflict paths. Fresh installs use the documented explicit
+`systemctl --user enable --now pomotui.socket` command.
 
-The workflow regenerates `.SRCINFO` using Arch's `makepkg`, verifies either the
-release archive's SHA-256 or the configured Git source, and prepares a commit
-against the selected package's current AUR branch. Both packages use the shared
-install hook, including automatic Timer Service recovery after upgrades.
-To publish that recipe:
-
-```sh
-gh workflow run aur.yml --repo SaintFore/pomotui --ref main -f package=pomotui -f publish=true
-```
-
-A successful push makes the new package version available to AUR helpers:
-
-```sh
-paru -Syu pomotui
-```
-
-To publish the Git package instead:
-
-```sh
-gh workflow run aur.yml --repo SaintFore/pomotui --ref main -f package=pomotui-git -f publish=true
-```
-
-Its AUR page shows the last published version snapshot. Builds still fetch the
-latest Git source. Rebuild with `paru -S pomotui-git`, or check development-package
-updates using `paru -Syu --devel`.
+GitHub delivery verifies tag/source identity, retained asset bytes, public
+release visibility and actual user download bytes. A GitHub channel success is
+not aggregate completion while either required AUR channel is outstanding.
+AUR delivery distinguishes pushed/remote-verified from user discovery. A stale
+index remains pending indexing; retry verification with the same candidate
+rather than pushing another version. See the original Actions run summary and
+retained diagnostic artifacts for the failed stage and retry context.

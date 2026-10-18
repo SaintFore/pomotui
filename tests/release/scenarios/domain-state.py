@@ -46,7 +46,7 @@ def fresh(name):
     print(f'SCENARIO {name}', flush=True)
     manager('disable', '--now', 'pomotui.socket', check=False)
     manager('stop', 'pomotui.service', check=False)
-    run('pacman', '-U', '--noconfirm', old)
+    run('pacman', '-U', '--noconfirm', '--ask=4', old)
     shutil.rmtree(data, ignore_errors=True)
     shutil.rmtree(config.parent, ignore_errors=True)
     config.parent.mkdir(parents=True)
@@ -63,7 +63,7 @@ def upgrade(name):
     pid = manager('show', 'pomotui.service', '-p', 'MainPID', '--value').stdout.strip()
     settings = config.read_bytes()
     began = time.monotonic()
-    result = run('pacman', '-U', '--noconfirm', candidate)
+    result = run('pacman', '-U', '--noconfirm', '--ask=4', candidate)
     (out / f'{name}-pacman.log').write_text(result.stdout)
     new_pid = manager('show', 'pomotui.service', '-p', 'MainPID', '--value').stdout.strip()
     assert new_pid != pid and int(new_pid) > 0, (pid, new_pid)
@@ -205,7 +205,7 @@ for name in ['corrupt', 'unsupported-schema', 'unsupported-payload']:
             payload['data_format_version'] = 65535
             connection.execute('UPDATE current_session SET payload = ?', (json.dumps(payload),))
     original = database.read_bytes()
-    run('pacman', '-U', '--noconfirm', candidate)
+    run('pacman', '-U', '--noconfirm', '--ask=4', candidate)
     # Type=simple start can succeed before database opening fails. Observe the
     # completed startup/restart attempts, rather than the command's exit code.
     deadline = time.monotonic() + 10

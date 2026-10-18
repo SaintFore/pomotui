@@ -9,7 +9,7 @@ for state in stopped failed start-limit disabled conflict dropin; do
     rm -rf "/home/$user/.config/systemd/user/pomotui.service.d"
     rm -f "/home/$user/.config/systemd/user/pomotui.service"
     rm -rf "/home/$user/.local/share/pomotui" "/home/$user/.config/pomotui"
-    pacman -U --noconfirm "$old"
+    pacman -U --noconfirm --ask=4 "$old"
     as_user systemctl --user daemon-reload
     as_user systemctl --user reset-failed
     as_user systemctl --user enable --now pomotui.socket
@@ -56,7 +56,7 @@ for state in stopped failed start-limit disabled conflict dropin; do
 
     esac
     as_user systemctl --user show pomotui.service > "$lifecycle_dir/$state-before-unit.txt"
-    pacman -U --noconfirm "$candidate" 2>&1 | tee "$lifecycle_dir/$state-upgrade.log"
+    pacman -U --noconfirm --ask=4 "$candidate" 2>&1 | tee "$lifecycle_dir/$state-upgrade.log"
     case "$state" in
         disabled)
             ! as_user systemctl --user is-enabled --quiet pomotui.socket
@@ -65,7 +65,7 @@ for state in stopped failed start-limit disabled conflict dropin; do
         conflict|dropin)
             sha256sum --check "$lifecycle_dir/$state-preserved.sha256"
             [[ "$(as_user systemctl --user show pomotui.service -p MainPID --value)" == "$conflict_pid" ]]
-            [[ "$(sha256sum "/proc/$conflict_pid/exe" | cut -d' ' -f1)" != "$(sha256sum /usr/bin/pomotui-service | cut -d' ' -f1)" ]]
+            [[ "$(readlink "/proc/$conflict_pid/exe")" == "/home/$user/.local/bin/pomotui-service" ]]
             as_user pomotui status --json > "$lifecycle_dir/$state-preserved-status.json"
             grep -F "$conflict_path" "$lifecycle_dir/$state-upgrade.log"
             grep -F 'conflict' "$lifecycle_dir/$state-upgrade.log" ;;

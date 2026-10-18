@@ -18,6 +18,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Check AUR upgrade hooks
         run: sh packaging/tests/aur-install.sh
+      - name: Check candidate and publication boundaries
+        run: python3 -m unittest discover -s tests/release -p '*_test.py'
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test

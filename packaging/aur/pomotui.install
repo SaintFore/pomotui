@@ -1,9 +1,7 @@
 post_install() {
-    # Try to enable as the installing user (works with paru + lingering)
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-        sudo -u "$SUDO_USER" systemctl --user daemon-reload 2>/dev/null || true
-        sudo -u "$SUDO_USER" systemctl --user enable --now pomotui.socket 2>/dev/null && return
-    fi
+    # A stable ↔ Git replacement invokes post_install, not post_upgrade.
+    # Recover only users who already opted in; never enable a disabled socket.
+    post_upgrade
     echo ""
     echo "==> To start Pomotui, run:"
     echo "    systemctl --user daemon-reload && systemctl --user enable --now pomotui.socket"

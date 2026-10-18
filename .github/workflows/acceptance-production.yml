@@ -1,0 +1,55 @@
+name: Nonpublishing production adapter proof
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Public interface regression checks
+        run: |
+          python3 -m unittest discover -s tests/release -p '*_test.py'
+          sh packaging/tests/aur-install.sh
+      - name: Build nonpublishing real stable and Git candidate
+        run: |
+          tests/release/stable-candidate-fixture.sh "$RUNNER_TEMP/candidate"
+          python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+          python3 packaging/release/release.py pack --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/portable"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adapter-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/portable
+          include-hidden-files: true
+          if-no-files-found: error
+  adapter:
+    needs: build
+    env:
+      GH_TOKEN: ${{ github.token }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: adapter-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/candidate
+      - name: Exercise actual candidate packages through full real upgrade gate
+        run: tests/release/verify-candidate.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/acceptance" --allow-nonpublishing-fixture-predecessor
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-adapter-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/acceptance/**/*.log
+            ${{ runner.temp }}/acceptance/**/*.txt
+            ${{ runner.temp }}/acceptance/**/*.json
+            ${{ runner.temp }}/acceptance/**/*.sha256
+            ${{ runner.temp }}/candidate/candidate.json
+          include-hidden-files: true

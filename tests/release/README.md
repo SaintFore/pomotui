@@ -255,3 +255,108 @@ must still establish the recorded candidate package/version/hash, a replacement
 service PID, the installed candidate executable hash, and the effective packaged
 unit identity. Removing an unequal-code-hash assumption must never remove those
 candidate-identity checks.
+
+### Automatic Git-package publication
+
+`git-package.yml` listens to pushes on this repository's `main`.
+`git_refresh.py select --event EVENT.json` compares the push's complete committed
+`before`/`after` range, so a documentation-only final commit cannot hide an earlier
+source change in the same push. The event must identify a non-deleted main push.
+`select --source COMMIT` supports explicit local selection (`--before` chooses the
+baseline; otherwise the first parent is used). Source,
+packaging, toolchain, and release workflow changes select a candidate. Unrelated
+documentation and generated `.SRCINFO` snapshots do not. Publication never
+commits generated metadata back to the source repository.
+
+The selected source passes the shared `candidate-gate.yml`: actual package builds,
+source checks, and both real upgrade suites. The publication job consumes that
+exact retained candidate, checks its source and receipts again through
+`git_refresh.py publish`, and shares `pomotui-aur-publication` concurrency with the
+stable path. Both paths reconcile identical Git-package bytes instead of creating
+duplicate AUR commits. A Git snapshot such as `r123.g0123456789ab` describes the
+verified publication source; the distributed recipe deliberately fetches latest
+upstream source when a user builds it.
+
+The reusable AUR channel boundary supports both package identities:
+
+```sh
+python3 packaging/release/aur.py preflight --candidate DIR --channel aur-git
+python3 packaging/release/aur.py publish --candidate DIR --channel aur-git --acceptance DIR/acceptance.json
+python3 packaging/release/aur.py verify --candidate DIR --channel aur-git
+```
+
+The workflow supplies `AUR_SSH_KEY_FILE` only after its required gate succeeds.
+Preflight uses strict checked-in host trust, authenticates with AUR `list-repos`,
+checks the selected maintained package, and exercises receive access with a
+nonmutating Git dry run. It does not adopt packages, configure an account, replace
+keys, or trust a newly observed host. The AUR server's permission check is
+implemented in [aurweb's SSH command handler](https://github.com/archlinux/aurweb/blob/master/aurweb/git/serve.py).
+
+Publication compares actual remote `PKGBUILD`, `.SRCINFO`, and the shared install
+hook before checking discovery through the AUR RPC. `pending-indexing` means the
+remote bytes are verified but user discovery has not caught up. The `verify`
+command resumes just those checks, without a push or new version. A changed
+already published version or a newer Git snapshot is a conflict, never a reason
+to force push. Local `--remote` bare repositories and local HTTP `--rpc-url`
+endpoints exercise the same CLI boundary in `aur_test.py`; they need no AUR key
+and do not claim to replace real package or upgrade acceptance.
+
+## Production candidate gate and stable GitHub coordinator (#24)
+
+`verify-candidate.sh CANDIDATE_DIRECTORY OUTPUT_DIRECTORY` verifies a built
+manifest, selects the newest published non-draft/non-prerelease stable GitHub
+release and verifies its immutable tag/source, builds only that predecessor, then boots a
+fresh Arch system and installs **the exact manifest package files**. Both stable
+and Git channels run the full clean-install/domain/migration/lifecycle matrix.
+Stable→Git is a real pacman conflict replacement; same-name Git reinstall also
+requires a replacement running PID with candidate bytes. Packaging-only changes
+need not invent different executable hashes. Installed package version/name,
+package checksum, installed/running executable bytes, packaged unit and public
+health remain mandatory. Only the separate nonpublishing fixture workflow uses
+`--allow-nonpublishing-fixture-predecessor`; production never overrides version
+ordering.
+
+The v0.3.0 source tag contains an old PKGBUILD version, so the predecessor builder
+derives package metadata from that immutable source's Cargo version. It never
+changes predecessor application source or rebuilds/modifies a candidate.
+
+`release.py select` checks authoritative merged PR data, final-source review or
+authorized maintainer merge, matching release title/workspace version and changed
+notes. Prior identity comes from the original PR commit ancestry, not moving
+main/API base. `candidate-gate.yml` performs all applicable checks and actual
+acceptance before retaining portable manifest-declared artifacts, including
+hidden metadata. Its output includes source-bound checks and manifest/package-
+bound acceptance receipts. Publication jobs depend on its successful completion;
+a built label alone is insufficient.
+
+`release.py verify-gates`, `preflight`, `publish-github` and `pack` are normal
+consumer CLI boundaries. The coordinator preflights both AUR packages before
+GitHub publication. GitHub publication preserves conflicting tags/assets/notes,
+reuses matching outputs, verifies authoritative bytes and user-visible downloads,
+and reports `pending-required-aur-channels` rather than aggregate completion.
+The stable workflow has no manual/tag entry point. Legacy manual AUR publication
+is closed. macOS jobs depend only on stable selection, independently of Linux.
+
+`publication_test.py` exercises the coordinator using isolated HTTP endpoints
+and real local bare AUR remotes: ordinary-vs-explicit release intent, fresh/stale
+review and solo-maintainer approval, moving API base, failed/mismatched gates or
+credentials, two-target preflight, immutable rerun, tag/asset/notes conflicts and
+upload-success-with-wrong-download rejection. Tiny transport fixtures test the
+publication boundary only; hosted real package acceptance supplies upgrade proof.
+
+Actual production-adapter proof passed:
+https://github.com/SaintFore/pomotui/actions/runs/39111512146 at
+`74e01588556c94d7be52bf3b1a19dd44d1fe3de4`. Both real generated package builds,
+portable upload/download, and both complete real Arch matrices passed. The
+nonpublishing source fixture changes only its temporary version to `0.0.0`; the
+actual predecessor was published v0.3.0 at
+`ad9ce4cf4c43997b807485d3a590563ad66c68f1`. The later predecessor selector hardening
+was separately exercised against the actual authenticated release API, resolving
+the same published release/source, and by an isolated regression proving an
+unpublished newer tag/draft is ignored. Guest behavior is unchanged.
+Full existing CI passed on the same source:
+https://github.com/SaintFore/pomotui/actions/runs/39111512132. Proof artifacts:
+`adapter-candidate-74e01588556c94d7be52bf3b1a19dd44d1fe3de4` and
+`production-adapter-74e01588556c94d7be52bf3b1a19dd44d1fe3de4-1`.
+The proof workflow is now nonpublishing manual-only after its narrow branch
+experiment; it cannot publish a release.
