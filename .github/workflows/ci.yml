@@ -28,3 +28,4 @@ jobs:
           cargo build --release --workspace
           tests/e2e.sh
           tests/reservations-e2e.sh
+          sh tests/reservation-failure-e2e.sh
