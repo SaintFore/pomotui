@@ -154,6 +154,8 @@ def verify(args):
 def build(args):
     args.output = args.output.resolve()
     verify(argparse.Namespace(output=args.output, require_built=False))
+    if json.loads((args.output / 'candidate.json').read_text())['state'] == 'built':
+        return  # Identical verified reruns retain the successful artifact bytes.
     script = Path(__file__).with_name('build-arch.sh')
     subprocess.run(['docker', 'pull', 'archlinux:base-devel'], check=True)
     image = run('docker', 'image', 'inspect', 'archlinux:base-devel', '--format', '{{index .RepoDigests 0}}')

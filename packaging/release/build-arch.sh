@@ -22,7 +22,7 @@ for channel in aur-stable aur-git; do
     cd "/candidate/$channel"
     # Freeze only this validation build; the distributed Git recipe remains moving HEAD.
     if [[ "$channel" == aur-git ]]; then
-        git clone --bare /candidate/source.bundle pomotui
+        [[ -d pomotui ]] || git clone --bare /candidate/source.bundle pomotui
         commit=$(python -c 'import json; print(json.load(open("/candidate/candidate.json"))["source_commit"])')
         git -C pomotui update-ref refs/heads/candidate "$commit"
         git -C pomotui symbolic-ref HEAD refs/heads/candidate
@@ -36,7 +36,7 @@ for channel in aur-stable aur-git; do
     diff -u .SRCINFO generated.SRCINFO
     makepkg --verifysource --holdver
     # Build the real generated recipe, including check(), with the selected toolchain.
-    makepkg --noconfirm --holdver
+    makepkg --noconfirm --holdver --force
     diff -u .SRCINFO <(makepkg --printsrcinfo)
     if [[ "$channel" == aur-git ]]; then
         [[ "$(git -C src/pomotui rev-parse HEAD)" == "$commit" ]]

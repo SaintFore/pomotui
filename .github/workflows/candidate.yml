@@ -35,6 +35,11 @@ jobs:
         run: tests/release/stable-candidate-fixture.sh "$RUNNER_TEMP/candidate"
       - name: Build and validate real generated package
         run: python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+      - name: Reuse identical verified build without rebuilding
+        run: |
+          sha256sum "$RUNNER_TEMP/candidate/candidate.json" > "$RUNNER_TEMP/candidate-before.sha256"
+          python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+          sha256sum --check "$RUNNER_TEMP/candidate-before.sha256"
       - name: Require actual build evidence
         run: python3 packaging/release/candidate.py verify --output "$RUNNER_TEMP/candidate" --require-built
       - uses: actions/upload-artifact@v4
@@ -43,6 +48,7 @@ jobs:
           name: candidate-${{ matrix.kind }}-${{ github.sha }}
           path: |
             ${{ runner.temp }}/candidate/candidate.json
+            ${{ runner.temp }}/candidate/source.bundle
             ${{ runner.temp }}/candidate/*.tar.gz
             ${{ runner.temp }}/candidate/*.sha256
             ${{ runner.temp }}/candidate/*.log
@@ -52,3 +58,9 @@ jobs:
             ${{ runner.temp }}/candidate/built
           include-hidden-files: true
           if-no-files-found: error
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-${{ matrix.kind }}-${{ github.sha }}
+          path: ${{ runner.temp }}/downloaded-candidate
+      - name: Verify retained candidate through consumer interface
+        run: python3 packaging/release/candidate.py verify --output "$RUNNER_TEMP/downloaded-candidate" --require-built
