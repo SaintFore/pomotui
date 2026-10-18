@@ -92,8 +92,10 @@ enables the systemd user socket and starts Pomotui immediately.
 
 Update the git package and its VCS dependencies with `paru -Syu --devel`.
 Package upgrades automatically restart Timer Services for logged-in and
-lingering users whose Pomotui socket is enabled or active, including recovery
-from a failed or stopped service. Otherwise, only running services are restarted.
+lingering users whose Pomotui socket is enabled, including recovery from a
+failed or stopped service. Disabled sockets stay disabled, including when
+switching between the stable and Git packages. User unit overrides and drop-ins
+are preserved and diagnosed rather than changed automatically.
 If the user service manager
 cannot be reached, the upgrade prints a warning; run:
 
@@ -102,8 +104,13 @@ systemctl --user daemon-reload
 systemctl --user restart pomotui.service
 ```
 
-Maintainers can publish the stable AUR recipe through the
-[GitHub Actions workflow](docs/packaging/aur.md).
+Maintainers select a stable version and `RELEASE_NOTES.md` in a PR titled
+`release: vX.Y.Z`. A final-head review or an explicit authorized maintainer
+merge to `main` approves that PR for the
+[verified release workflow](docs/packaging/aur.md); ordinary merges do not select
+a stable release. The PR receives a delivery report covering every required Linux
+channel, retained diagnostics and same-publication retry; Git-package updates
+report their tested snapshot in Actions. Pending AUR indexing stays pending.
 
 ### macOS (Homebrew)
 

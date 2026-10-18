@@ -1,105 +1,12 @@
-name: Publish AUR
-
+name: Non-publishing AUR diagnostics
 on:
   workflow_dispatch:
-    inputs:
-      package:
-        description: AUR package to publish
-        type: choice
-        options:
-          - pomotui
-          - pomotui-git
-        default: pomotui
-      publish:
-        description: Push the validated package to AUR
-        type: boolean
-        default: false
-
 permissions:
   contents: read
-
-concurrency:
-  group: aur-${{ inputs.package || 'pomotui' }}
-  cancel-in-progress: false
-
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    container: archlinux:base-devel
-    env:
-      AUR_PACKAGE: ${{ inputs.package || 'pomotui' }}
+  explain:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install packaging tools
-        run: |
-          pacman -Syu --noconfirm --needed git openssh curl
-          useradd --create-home builder
-      - uses: actions/checkout@v4
-      - name: Select package recipe
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "$AUR_PACKAGE" in
-            pomotui) recipe_dir=packaging/aur ;;
-            pomotui-git) recipe_dir=packaging/aur/pomotui-git ;;
-            *) echo 'Unsupported AUR package' >&2; exit 1 ;;
-          esac
-          printf 'AUR_RECIPE_DIR=%s\n' "$recipe_dir" >> "$GITHUB_ENV"
-      - name: Validate package metadata and source
-        shell: bash
-        run: |
-          set -euo pipefail
-          metadata_dir=$(mktemp -d)
-          cp "$AUR_RECIPE_DIR/PKGBUILD" packaging/aur/pomotui.install "$metadata_dir/"
-          chown -R builder:builder "$metadata_dir"
-          (cd "$metadata_dir" && runuser -u builder -- makepkg --printsrcinfo) > "$RUNNER_TEMP/generated.SRCINFO"
-          diff -u "$AUR_RECIPE_DIR/.SRCINFO" "$RUNNER_TEMP/generated.SRCINFO"
-          source "$AUR_RECIPE_DIR/PKGBUILD"
-          test "$pkgname" = "$AUR_PACKAGE"
-          test "${#source[@]}" = 1
-          test "${#sha256sums[@]}" = 1
-          if [ "$AUR_PACKAGE" = pomotui-git ]; then
-            test "${sha256sums[0]}" = SKIP
-            test "${source[0]}" = 'pomotui::git+https://github.com/SaintFore/pomotui.git'
-            git ls-remote --exit-code https://github.com/SaintFore/pomotui.git HEAD
-          else
-            test "${sha256sums[0]}" != SKIP
-            test "${source[0]#*::}" = "https://github.com/SaintFore/pomotui/archive/refs/tags/v${pkgver}.tar.gz"
-            curl --fail --location --retry 3 "${source[0]#*::}" -o "$RUNNER_TEMP/source.tar.gz"
-            printf '%s  %s\n' "${sha256sums[0]}" "$RUNNER_TEMP/source.tar.gz" | sha256sum --check
-          fi
-      - name: Prepare AUR commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone "https://aur.archlinux.org/$AUR_PACKAGE.git" "$RUNNER_TEMP/aur"
-          cp "$AUR_RECIPE_DIR/PKGBUILD" "$AUR_RECIPE_DIR/.SRCINFO" packaging/aur/pomotui.install "$RUNNER_TEMP/aur/"
-          cd "$RUNNER_TEMP/aur"
-          git config user.name 'Pomotui release'
-          git config user.email 'pomotui-release@users.noreply.github.com'
-          git add PKGBUILD .SRCINFO pomotui.install
-          git diff --cached --check
-          if ! git diff --cached --quiet; then
-            source PKGBUILD
-            git commit -m "Update ${pkgname} to ${pkgver}-${pkgrel}"
-          fi
-          git show --stat --oneline HEAD
-      - name: Push AUR commit
-        if: inputs.publish
-        shell: bash
-        env:
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
-            echo '::error::Configure the AUR_SSH_PRIVATE_KEY repository secret before publishing.'
-            exit 1
-          fi
-          umask 077
-          key_file="$RUNNER_TEMP/aur-release-key"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$key_file"
-          export GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/packaging/aur/known_hosts -o ConnectTimeout=20"
-          git -C "$RUNNER_TEMP/aur" push "ssh://aur@aur.archlinux.org/$AUR_PACKAGE.git" HEAD:master
-      - name: Report validation result
-        if: ${{ success() && !inputs.publish }}
-        run: echo 'Package validated and AUR commit prepared. No push requested; run with publish=true to publish.'
+      - run: |
+          echo 'Manual AUR publishing has been removed. Approved release PR merges and verified main changes use the candidate and real-upgrade gates.'
+          echo 'Rerun the original verified publication to retry its same recorded candidate; do not publish untested recipes.' >> "$GITHUB_STEP_SUMMARY"

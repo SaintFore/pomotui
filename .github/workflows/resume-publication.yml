@@ -1,0 +1,93 @@
+name: Resume recorded publication
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Original Verified stable release or Verified Git package run ID
+        type: string
+        required: true
+      intent:
+        type: choice
+        options: [stable, git]
+        required: true
+      verify_only:
+        description: Stable discovery-only retry (never pushes)
+        type: boolean
+        default: false
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+jobs:
+  resume:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: pomotui-aur-publication
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Restore original trusted gate artifacts, approval and journal
+        id: restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.run_id }}
+          INTENT: ${{ inputs.intent }}
+        run: |
+          [[ "$ORIGINAL_RUN" =~ ^[0-9]+$ ]]
+          python3 packaging/release/restore.py --run-id "$ORIGINAL_RUN" --intent "$INTENT" --candidate "$RUNNER_TEMP/candidate" --selection "$RUNNER_TEMP/selection" --journal "$RUNNER_TEMP/publication.json" --journal-run-id "${{ github.run_id }}" --output "$RUNNER_TEMP/restore.json"
+      - name: Resume only the recorded publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          INTENT: ${{ inputs.intent }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+          SOURCE: ${{ steps.restore.outputs.source }}
+          ORIGINAL_RUN: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/publication.log") 2>&1
+          umask 077
+          export AUR_SSH_KEY_FILE="$RUNNER_TEMP/aur-release-key"
+          trap 'rm -f "$AUR_SSH_KEY_FILE"' EXIT
+          if [[ "$VERIFY_ONLY" != true || "$INTENT" != stable ]]; then
+            test -n "$AUR_SSH_PRIVATE_KEY" || { echo 'Repair AUR_SSH_PRIVATE_KEY before resuming publication.' >&2; exit 1; }
+            printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$AUR_SSH_KEY_FILE"
+          fi
+          # AUR commit provenance refers to the ORIGINAL accepted gate run.
+          export GITHUB_RUN_ID="$ORIGINAL_RUN"
+          if [[ "$INTENT" == stable ]]; then
+            action=publish-stable
+            if [[ "$VERIFY_ONLY" == true ]]; then action=verify-stable; fi
+            python3 packaging/release/release.py "$action" --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" --selection "$RUNNER_TEMP/selection/selection.json" --output "$RUNNER_TEMP/publication.json"
+          else
+            python3 packaging/release/git_refresh.py publish --source "$SOURCE" --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" --output "$RUNNER_TEMP/publication.json"
+          fi
+      - name: Report retained stages
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTENT: ${{ inputs.intent }}
+          ORIGINAL_RUN: ${{ inputs.run_id }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+        run: |
+          options=()
+          if [[ "$INTENT" == stable && -s "$RUNNER_TEMP/selection/selection.json" ]]; then options+=(--comment); fi
+          if [[ "$VERIFY_ONLY" == true ]]; then options+=(--verify-only); fi
+          python3 packaging/release/report.py --intent "$INTENT" --candidate "$RUNNER_TEMP/candidate" --selection "$RUNNER_TEMP/selection/selection.json" --journal "$RUNNER_TEMP/publication.json" --original-run "$ORIGINAL_RUN" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --output "$RUNNER_TEMP/delivery-report.md" "${options[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 90
+          name: publication-resume-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/delivery-report.md
+            ${{ runner.temp }}/publication*.json
+            ${{ runner.temp }}/publication.log
+            ${{ runner.temp }}/restore.json
+          if-no-files-found: warn

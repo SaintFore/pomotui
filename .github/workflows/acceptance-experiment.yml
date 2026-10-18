@@ -1,0 +1,29 @@
+name: Real Arch acceptance experiment
+on:
+  workflow_dispatch:
+concurrency:
+  group: real-arch-experiment-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  arch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install, upgrade, and observe real candidate
+        run: timeout 2400 tests/release/hosted.sh "$RUNNER_TEMP/arch-acceptance"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arch-acceptance-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/arch-acceptance/*.log
+            ${{ runner.temp }}/arch-acceptance/*.txt
+            ${{ runner.temp }}/arch-acceptance/*.json
+            ${{ runner.temp }}/arch-acceptance/result
+            ${{ runner.temp }}/arch-acceptance/work/artifacts
+          if-no-files-found: error
