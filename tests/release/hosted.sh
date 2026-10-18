@@ -26,7 +26,7 @@ git archive v0.3.0 | tar -x -C "$out/work/old"
 git archive HEAD | tar -x -C "$out/work/candidate"
 git rev-list --count HEAD > "$out/work/candidate-count"
 git rev-parse --short=12 HEAD > "$out/work/candidate-short"
-{ git rev-parse v0.3.0; git rev-parse HEAD; } > "$out/sources.txt"
+{ git rev-parse 'v0.3.0^{commit}'; git rev-parse HEAD; } > "$out/sources.txt"
 cp tests/release/build-packages.sh "$out/work/build-packages.sh"
 docker run --rm -v "$out/work:/work" archlinux:base-devel bash /work/build-packages.sh 2>&1 | tee "$out/build.log"
 # Keep build tools/caches out of the booted guest; install only runtime prerequisites.

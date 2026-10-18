@@ -46,8 +46,10 @@ systemd transient scenario reported 19.7 MB peak memory and no swap; the host ha
 build, pacman and journal logs, packages and JSON statuses are in the run's
 `arch-acceptance-307943f2d7d5f8b0a19ce50067578d9a33999180` artifact.
 
-The observed old source was v0.3.0 commit
-`30908419a26a4b7fa8172d182e1a5d82e03de819`, package `pomotui 0.3.0-1`, SHA-256
+The observed old source was v0.3.0, peeled to commit
+`ad9ce4cf4c43997b807485d3a590563ad66c68f1` (the run's `sources.txt` recorded
+annotated tag object `30908419a26a4b7fa8172d182e1a5d82e03de819`),
+package `pomotui 0.3.0-1`, SHA-256
 `38ba0967c4b4567194bd4db5a8fae7cded10a96d303d640c195bb8a9dd39958d`.
 The candidate package was `pomotui 0.3.0.r185.g307943f2d7d5-1`, SHA-256
 `56b6fbfa564d43a1ba36084b5f9c8f9e274339bb0adb17e26b24ea740910e62f`.
