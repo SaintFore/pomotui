@@ -611,6 +611,19 @@ impl SqliteRepository {
         )?)
     }
 
+    /// Discards an obsolete effect without counting it as delivered.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `SQLite` write error.
+    pub fn discard_reminder_effect(&mut self, id: i64) -> Result<(), RepositoryError> {
+        self.connection.execute(
+            "DELETE FROM reminder_outbox WHERE id = ?1 AND state = 'pending'",
+            [id],
+        )?;
+        Ok(())
+    }
+
     /// Marks one Session Reminder effect as delivered.
     ///
     /// # Errors

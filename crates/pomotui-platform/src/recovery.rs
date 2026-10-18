@@ -50,6 +50,15 @@ pub trait ReminderPort {
     ///
     /// Returns an adapter-specific delivery error.
     fn notify(&mut self) -> Result<(), Self::Error>;
+    /// Requests explicit judgment of an expired Focus Reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-specific delivery error.
+    fn notify_reservation(&mut self) -> Result<(), Self::Error> {
+        self.notify()
+    }
+
     /// Plays the configured sound.
     ///
     /// # Errors
@@ -75,6 +84,20 @@ impl ReminderPort for DesktopReminder {
     fn notify(&mut self) -> Result<(), Self::Error> {
         let status = std::process::Command::new("notify-send")
             .args(["Pomotui", "Session complete"])
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("notify-send failed"))
+        }
+    }
+
+    fn notify_reservation(&mut self) -> Result<(), Self::Error> {
+        let status = std::process::Command::new("notify-send")
+            .args([
+                "Pomotui",
+                "Focus reservation expired. Review whether you started on time.",
+            ])
             .status()?;
         if status.success() {
             Ok(())
@@ -258,6 +281,17 @@ impl ReminderPort for MacDesktopReminder {
                 "-e",
                 "display notification \"Session complete\" with title \"Pomotui\"",
             ])
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("osascript notification failed"))
+        }
+    }
+
+    fn notify_reservation(&mut self) -> Result<(), Self::Error> {
+        let status = std::process::Command::new("osascript")
+            .args(["-e", "display notification \"Focus reservation expired. Review whether you started on time.\" with title \"Pomotui\""])
             .status()?;
         if status.success() {
             Ok(())

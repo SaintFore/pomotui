@@ -48,6 +48,9 @@ trait ServiceRepository: Send {
         created_at: i64,
     ) -> Result<bool, String>;
     fn due_reminder_effects(&self, now: i64) -> Result<Vec<PendingReminderEffect>, String>;
+    fn discard_reminder_effect(&mut self, _id: i64) -> Result<(), String> {
+        Err("Discarding reminders unavailable in repository".into())
+    }
     fn acknowledge_reminder_effect(&mut self, id: i64, acknowledged_at: i64) -> Result<(), String>;
     fn record_reminder_failure(
         &mut self,
@@ -96,6 +99,11 @@ impl ServiceRepository for SqliteRepository {
             .map_err(|error| error.to_string())
     }
 
+    fn discard_reminder_effect(&mut self, id: i64) -> Result<(), String> {
+        self.discard_reminder_effect(id)
+            .map_err(|error| error.to_string())
+    }
+
     fn acknowledge_reminder_effect(&mut self, id: i64, acknowledged_at: i64) -> Result<(), String> {
         self.acknowledge_reminder_effect(id, acknowledged_at)
             .map_err(|error| error.to_string())
@@ -131,6 +139,10 @@ impl ServiceRepository for SqliteRepository {
 trait ReminderEffects: Send {
     fn configure(&mut self, sound: Option<std::path::PathBuf>, volume_percent: u8);
     fn notify(&mut self) -> Result<(), String>;
+    fn notify_reservation(&mut self) -> Result<(), String> {
+        self.notify()
+    }
+
     fn play_sound(&mut self) -> Result<(), String>;
 }
 
@@ -142,6 +154,10 @@ impl ReminderEffects for DesktopReminder {
 
     fn notify(&mut self) -> Result<(), String> {
         ReminderPort::notify(self).map_err(|error| error.to_string())
+    }
+
+    fn notify_reservation(&mut self) -> Result<(), String> {
+        ReminderPort::notify_reservation(self).map_err(|error| error.to_string())
     }
 
     fn play_sound(&mut self) -> Result<(), String> {
@@ -445,6 +461,38 @@ impl Service {
     ///
     /// Returns a diagnostic database or state-validation error.
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with_runtime(path, None, None, (true, false))
+    }
+
+    /// Opens durable state with reminder preferences in place before recovering deadlines.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or state-validation error.
+    pub fn open_with_reminder_settings(
+        path: &Path,
+        enabled: bool,
+        sound: Option<std::path::PathBuf>,
+        volume_percent: u8,
+    ) -> Result<Self, String> {
+        let sound_enabled = sound.is_some();
+        Self::open_with_runtime(
+            path,
+            None,
+            Some(Box::new(DesktopReminder {
+                sound,
+                volume_percent: volume_percent.min(100),
+            })),
+            (enabled, sound_enabled),
+        )
+    }
+
+    fn open_with_runtime(
+        path: &Path,
+        observation: Option<RecoveryObservation>,
+        reminder: Option<Box<dyn ReminderEffects>>,
+        (reminders_enabled, sound_enabled): (bool, bool),
+    ) -> Result<Self, String> {
         let repository = SqliteRepository::open(path).map_err(|error| error.to_string())?;
         let payload = repository
             .current_session_payload()
@@ -469,7 +517,7 @@ impl Service {
             None
         };
         let mut service = if let Some(payload) = payload.as_deref() {
-            PersistedService::decode(payload)?
+            PersistedService::decode_with_observation(payload, observation.clone())?
         } else {
             Self::new()
         };
@@ -494,7 +542,16 @@ impl Service {
         if !had_payload || created_void || legacy || cancelled_reward {
             service.persist(None)?;
         }
-        service.observe_time();
+        service.reminders_enabled = reminders_enabled;
+        service.sound_enabled = sound_enabled;
+        if let Some(reminder) = reminder {
+            service.reminder = reminder;
+        }
+        if let Some(observation) = observation {
+            service.apply_observation(observation.monotonic_seconds, observation.wall_seconds);
+        } else {
+            service.observe_time();
+        }
         Ok(service)
     }
 
@@ -1256,8 +1313,22 @@ impl Service {
             reservation.awaiting_review = true;
             reservation.remaining_seconds = 0;
             reservation.observed_at = self.now;
-            if self.persist(None).is_err() {
-                return;
+            let reminder_key = format!("reservation-{}", reservation.id);
+            let effects = if self.reminders_enabled {
+                vec![ReminderEffectKind::Notification]
+            } else {
+                Vec::new()
+            };
+            match self.persist_completion(&reminder_key, &effects) {
+                Ok(true) if self.reminders_enabled => {
+                    if self.repository.is_some() {
+                        self.dispatch_pending_reminders();
+                    } else if let Err(error) = self.reminder.notify_reservation() {
+                        eprintln!("Reservation Reminder failed: {error}");
+                    }
+                }
+                Err(_) => return,
+                _ => {}
             }
         }
         let planned = self.timer.planned_seconds();
@@ -2986,7 +3057,30 @@ impl Service {
             }
         };
         for effect in effects {
+            if let Some(id) = effect.session_key.strip_prefix("reservation-")
+                && (!self.reminders_enabled
+                    || !self.reservation.as_ref().is_some_and(|reservation| {
+                        reservation.id == id && reservation.awaiting_review
+                    }))
+            {
+                let discarded = self
+                    .repository
+                    .as_mut()
+                    .expect("repository exists while dispatching durable effects")
+                    .discard_reminder_effect(effect.id);
+                if let Err(error) = discarded {
+                    self.mark_durable_failure(error);
+                    return;
+                }
+                self.last_successful_commit = Some(self.wall);
+                continue;
+            }
             let delivered = match effect.kind {
+                ReminderEffectKind::Notification
+                    if effect.session_key.starts_with("reservation-") =>
+                {
+                    self.reminder.notify_reservation()
+                }
                 ReminderEffectKind::Notification => self.reminder.notify(),
                 ReminderEffectKind::Sound => self.reminder.play_sound(),
             };
@@ -4064,8 +4158,16 @@ impl PersistedService {
         serde_json::to_string(&persisted).map_err(|error| error.to_string())
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[cfg(test)]
     fn decode(payload: &str) -> Result<Service, String> {
+        Self::decode_with_observation(payload, None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn decode_with_observation(
+        payload: &str,
+        observation: Option<RecoveryObservation>,
+    ) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
         if !matches!(persisted.data_format_version, 0 | 2 | 3 | 4 | 5) {
@@ -4085,7 +4187,7 @@ impl PersistedService {
         )
         .map_err(|error| error.to_string())?;
         let clock = PlatformClock::default();
-        let current_observation = RecoveryObservation {
+        let current_observation = observation.unwrap_or_else(|| RecoveryObservation {
             boot_id: clock
                 .boot_id()
                 .unwrap_or_else(|_| persisted.boot_id.clone()),
@@ -4093,7 +4195,7 @@ impl PersistedService {
                 .monotonic_seconds()
                 .unwrap_or(persisted.observed_monotonic),
             wall_seconds: clock.wall_seconds().unwrap_or(persisted.observed_wall),
-        };
+        });
         let recovery = elapsed_during_recovery(
             &RecoveryObservation {
                 boot_id: persisted.boot_id.clone(),
@@ -7578,5 +7680,365 @@ mod reservation_scenarios {
         service.apply_observation(service.now + 20, service.wall + 86400);
         let status = service.snapshot();
         assert_eq!(status.reservation.unwrap().remaining_seconds, 580);
+    }
+}
+
+#[cfg(test)]
+mod reservation_reminder_scenarios {
+    use super::*;
+    use pomotui_protocol::{PROTOCOL_VERSION, ReservationStatus};
+    use std::sync::{Arc, Mutex};
+
+    struct Reminder {
+        notifications: Arc<Mutex<usize>>,
+        fail: bool,
+    }
+    impl ReminderEffects for Reminder {
+        fn configure(&mut self, _sound: Option<std::path::PathBuf>, _volume_percent: u8) {}
+        fn notify(&mut self) -> Result<(), String> {
+            *self.notifications.lock().unwrap() += 1;
+            if self.fail {
+                Err("offline".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn play_sound(&mut self) -> Result<(), String> {
+            panic!("reservation reminders must not play the session completion sound")
+        }
+    }
+    fn send(service: &mut Service, key: &str, command: Command) -> Snapshot {
+        match service.handle(Request {
+            version: PROTOCOL_VERSION,
+            idempotency_key: Some(key.into()),
+            command,
+        }) {
+            Response::Snapshot { snapshot } => snapshot,
+            other => panic!("{other:?}"),
+        }
+    }
+    fn reserve(service: &mut Service) -> String {
+        send(
+            service,
+            "reserve",
+            Command::Reserve {
+                minutes: Some(1),
+                task_id: None,
+                use_current_task: true,
+            },
+        )
+        .reservation
+        .unwrap()
+        .id
+    }
+    fn reminder(service: &mut Service, fail: bool) -> Arc<Mutex<usize>> {
+        let notifications = Arc::new(Mutex::new(0));
+        service.reminder = Box::new(Reminder {
+            notifications: notifications.clone(),
+            fail,
+        });
+        notifications
+    }
+    fn path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pomotui-reservation-reminder-{}.sqlite3",
+            EntityId::random().as_str()
+        ))
+    }
+    #[test]
+    fn expiration_notifies_without_frontend_and_is_not_repeated_after_restart() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let delivered = reminder(&mut service, false);
+        reserve(&mut service);
+        service.apply_observation(service.now + 60, service.wall + 60);
+        assert_eq!(*delivered.lock().unwrap(), 1);
+        let expired = send(&mut service, "status", Command::Status);
+        assert_eq!(
+            expired.reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(expired.state, "pending");
+        assert_eq!(expired.action_chain.length, 0);
+        assert!(expired.recent_ended_chains.is_empty());
+        assert_eq!(expired.reminder_delivery.delivered, 1);
+        drop(service);
+        let mut restarted = Service::open(&path).unwrap();
+        let delivered = reminder(&mut restarted, false);
+        restarted.tick();
+        let status = send(&mut restarted, "status", Command::Status);
+        assert_eq!(
+            status.reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn failed_expiry_delivery_retries_after_restart_without_losing_judgment() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let attempts = reminder(&mut service, true);
+        reserve(&mut service);
+        service.apply_observation(service.now + 60, service.wall + 60);
+        assert_eq!(*attempts.lock().unwrap(), 1);
+        assert_eq!(service.snapshot().reminder_delivery.retrying, 1);
+        drop(service);
+        let mut restarted = Service::open(&path).unwrap();
+        let delivered = reminder(&mut restarted, false);
+        restarted.apply_observation(restarted.now + 80, restarted.wall + 80);
+        restarted.dispatch_pending_reminders();
+        let status = send(&mut restarted, "status", Command::Status);
+        assert_eq!(
+            status.reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(status.reminder_delivery.retrying, 0);
+        assert_eq!(status.reminder_delivery.delivered, 1);
+        assert_eq!(*delivered.lock().unwrap(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn fulfilled_reservation_never_delivers_a_queued_expiry_retry() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let attempts = reminder(&mut service, true);
+        let id = reserve(&mut service);
+        service.apply_observation(service.now + 60, service.wall + 60);
+        send(&mut service, "success", Command::ReservationSuccess { id });
+        assert_eq!(*attempts.lock().unwrap(), 1);
+        drop(service);
+        let mut restarted = Service::open(&path).unwrap();
+        let delivered = reminder(&mut restarted, false);
+        restarted.apply_observation(restarted.now + 80, restarted.wall + 80);
+        restarted.dispatch_pending_reminders();
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        assert_eq!(restarted.snapshot().reminder_delivery.retrying, 0);
+        assert_eq!(restarted.snapshot().reminder_delivery.delivered, 0);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn disabled_notifications_still_commit_pending_reservation_judgment() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let delivered = reminder(&mut service, false);
+        service.configure_reminder(false, None, 100);
+        reserve(&mut service);
+        service.apply_observation(service.now + 60, service.wall + 60);
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        assert_eq!(service.snapshot().reminder_delivery.delivered, 0);
+        drop(service);
+        let mut restarted = Service::open(&path).unwrap();
+        let delivered = reminder(&mut restarted, false);
+        restarted.tick();
+        assert_eq!(
+            restarted.snapshot().reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn starting_early_never_notifies_at_the_former_reservation_deadline() {
+        let mut service = Service::new();
+        let delivered = reminder(&mut service, false);
+        let id = reserve(&mut service);
+        send(&mut service, "early", Command::ReservationSuccess { id });
+        service.apply_observation(service.now + 60, service.wall + 60);
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        assert!(service.snapshot().reservation.is_none());
+        assert_eq!(service.snapshot().state, "running");
+    }
+
+    #[test]
+    fn fresh_start_discards_pending_reservation_notifications_across_restart() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let attempted = reminder(&mut service, true);
+        reserve(&mut service);
+        service.apply_observation(service.now + 60, service.wall + 60);
+        assert_eq!(*attempted.lock().unwrap(), 1);
+        send(
+            &mut service,
+            "reset",
+            Command::FreshStart { confirmed: true },
+        );
+        drop(service);
+        let mut restarted = Service::open(&path).unwrap();
+        let delivered = reminder(&mut restarted, false);
+        restarted.apply_observation(restarted.now + 80, restarted.wall + 80);
+        restarted.dispatch_pending_reminders();
+        let status = send(&mut restarted, "status", Command::Status);
+        assert!(status.reservation.is_none());
+        assert_eq!(status.reminder_delivery.retrying, 0);
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_expiry_commit_never_notifies_before_durable_recovery() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let delivered = reminder(&mut service, false);
+        reserve(&mut service);
+        pomotui_platform::install_persistent_save_state_failure_trigger(&path).unwrap();
+        service.apply_observation(service.now + 60, service.wall + 60);
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        let status = service.snapshot();
+        assert_eq!(status.durable_health.state, DurableHealthState::Degraded);
+        assert_eq!(status.reminder_delivery.delivered, 0);
+        drop(service);
+        // The failed atomic completion left the last committed countdown intact.
+        let restarted = Service::open(&path).unwrap();
+        assert_eq!(
+            restarted.snapshot().reservation.unwrap().state,
+            ReservationStatus::Countdown
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn downtime_expiry_emits_once_when_service_recovers_the_persisted_countdown() {
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        let attempted = reminder(&mut service, false);
+        reserve(&mut service);
+        let recovery = RecoveryObservation {
+            boot_id: PlatformClock::default().boot_id().unwrap(),
+            monotonic_seconds: service.now + 90,
+            wall_seconds: service.wall + 90,
+        };
+        assert_eq!(*attempted.lock().unwrap(), 0);
+        drop(service);
+        let delivered = Arc::new(Mutex::new(0));
+        let recovered = Service::open_with_runtime(
+            &path,
+            Some(recovery),
+            Some(Box::new(Reminder {
+                notifications: delivered.clone(),
+                fail: false,
+            })),
+            (true, false),
+        )
+        .unwrap();
+        assert_eq!(*delivered.lock().unwrap(), 1);
+        let status = recovered.snapshot();
+        assert_eq!(
+            status.reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(status.state, "pending");
+        assert!(status.recent_ended_chains.is_empty());
+        assert_eq!(status.reminder_delivery.delivered, 1);
+        drop(recovered);
+        let delivered = Arc::new(Mutex::new(0));
+        let mut restarted = Service::open_with_runtime(
+            &path,
+            None,
+            Some(Box::new(Reminder {
+                notifications: delivered.clone(),
+                fail: false,
+            })),
+            (true, false),
+        )
+        .unwrap();
+        restarted.tick();
+        let status = send(&mut restarted, "status", Command::Status);
+        assert_eq!(
+            status.reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn configured_disabled_reminders_suppress_recovered_expiry_and_queued_retries() {
+        for expire_before_shutdown in [false, true] {
+            let path = path();
+            let mut service = Service::open(&path).unwrap();
+            reminder(&mut service, true);
+            reserve(&mut service);
+            if expire_before_shutdown {
+                service.apply_observation(service.now + 60, service.wall + 60);
+            }
+            let observation = RecoveryObservation {
+                boot_id: PlatformClock::default().boot_id().unwrap(),
+                monotonic_seconds: service.now + 90,
+                wall_seconds: service.wall + 90,
+            };
+            drop(service);
+            let delivered = Arc::new(Mutex::new(0));
+            let mut recovered = Service::open_with_runtime(
+                &path,
+                Some(observation),
+                Some(Box::new(Reminder {
+                    notifications: delivered.clone(),
+                    fail: false,
+                })),
+                (false, false),
+            )
+            .unwrap();
+            recovered.dispatch_pending_reminders();
+            let status = recovered.snapshot();
+            assert_eq!(
+                status.reservation.unwrap().state,
+                ReservationStatus::AwaitingReview
+            );
+            assert_eq!(status.reminder_delivery.retrying, 0);
+            assert_eq!(*delivered.lock().unwrap(), 0);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    #[test]
+    fn recovered_session_completion_retains_configured_sound_behavior() {
+        struct SessionReminder(Arc<Mutex<Vec<ReminderEffectKind>>>);
+        impl ReminderEffects for SessionReminder {
+            fn configure(&mut self, _sound: Option<std::path::PathBuf>, _volume: u8) {}
+            fn notify(&mut self) -> Result<(), String> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(ReminderEffectKind::Notification);
+                Ok(())
+            }
+            fn play_sound(&mut self) -> Result<(), String> {
+                self.0.lock().unwrap().push(ReminderEffectKind::Sound);
+                Ok(())
+            }
+        }
+        let path = path();
+        let mut service = Service::open(&path).unwrap();
+        service
+            .configure_durations(SessionDurations::new(10, 10, 10).unwrap())
+            .unwrap();
+        send(
+            &mut service,
+            "start",
+            Command::Start {
+                kind: SessionKind::Focus,
+                task_id: None,
+            },
+        );
+        let observation = RecoveryObservation {
+            boot_id: PlatformClock::default().boot_id().unwrap(),
+            monotonic_seconds: service.now + 20,
+            wall_seconds: service.wall + 20,
+        };
+        drop(service);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let recovered = Service::open_with_runtime(
+            &path,
+            Some(observation),
+            Some(Box::new(SessionReminder(delivered.clone()))),
+            (true, true),
+        )
+        .unwrap();
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![ReminderEffectKind::Notification, ReminderEffectKind::Sound]
+        );
+        assert!(recovered.snapshot().pending_review.is_some());
+        std::fs::remove_file(path).unwrap();
     }
 }
