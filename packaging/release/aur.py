@@ -34,7 +34,8 @@ def run(*args, cwd=None, env=None):
 
 class AurChannel:
     def __init__(self, directory, channel, remote=None, rpc_url=None, known_hosts=None,
-                 acceptance=None, discovery_attempts=6, discovery_delay=10):
+                 acceptance=None, discovery_attempts=6, discovery_delay=10, observer=None):
+        self.observer = observer or (lambda result: None)
         self.directory = Path(directory).resolve()
         self.channel = channel
         self.package = PACKAGES[channel]
@@ -147,6 +148,7 @@ class AurChannel:
                     'commit', '-qm', f'Update {self.package} to {self.version}\n\nSource: {self.manifest["source_commit"]}', cwd=tmp, env=self.env)
                 # Normal fast-forward push, never force. A concurrent update rejects.
                 run('git', 'push', self.remote, 'HEAD:master', cwd=tmp, env=self.env)
+        self.observer(self.result('pushed'))
         return self.verify()
 
     def verify(self):
@@ -156,6 +158,7 @@ class AurChannel:
             for name in FILES:
                 if (Path(tmp) / name).read_bytes() != (self.directory / self.channel / name).read_bytes():
                     raise ValueError(f'AUR remote content conflict: {self.package}/{name}; no overwrite performed')
+        self.observer(self.result('remote-verified', remote_commit=commit))
         query = urllib.parse.urlencode({'arg[]': self.package})
         url = self.rpc_url + ('&' if '?' in self.rpc_url else '?') + query
         error = None
