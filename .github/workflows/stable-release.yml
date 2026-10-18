@@ -5,6 +5,7 @@ on:
     branches: [main]
 permissions:
   contents: read
+  actions: read
   pull-requests: read
 jobs:
   select:
@@ -13,6 +14,7 @@ jobs:
     outputs:
       intent: ${{ steps.select.outputs.intent }}
       source: ${{ steps.select.outputs.source }}
+      artifact: stable-selection-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,6 +37,7 @@ jobs:
           cat "$RUNNER_TEMP/selection.json" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 90
           name: stable-selection-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selection.json
           if-no-files-found: error
@@ -51,6 +54,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      actions: read
       pull-requests: read
     concurrency:
       group: pomotui-aur-publication
@@ -67,8 +71,16 @@ jobs:
           path: ${{ runner.temp }}/candidate
       - uses: actions/download-artifact@v4
         with:
-          name: stable-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.select.outputs.artifact }}
           path: ${{ runner.temp }}/selection
+      - name: Restore original identity and previous publication journal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 packaging/release/restore.py --run-id "${{ github.run_id }}" --intent stable
+          --source "${{ needs.select.outputs.source }}" --candidate "$RUNNER_TEMP/candidate"
+          --selection "$RUNNER_TEMP/selection" --journal "$RUNNER_TEMP/stable-publication.json"
+          --output "$RUNNER_TEMP/restored-publication.json"
       - name: Publish verified Linux and both AUR channels; verify user discovery
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,12 +106,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 90
           name: stable-publication-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/stable-publication-preflight.json
             ${{ runner.temp }}/stable-publication-github.json
             ${{ runner.temp }}/stable-publication.json
             ${{ runner.temp }}/stable-publication.log
+            ${{ runner.temp }}/restored-publication.json
           if-no-files-found: warn
   macos:
     needs: select
@@ -134,6 +148,7 @@ jobs:
           shasum -a 256 "$RUNNER_TEMP/$ARCHIVE.tar.gz" > "$RUNNER_TEMP/$ARCHIVE.sha256"
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 90
           name: ${{ matrix.archive }}-${{ needs.select.outputs.source }}
           path: |
             ${{ runner.temp }}/${{ matrix.archive }}.tar.gz

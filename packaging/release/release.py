@@ -11,6 +11,7 @@ import urllib.parse
 from pathlib import Path
 import re
 import subprocess
+from recovery import Journal, TransientError, atomic, locked
 
 
 class DownloadRedirect(urllib.request.HTTPRedirectHandler):
@@ -44,7 +45,11 @@ class GitHub:
                 body=response.read()
         except urllib.error.HTTPError as error:
             if missing and error.code == 404: return None
+            if error.code in (408, 429, 500, 502, 503, 504):
+                raise TransientError(f'GitHub temporary HTTP {error.code}: {method} {path}') from error
             raise ValueError(f'GitHub {method} {path}: HTTP {error.code}; check repository token permissions') from error
+        except urllib.error.URLError as error:
+            raise TransientError(f'GitHub transport interrupted: {method} {path}: {error.reason}') from error
         return body if raw else json.loads(body) if body else None
 
     def repo(self, path, **kwargs):
@@ -165,7 +170,7 @@ def pack(args):
     for name in ['candidate.json',*manifest['artifacts']]:
         dest=args.output/name;dest.parent.mkdir(parents=True,exist_ok=True)
         shutil.copyfile(args.candidate/name,dest)
-    for name in ['acceptance.json','checks.json']:
+    for name in ['acceptance.json','checks.json','origin.json']:
         if (args.candidate/name).is_file(): shutil.copyfile(args.candidate/name,args.output/name)
 
 
@@ -210,6 +215,9 @@ def publish(args):
         created=api.repo('git/ref/tags/'+tag)
         if created.get('object',{}).get('type')!='commit' or created['object'].get('sha')!=source:
             raise ValueError('created tag failed authoritative source verification; preserve remote state and inspect')
+    observer=getattr(args,'observer',lambda value: None)
+    observer({'channel':'github-linux','stage':'pushed','source_commit':source,'tag':tag,
+              'candidate_sha256':digest(args.candidate/'candidate.json'),'detail':'immutable source tag recorded; release assets still require verification'})
     release=api.repo('releases/tags/'+tag,missing=True)
     if release is None:
         release=api.repo('releases',method='POST',payload={'tag_name':tag,'target_commitish':source,'name':tag,'body':(args.candidate/'release-notes.md').read_text(),'draft':True,'prerelease':False})
@@ -227,6 +235,8 @@ def publish(args):
         received=api.request(remote_assets[name]['url'],raw=True)
         if received!=expected_bytes:
             raise ValueError(f'immutable GitHub asset conflict: {name}; preserve existing output and inspect source/checksums')
+    observer({'channel':'github-linux','stage':'remote-verified','source_commit':source,'tag':tag,
+              'candidate_sha256':digest(args.candidate/'candidate.json'),'detail':'all required immutable asset bytes verified; draft is not discoverable'})
     if release.get('draft'):
         api.repo('releases/'+str(release['id']),method='PATCH',payload={'draft':False})
     visible=api.repo('releases/tags/'+tag)
@@ -266,24 +276,22 @@ def verify_github(args, manifest):
     return {'channel':'github-linux','stage':'discoverable','source_commit':manifest['source_commit'],'tag':tag,'url':release['html_url']}
 
 
-def stable(args):
+def stable_attempt(args, journal):
     from aur import AurChannel
     manifest=verify_gates(args)
     if set(manifest['required_channels'])!={'github-linux','aur-stable','aur-git'} or not manifest.get('tag_intent'):
         raise ValueError('stable publication requires a stable candidate and every Linux channel')
     destination=args.output
-    report={'source_commit':manifest['source_commit'],'version':manifest['version'],
-            'candidate_sha256':digest(args.candidate/'candidate.json'),
-            'aggregate':'in-progress','channels':{},'events':[]}
-    def save(): destination.write_text(json.dumps(report,indent=2)+'\n')
-    def event(value):
-        report['events'].append(value);report['channels'][value['channel']]=value;save()
+    report=journal.value
+    save=journal.save
+    event=journal.event
     try:
         if args.command=='publish-stable':
             args.preflight=destination.with_name(destination.stem+'-preflight.json')
             args.output=args.preflight
             preflight(args)
             args.output=destination.with_name(destination.stem+'-github.json')
+            args.observer=event
             publish(args)
         event(verify_github(args,manifest))
         for channel,package in [('aur-stable','pomotui'),('aur-git','pomotui-git')]:
@@ -291,17 +299,24 @@ def stable(args):
                 remote=args.aur_remote.replace('{package}',package) if args.aur_remote else None,
                 rpc_url=args.aur_rpc_url,acceptance=args.acceptance,
                 discovery_attempts=args.discovery_attempts,discovery_delay=args.discovery_delay,
-                observer=event)
-            event(client.publish() if args.command=='publish-stable' else client.verify())
-        report['aggregate']='complete' if all(value['stage']=='discoverable' for value in report['channels'].values()) else 'pending-indexing'
+                observer=event,provenance_api_url=args.provenance_api_url,source_repository=args.source_repository)
+            previous=report['channels'].get(channel,{}).get('stage')
+            event(client.verify() if args.command=='verify-stable' or previous in ('remote-verified','pending-indexing','discoverable','superseded-discoverable') else client.publish())
+        report['aggregate']='complete' if all(value['stage'] in ('discoverable','superseded-discoverable') for value in report['channels'].values()) else 'pending-indexing'
         save()
         if report['aggregate']!='complete':
             raise ValueError('AUR remote content verified; pending discovery. Run verify-stable with the same candidate; no new commit or push is needed')
     except (ValueError,OSError,subprocess.SubprocessError) as error:
-        if report['aggregate']=='in-progress': report['aggregate']='paused'
+        if report['aggregate']=='in-progress' and not isinstance(error,(TransientError,TimeoutError,ConnectionError)): report['aggregate']='paused'
         report['diagnosis']=str(error);save();raise
     finally:
         args.output=destination
+
+
+def stable(args):
+    with locked(args.output):
+        journal=Journal(args.output,args.candidate)
+        journal.execute(lambda: stable_attempt(args,journal),args.retry_attempts,args.retry_delay)
 
 
 def main():
@@ -351,6 +366,10 @@ def main():
         p.add_argument('--api-url',default='https://api.github.com')
         p.add_argument('--aur-remote')
         p.add_argument('--aur-rpc-url')
+        p.add_argument('--provenance-api-url')
+        p.add_argument('--source-repository',type=Path)
+        p.add_argument('--retry-attempts',type=int,default=3)
+        p.add_argument('--retry-delay',type=float,default=2)
         p.add_argument('--discovery-attempts',type=int,default=6)
         p.add_argument('--discovery-delay',type=float,default=10)
         p.add_argument('--output',type=Path,required=True)

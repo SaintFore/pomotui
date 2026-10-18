@@ -379,3 +379,48 @@ asset, AUR commit or push. Remote byte conflicts remain paused independently of
 index availability. Publication tests use the normal CLI against disposable Git
 repositories and HTTP endpoints; these transport fixtures do not replace the
 separate real Arch package/upgrade acceptance evidence.
+
+## Resume an interrupted publication
+
+`release.py publish-stable` and `git_refresh.py publish` retain an atomic JSON
+journal, including candidate SHA-256, source identity, every observed channel
+stage and bounded attempt diagnostics. The stable journal is `--output`; Git
+accepts `--output` and otherwise uses `CANDIDATE/publication.json`. Keep that file
+with the original candidate. Matching reruns reread authoritative content and
+reuse successful writes. AUR remote verification and index discovery remain
+separate: pending indexing returns failure with a retained pending journal;
+`release.py verify-stable` performs a read-only continuation through public
+HTTPS AUR clones, so it needs no AUR private key even when publishing
+credentials require repair.
+
+Transient transport/service failures retry the entire reconciliable operation
+three times by default (`--retry-attempts`, maximum five), with a bounded delay.
+Each retry reads tags/assets/AUR state before deciding whether any write remains.
+Permanent authorization, identity, metadata or checksum conflicts pause without
+rewriting output. Local duplicate invocations lock their journal; shared Actions
+publication concurrency and ordinary Git fast-forward pushes coordinate remote
+writers. A newer Git snapshot is accepted as `superseded-discoverable` only after
+its original main-workflow gate artifact, checks, package acceptance, candidate
+digest, descendant ancestry, all three remote files and current AUR discovery
+have been independently verified. The report names its actual source/version;
+it never labels the older snapshot as current. Unproven legacy snapshots pause.
+
+The shared gate restores the earliest **successful** gate artifact of the same
+Actions run before a rerun can rebuild. The retained candidate includes original
+source bundle, metadata, archives, packages and exact acceptance/check receipts.
+Failed-job reruns retain dynamic original artifact names. For a later explicit
+continuation, run **Resume recorded publication**, select the original stable or
+Git publication run ID and its intent, and optionally select stable verification
+only. This uses the same public orchestrators and shared publication lock. It
+requires the original repository/workflow path, trusted event, successful gate,
+source membership in main, matching receipts, and original stable PR selection.
+It never plans or builds another candidate.
+
+Candidate, publication and recovery artifacts request 90-day retention (subject
+to repository policy). Retain/download them before expiration if a publication
+will need longer recovery. Missing or expired original accepted artifacts block
+recovery with an explicit diagnosis: do not regenerate possibly published bytes,
+move tags, reset user data, or invent a repair version. The publication journal
+and existing remote outputs remain available for investigation. GitHub's
+concurrency queue can replace an older pending job; its original accepted run ID
+is the recovery selector, independent of whichever job runs next.

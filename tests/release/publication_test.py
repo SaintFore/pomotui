@@ -125,12 +125,15 @@ def prepared_candidate(root):
 
 @contextlib.contextmanager
 def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=False, corrupt_download=False, wrong_created_tag=False):
-    state={'tag':('f'*40 if conflicting_tag else None),'release':None,'assets':{},'writes':[],'notes':notes}
+    state={'lost_response':False,'failures':{},'tag':('f'*40 if conflicting_tag else None),'release':None,'assets':{},'writes':[],'notes':notes}
     class Handler(BaseHTTPRequestHandler):
         def reply(self,code,value,raw=False):
             self.send_response(code);self.end_headers();self.wfile.write(value if raw else json.dumps(value).encode())
         def do_GET(self):
             path=urllib.parse.urlsplit(self.path).path
+            if state['failures'].get(path,0):
+                state['failures'][path]-=1
+                return self.reply(503,{'message':'temporary failure'})
             if path.endswith('/git/ref/tags/v0.3.0'):
                 return self.reply(200,{'object':{'type':'commit','sha':state['tag']}}) if state['tag'] else self.reply(404,{})
             if path.endswith('/releases/tags/v0.3.0'):
@@ -143,7 +146,11 @@ def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=F
         def do_POST(self):
             body=self.rfile.read(int(self.headers.get('Content-Length',0)));state['writes'].append(self.path)
             if self.path.endswith('/git/refs'):
-                state['tag']='e'*40 if wrong_created_tag else json.loads(body)['sha'];return self.reply(201,{'ref':'refs/tags/v0.3.0'})
+                state['tag']='e'*40 if wrong_created_tag else json.loads(body)['sha']
+                if state['lost_response']:
+                    state['lost_response']=False
+                    return self.reply(503,{'message':'response lost after write'})
+                return self.reply(201,{'ref':'refs/tags/v0.3.0'})
             if self.path.endswith('/releases'):
                 value=json.loads(body);value.update(id=1,upload_url=base+'/upload{?name,label}',html_url=base+'/release')
                 state['release']=value;return self.reply(201,value)
@@ -292,13 +299,61 @@ class StableAurDelivery(unittest.TestCase):
                     for name in ['PKGBUILD','.SRCINFO','pomotui.install']:
                         actual=subprocess.check_output(['git','--git-dir',str(root/(package+'.git')),'show','master:'+name])
                         self.assertEqual(actual,(candidate/channel/name).read_bytes())
+                prior_events=list(report['events'])
                 versions['pomotui']=manifest['version']+'-1';writes=list(state['writes'])
                 result=self.command('verify-stable',root,candidate,url,rpc)
                 self.assertEqual(result.returncode,0,result.stderr)
-                self.assertEqual(json.loads((root/'stable.json').read_text())['aggregate'],'complete')
+                resumed=json.loads((root/'stable.json').read_text())
+                self.assertEqual(resumed['aggregate'],'complete')
+                self.assertEqual(resumed['events'][:len(prior_events)],prior_events)
+                self.assertEqual(len(resumed['attempts']),2)
                 self.assertEqual(state['writes'],writes)
                 for package,head in heads.items():
                     self.assertEqual(subprocess.check_output(['git','--git-dir',str(root/(package+'.git')),'rev-parse','master']),head)
+
+    def test_transient_retry_exhaustion_retains_original_candidate_and_can_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            for package in ['pomotui','pomotui-git']:
+                subprocess.run(['git','init','--bare','--initial-branch=master','-q',str(root/(package+'.git'))],check=True)
+            versions={'pomotui':manifest['version']+'-1','pomotui-git':manifest['git_version']+'-1'}
+            original=(candidate/'candidate.json').read_bytes()
+            with publication_remote(manifest['source_commit']) as (url,state), aur_index(versions) as rpc:
+                state['failures']['/repos/test/project/git/ref/tags/v0.3.0']=3
+                result=self.command('publish-stable',root,candidate,url,rpc)
+                self.assertNotEqual(result.returncode,0)
+                journal=json.loads((root/'stable.json').read_text())
+                self.assertEqual(journal['aggregate'],'retry-exhausted')
+                self.assertEqual(len(journal['attempts']),3)
+                self.assertEqual(state['writes'],[])
+                result=self.command('publish-stable',root,candidate,url,rpc)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual((candidate/'candidate.json').read_bytes(),original)
+                self.assertEqual(len(json.loads((root/'stable.json').read_text())['attempts']),4)
+                writes=list(state['writes'])
+                result=self.command('publish-stable',root,candidate,url,rpc)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(state['writes'],writes)
+
+    def test_uncertain_write_and_duplicate_attempts_reconcile_without_reposting(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            for package in ['pomotui','pomotui-git']:
+                subprocess.run(['git','init','--bare','--initial-branch=master','-q',str(root/(package+'.git'))],check=True)
+            versions={'pomotui':manifest['version']+'-1','pomotui-git':manifest['git_version']+'-1'}
+            with publication_remote(manifest['source_commit']) as (url,state), aur_index(versions) as rpc:
+                state['lost_response']=True
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures=[pool.submit(self.command,'publish-stable',root,candidate,url,rpc) for _ in range(2)]
+                    results=[future.result() for future in futures]
+                self.assertTrue(all(result.returncode==0 for result in results),[result.stderr for result in results])
+                self.assertEqual(state['writes'].count('/repos/test/project/git/refs'),1)
+                self.assertEqual(state['writes'].count('/repos/test/project/releases'),1)
+                journal=json.loads((root/'stable.json').read_text())
+                self.assertEqual(journal['aggregate'],'complete')
+                self.assertEqual(len(journal['attempts']),3)
+                self.assertEqual(journal['attempts'][0]['stage'],'failed')
 
     def test_remote_content_mismatch_is_paused_independently_of_index_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:

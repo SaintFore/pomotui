@@ -14,32 +14,45 @@ import re
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
 import urllib.request
 
 import candidate
+from recovery import TransientError
 
 FILES = ('PKGBUILD', '.SRCINFO', 'pomotui.install')
 PACKAGES = {'aur-git': 'pomotui-git', 'aur-stable': 'pomotui'}
 
 
 def run(*args, cwd=None, env=None):
-    result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=60)
+    try:
+        result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        raise TransientError(f'{args[0]} timed out; reread remote before retry') from error
     if result.returncode:
-        raise ValueError(f'{args[0]} failed: {result.stderr.strip() or result.stdout.strip()}')
+        message=result.stderr.strip() or result.stdout.strip()
+        transient=('Could not resolve host','Connection reset','Connection timed out','Connection closed','remote end hung up','HTTP 5','[rejected]','cannot lock ref','Failed to connect')
+        if any(fragment in message for fragment in transient):
+            raise TransientError(f'{args[0]} interrupted; reread remote before retry: {message}')
+        raise ValueError(f'{args[0]} failed: {message}')
     return result.stdout.strip()
 
 
 class AurChannel:
     def __init__(self, directory, channel, remote=None, rpc_url=None, known_hosts=None,
-                 acceptance=None, discovery_attempts=6, discovery_delay=10, observer=None):
+                 acceptance=None, discovery_attempts=6, discovery_delay=10, observer=None,
+                 provenance_api_url=None, source_repository=None):
         self.observer = observer or (lambda result: None)
+        self.provenance_api_url = provenance_api_url or 'https://api.github.com'
+        self.source_repository = Path(source_repository or Path(__file__).resolve().parents[2])
         self.directory = Path(directory).resolve()
         self.channel = channel
         self.package = PACKAGES[channel]
         self.remote = remote or f'ssh://aur@aur.archlinux.org/{self.package}.git'
+        self.read_remote=self.remote if '://' not in self.remote or self.remote.startswith('file://') else f'https://aur.archlinux.org/{self.package}.git'
         self.rpc_url = rpc_url or 'https://aur.archlinux.org/rpc/v5/info'
         self.known_hosts = Path(known_hosts or Path(__file__).parents[1] / 'aur/known_hosts').resolve()
         self.acceptance = Path(acceptance) if acceptance else None
@@ -50,6 +63,8 @@ class AurChannel:
         self.local = '://' not in self.remote or self.remote.startswith('file://')
         if not self.local and self.remote != f'ssh://aur@aur.archlinux.org/{self.package}.git':
             raise ValueError('unsupported AUR SSH destination')
+        if not self.local and (provenance_api_url or source_repository):
+            raise ValueError('provenance endpoint/source overrides are restricted to isolated local AUR remotes')
         rpc = urllib.parse.urlparse(self.rpc_url)
         if rpc.scheme != 'https' and not (self.local and rpc.hostname in ('127.0.0.1', 'localhost')):
             raise ValueError('AUR discovery requires HTTPS (HTTP allowed only for isolated local endpoints)')
@@ -120,6 +135,54 @@ class AurChannel:
         if receipt.get('passed') is not True or receipt.get('source_commit') != self.manifest['source_commit'] or receipt.get('candidate_sha256') != digest or evidence.get('passed') is not True or evidence.get('sha256') != self.manifest['artifacts'][package]:
             raise ValueError('failed or mismatched real upgrade acceptance; publication blocked')
 
+    def _superseding(self, repo):
+        """Accept a newer snapshot only with independent, trusted gate evidence."""
+        if self.channel != 'aur-git':
+            return None
+        message=run('git','log','-1','--format=%B',cwd=repo,env=self.env)
+        source=re.search(r'^Source: ([0-9a-f]{40})$',message,re.M)
+        identity=re.search(r'^Candidate-SHA256: ([0-9a-f]{64})$',message,re.M)
+        publication=re.search(r'^Publication-Run: ([0-9]+)$',message,re.M)
+        if not source or not identity or not publication or source[1]==self.manifest['source_commit']:
+            return None
+        with tempfile.TemporaryDirectory(prefix='pomotui-newer-publication-') as temporary:
+            directory=Path(temporary)/'candidate'
+            origin=Path(temporary)/'origin.json'
+            command=[sys.executable,str(Path(__file__).with_name('restore.py')),
+                '--run-id',publication[1],'--intent','git','--source',source[1],
+                '--candidate',str(directory),'--selection',str(Path(temporary)/'selection'),
+                '--output',str(origin),'--repo',str(self.source_repository),
+                '--api-url',self.provenance_api_url]
+            # A stable publication may itself be the newer Git snapshot.
+            result=subprocess.run(command,text=True,capture_output=True,timeout=120)
+            if result.returncode and 'Transient:' in result.stderr:
+                raise TransientError('newer publication provenance temporarily unavailable: '+result.stderr.strip())
+            if result.returncode and 'original trusted publication workflow' in result.stderr:
+                command[command.index('--intent')+1]='stable'
+                result=subprocess.run(command,text=True,capture_output=True,timeout=120)
+            if result.returncode and 'Transient:' in result.stderr:
+                raise TransientError('newer publication provenance temporarily unavailable: '+result.stderr.strip())
+            if result.returncode:
+                raise ValueError(f'newer AUR snapshot {source[1]} lacks independently verified main publication provenance: {result.stderr.strip()}; preserve remote and resume after provenance repair')
+            restored=json.loads(origin.read_text())
+            if restored['origin']['candidate_sha256']!=identity[1]:
+                raise ValueError('newer AUR candidate digest differs from trusted publication artifact')
+            history=Path(temporary)/'history'
+            run('git','clone','--quiet','--bare',str(directory/'source.bundle'),str(history),env=self.env)
+            ancestor=subprocess.run(['git','--git-dir',str(history),'merge-base','--is-ancestor',self.manifest['source_commit'],source[1]],capture_output=True)
+            if ancestor.returncode:
+                raise ValueError('competing AUR source is not a verified descendant; refusing stale overwrite')
+            for name in FILES:
+                if (Path(repo)/name).read_bytes()!=(directory/'aur-git'/name).read_bytes():
+                    raise ValueError(f'newer AUR remote content conflicts with trusted candidate: {name}')
+            newer=AurChannel(directory,'aur-git',self.remote,self.rpc_url,self.known_hosts,
+                discovery_attempts=self.discovery_attempts,discovery_delay=self.discovery_delay)
+            observed=newer.verify()
+            stage='superseded-discoverable' if observed['stage']=='discoverable' else 'superseded-pending-indexing'
+            return self.result(stage,actual_source_commit=source[1],actual_version=observed['version'],
+                remote_commit=observed['remote_commit'],provenance=restored['origin'],
+                diagnosis='a newer independently accepted descendant is current; original candidate was preserved without downgrade')
+
     def publish(self):
         self._accepted()
         self.preflight()
@@ -130,6 +193,9 @@ class AurChannel:
                 old_version = re.search(r'^\s*pkgver = (.+)$', old, re.M)
                 same = all((Path(tmp) / name).read_bytes() == (self.directory / self.channel / name).read_bytes() for name in FILES)
                 if old_version and not same:
+                    superseding=self._superseding(tmp)
+                    if superseding:
+                        return superseding
                     prior = old_version.group(1)
                     if prior == self.version.rsplit('-', 1)[0]:
                         raise ValueError('AUR same-version content conflict; preserve already published bytes')
@@ -145,7 +211,7 @@ class AurChannel:
             run('git', 'add', *FILES, cwd=tmp, env=self.env)
             if run('git', 'diff', '--cached', '--name-only', cwd=tmp, env=self.env):
                 run('git', '-c', 'user.name=Pomotui release', '-c', 'user.email=pomotui-release@users.noreply.github.com',
-                    'commit', '-qm', f'Update {self.package} to {self.version}\n\nSource: {self.manifest["source_commit"]}', cwd=tmp, env=self.env)
+                    'commit', '-qm', f'Update {self.package} to {self.version}\n\nSource: {self.manifest["source_commit"]}\nCandidate-SHA256: {self.result("identity")["candidate_sha256"]}\nPublication-Run: {os.environ.get("GITHUB_RUN_ID", "local")}', cwd=tmp, env=self.env)
                 # Normal fast-forward push, never force. A concurrent update rejects.
                 run('git', 'push', self.remote, 'HEAD:master', cwd=tmp, env=self.env)
         self.observer(self.result('pushed'))
@@ -153,10 +219,13 @@ class AurChannel:
 
     def verify(self):
         with tempfile.TemporaryDirectory(prefix='pomotui-aur-verify-') as tmp:
-            run('git', 'clone', '--quiet', '--branch', 'master', self.remote, tmp, env=self.env)
+            run('git', 'clone', '--quiet', '--branch', 'master', self.read_remote, tmp, env=self.env)
             commit = run('git', 'rev-parse', 'HEAD', cwd=tmp, env=self.env)
             for name in FILES:
                 if (Path(tmp) / name).read_bytes() != (self.directory / self.channel / name).read_bytes():
+                    superseding=self._superseding(tmp)
+                    if superseding:
+                        return superseding
                     raise ValueError(f'AUR remote content conflict: {self.package}/{name}; no overwrite performed')
         self.observer(self.result('remote-verified', remote_commit=commit))
         query = urllib.parse.urlencode({'arg[]': self.package})
@@ -185,12 +254,15 @@ def main():
     parser.add_argument('--remote')
     parser.add_argument('--rpc-url')
     parser.add_argument('--known-hosts', type=Path)
+    parser.add_argument('--provenance-api-url')
+    parser.add_argument('--source-repository',type=Path)
     parser.add_argument('--acceptance', type=Path)
     parser.add_argument('--discovery-attempts', type=int, default=6)
     parser.add_argument('--discovery-delay', type=float, default=10)
     args = parser.parse_args()
     channel = AurChannel(args.candidate, args.channel, args.remote, args.rpc_url, args.known_hosts,
-                         args.acceptance, args.discovery_attempts, args.discovery_delay)
+                         args.acceptance, args.discovery_attempts, args.discovery_delay,
+                         provenance_api_url=args.provenance_api_url,source_repository=args.source_repository)
     print(json.dumps(getattr(channel, args.action)()))
 
 
