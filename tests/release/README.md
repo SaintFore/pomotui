@@ -255,3 +255,45 @@ must still establish the recorded candidate package/version/hash, a replacement
 service PID, the installed candidate executable hash, and the effective packaged
 unit identity. Removing an unequal-code-hash assumption must never remove those
 candidate-identity checks.
+
+### Automatic Git-package publication
+
+`git-package.yml` listens only to a successful `CI` push run for this repository's
+`main`. `git_refresh.py select --source COMMIT` compares committed source with its
+first parent (an explicit `--before` supports a larger change range). Source,
+packaging, toolchain, and release workflow changes select a candidate. Unrelated
+documentation and generated `.SRCINFO` snapshots do not. Publication never
+commits generated metadata back to the source repository.
+
+The selected source passes the shared `candidate-gate.yml`: actual package builds,
+source checks, and both real upgrade suites. The publication job consumes that
+exact retained candidate, checks its source and receipts again through
+`git_refresh.py publish`, and shares `pomotui-aur-publication` concurrency with the
+stable path. Both paths reconcile identical Git-package bytes instead of creating
+duplicate AUR commits. A Git snapshot such as `r123.g0123456789ab` describes the
+verified publication source; the distributed recipe deliberately fetches latest
+upstream source when a user builds it.
+
+The reusable AUR channel boundary supports both package identities:
+
+```sh
+python3 packaging/release/aur.py preflight --candidate DIR --channel aur-git
+python3 packaging/release/aur.py publish --candidate DIR --channel aur-git --acceptance DIR/acceptance.json
+python3 packaging/release/aur.py verify --candidate DIR --channel aur-git
+```
+
+The workflow supplies `AUR_SSH_KEY_FILE` only after its required gate succeeds.
+Preflight uses strict checked-in host trust, authenticates with AUR `list-repos`,
+checks the selected maintained package, and exercises receive access with a
+nonmutating Git dry run. It does not adopt packages, configure an account, replace
+keys, or trust a newly observed host. The AUR server's permission check is
+implemented in [aurweb's SSH command handler](https://github.com/archlinux/aurweb/blob/master/aurweb/git/serve.py).
+
+Publication compares actual remote `PKGBUILD`, `.SRCINFO`, and the shared install
+hook before checking discovery through the AUR RPC. `pending-indexing` means the
+remote bytes are verified but user discovery has not caught up. The `verify`
+command resumes just those checks, without a push or new version. A changed
+already published version or a newer Git snapshot is a conflict, never a reason
+to force push. Local `--remote` bare repositories and local HTTP `--rpc-url`
+endpoints exercise the same CLI boundary in `aur_test.py`; they need no AUR key
+and do not claim to replace real package or upgrade acceptance.
