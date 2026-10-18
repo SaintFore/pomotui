@@ -1072,7 +1072,8 @@ impl App {
                     chain
                         .break_chain_entry_title
                         .clone()
-                        .unwrap_or_else(|| chain.break_task_title.clone()),
+                        .or_else(|| chain.break_task_title.clone())
+                        .unwrap_or_default(),
                 ),
                 _ => None,
             })
@@ -1914,7 +1915,8 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                 let title = chain
                     .break_chain_entry_title
                     .as_deref()
-                    .unwrap_or(&chain.break_task_title);
+                    .or(chain.break_task_title.as_deref())
+                    .unwrap_or(text(language, "Reservation", "预约"));
                 let style = if index == app.archive_cursor {
                     Style::default()
                         .fg(colors.background)
@@ -1928,7 +1930,9 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                         "{marker} {} {} · {title} · {}",
                         text(language, "Length", "长度"),
                         chain.length,
-                        chain_duration(chain.break_actual_seconds)
+                        chain
+                            .break_actual_seconds
+                            .map_or_else(|| "—".into(), chain_duration)
                     ),
                     style,
                 )));
@@ -2020,14 +2024,17 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
             let break_title = chain
                 .break_chain_entry_title
                 .as_deref()
-                .unwrap_or(&chain.break_task_title);
+                .or(chain.break_task_title.as_deref())
+                .unwrap_or(text(language, "Reservation", "预约"));
             lines.push(Line::from(Span::styled(
                 format!(
                     "{} └─ {}. {} · {break_title} · {}",
                     if selected { "›" } else { " " },
                     index + 1,
                     text(language, "CHAIN BREAK", "行动链中断"),
-                    chain_duration(chain.break_actual_seconds)
+                    chain
+                        .break_actual_seconds
+                        .map_or_else(|| "—".into(), chain_duration)
                 ),
                 style,
             )));
@@ -4414,8 +4421,9 @@ mod tests {
                 chain_entry_title: None,
             }],
             break_id,
-            break_task_title: title.into(),
-            break_actual_seconds: 32,
+            break_source: pomotui_protocol::ChainBreakSource::SessionReview,
+            break_task_title: Some(title.into()),
+            break_actual_seconds: Some(32),
             break_reflection: "Stopped on an unclear next step".into(),
             break_chain_entry_title: None,
             rewards: vec![],

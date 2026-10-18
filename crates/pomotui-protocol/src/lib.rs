@@ -269,6 +269,15 @@ pub struct ChainLinkSummary {
     pub chain_entry_title: Option<String>,
 }
 
+/// The user judgment that ended an Action Chain; never an automatic timer event.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainBreakSource {
+    #[default]
+    SessionReview,
+    ReservationReview,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EndedChainSummary {
     pub id: u64,
@@ -276,8 +285,10 @@ pub struct EndedChainSummary {
     #[serde(default)]
     pub links: Vec<ChainLinkSummary>,
     pub break_id: u64,
-    pub break_task_title: String,
-    pub break_actual_seconds: u64,
+    #[serde(default)]
+    pub break_source: ChainBreakSource,
+    pub break_task_title: Option<String>,
+    pub break_actual_seconds: Option<u64>,
     pub break_reflection: String,
     #[serde(default)]
     pub break_chain_entry_title: Option<String>,
@@ -894,6 +905,36 @@ mod tests {
                 error: ProtocolError::ServerBusy
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod chain_break_contract_tests {
+    use super::*;
+
+    #[test]
+    fn historical_break_without_source_retains_its_session_data() {
+        let chain: EndedChainSummary = serde_json::from_value(serde_json::json!({
+            "id": 1, "length": 2, "break_id": 3,
+            "break_task_title": "Existing task", "break_actual_seconds": 95,
+            "break_reflection": "Interrupted"
+        }))
+        .expect("historical archive");
+        assert_eq!(chain.break_source, ChainBreakSource::SessionReview);
+        assert_eq!(chain.break_task_title.as_deref(), Some("Existing task"));
+        assert_eq!(chain.break_actual_seconds, Some(95));
+    }
+
+    #[test]
+    fn non_session_break_needs_no_fabricated_task_or_focus_duration() {
+        let chain: EndedChainSummary = serde_json::from_value(serde_json::json!({
+            "id": 1, "length": 0, "break_id": 1,
+            "break_source": "reservation_review",
+            "break_task_title": null, "break_actual_seconds": null,
+            "break_reflection": "Did not start"
+        }))
+        .expect("reservation break without a Session");
+        assert_eq!(chain.break_source, ChainBreakSource::ReservationReview);
     }
 }
 
