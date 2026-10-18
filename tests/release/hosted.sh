@@ -7,6 +7,8 @@ out=$(realpath "$out")
 root=$(mktemp -d)
 container=
 cleanup() {
+    sudo journalctl -M pomotui-acceptance --no-pager > "$out/guest-journal.log" 2>&1 || true
+    sudo machinectl status pomotui-acceptance > "$out/machine-status.txt" 2>&1 || true
     sudo machinectl terminate pomotui-acceptance || true
     if [[ -n "$container" ]]; then docker rm -f "$container" || true; fi
     sudo rm -rf "$root"
@@ -28,7 +30,7 @@ git rev-parse --short=12 HEAD > "$out/work/candidate-short"
 cp tests/release/build-packages.sh "$out/work/build-packages.sh"
 docker run --rm -v "$out/work:/work" archlinux:base-devel bash /work/build-packages.sh 2>&1 | tee "$out/build.log"
 # Keep build tools/caches out of the booted guest; install only runtime prerequisites.
-container=$(docker create archlinux:base-devel bash -c 'pacman -Syu --noconfirm systemd dbus sqlite sudo; systemctl enable systemd-logind.service')
+container=$(docker create archlinux:base-devel bash -ec 'pacman -Syu --noconfirm systemd dbus sqlite sudo; systemctl enable systemd-logind.service')
 docker start -a "$container" | tee "$out/rootfs.log"
 [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
 docker export "$container" | sudo tar -x -C "$root"
