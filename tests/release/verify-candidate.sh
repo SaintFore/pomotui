@@ -49,7 +49,9 @@ python3 - "$candidate_dir" "$out" <<'PYCODE'
 import hashlib,json,pathlib,shutil,sys
 src,out=map(pathlib.Path,sys.argv[1:]);m=json.loads((src/'candidate.json').read_text())
 for channel,name in m['packages'].items():
-    shutil.copyfile(src/name,out/'packages'/pathlib.Path(name).name)
+    destination=out/'packages'/pathlib.Path(name).name
+    shutil.copyfile(src/name,destination)
+    if hashlib.sha256(destination.read_bytes()).hexdigest()!=m['artifacts'][name]: raise SystemExit('Transferred package checksum mismatch: '+channel)
 (out/'candidate.json').write_bytes((src/'candidate.json').read_bytes())
 PYCODE
 # Keep build tools/caches out of the booted guest; install only runtime prerequisites.

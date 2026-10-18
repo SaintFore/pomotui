@@ -297,3 +297,45 @@ already published version or a newer Git snapshot is a conflict, never a reason
 to force push. Local `--remote` bare repositories and local HTTP `--rpc-url`
 endpoints exercise the same CLI boundary in `aur_test.py`; they need no AUR key
 and do not claim to replace real package or upgrade acceptance.
+
+## Production candidate gate and stable GitHub coordinator (#24)
+
+`verify-candidate.sh CANDIDATE_DIRECTORY OUTPUT_DIRECTORY` verifies a built
+manifest, builds only the immutable previous stable predecessor, then boots a
+fresh Arch system and installs **the exact manifest package files**. Both stable
+and Git channels run the full clean-install/domain/migration/lifecycle matrix.
+Stable→Git is a real pacman conflict replacement; same-name Git reinstall also
+requires a replacement running PID with candidate bytes. Packaging-only changes
+need not invent different executable hashes. Installed package version/name,
+package checksum, installed/running executable bytes, packaged unit and public
+health remain mandatory. Only the separate nonpublishing fixture workflow uses
+`--allow-nonpublishing-fixture-predecessor`; production never overrides version
+ordering.
+
+The v0.3.0 source tag contains an old PKGBUILD version, so the predecessor builder
+derives package metadata from that immutable source's Cargo version. It never
+changes predecessor application source or rebuilds/modifies a candidate.
+
+`release.py select` checks authoritative merged PR data, final-source review or
+authorized maintainer merge, matching release title/workspace version and changed
+notes. Prior identity comes from the original PR commit ancestry, not moving
+main/API base. `candidate-gate.yml` performs all applicable checks and actual
+acceptance before retaining portable manifest-declared artifacts, including
+hidden metadata. Its output includes source-bound checks and manifest/package-
+bound acceptance receipts. Publication jobs depend on its successful completion;
+a built label alone is insufficient.
+
+`release.py verify-gates`, `preflight`, `publish-github` and `pack` are normal
+consumer CLI boundaries. The coordinator preflights both AUR packages before
+GitHub publication. GitHub publication preserves conflicting tags/assets/notes,
+reuses matching outputs, verifies authoritative bytes and user-visible downloads,
+and reports `pending-required-aur-channels` rather than aggregate completion.
+The stable workflow has no manual/tag entry point. Legacy manual AUR publication
+is closed. macOS jobs depend only on stable selection, independently of Linux.
+
+`publication_test.py` exercises the coordinator using isolated HTTP endpoints
+and real local bare AUR remotes: ordinary-vs-explicit release intent, fresh/stale
+review and solo-maintainer approval, moving API base, failed/mismatched gates or
+credentials, two-target preflight, immutable rerun, tag/asset/notes conflicts and
+upload-success-with-wrong-download rejection. Tiny transport fixtures test the
+publication boundary only; hosted real package acceptance supplies upgrade proof.

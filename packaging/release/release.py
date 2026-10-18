@@ -80,17 +80,34 @@ def select(args):
         for review in api.pages(f'pulls/{number}/reviews'):
             if review['state'] not in ('COMMENTED','PENDING'):
                 latest[review['user']['login']]=review
-        if not any(review['state']=='APPROVED' and review.get('commit_id')==head and user!=pr['user']['login'] for user,review in latest.items()):
-            raise ValueError('release PR requires current-source approval by another reviewer; approve the final PR head before merge')
+        approved=any(review['state']=='APPROVED' and review.get('commit_id')==head for review in latest.values())
+        merger=pr.get('merged_by',{}).get('login')
+        if not approved and merger:
+            permission=api.repo('collaborators/'+urllib.parse.quote(merger,safe='')+'/permission')
+            approved=permission.get('permission') in ('admin','maintain','write')
+        if not approved:
+            raise ValueError('release PR requires current-source approval or an authorized maintainer explicitly merging this release PR')
+        approval='maintainer-merge' if merger and not any(review['state']=='APPROVED' and review.get('commit_id')==head for review in latest.values()) else 'review'
+        commits=api.pages(f'pulls/{number}/commits')
+        if not commits: raise ValueError('release PR has no recorded source commits')
+        first=commits[0]['sha']
+        if not re.fullmatch('[0-9a-f]{40}',first): raise ValueError('invalid PR source identity')
+        available=subprocess.run(['git','-C',str(args.repo),'cat-file','-e',first+'^{commit}'],capture_output=True)
+        if available.returncode:
+            # Squash/rebase source commits may not belong to main's ancestry.
+            # Fetch the immutable reviewed PR head, never a moving main base.
+            subprocess.run(['git','-C',str(args.repo),'fetch','--no-tags','origin',f'refs/pull/{number}/head'],check=True)
+            if git(args.repo,'rev-parse','FETCH_HEAD')!=head: raise ValueError('PR head moved after recorded merge')
+        previous=git(args.repo,'rev-parse',first+'^')
         version=tomllib.loads(git(args.repo,'show',source+':Cargo.toml'))['workspace']['package']['version']
         if pr['title'] != 'release: v'+version:
             raise ValueError('release PR title must match the Cargo workspace version')
-        old_version=tomllib.loads(git(args.repo,'show',pr['base']['sha']+':Cargo.toml'))['workspace']['package']['version']
+        old_version=tomllib.loads(git(args.repo,'show',previous+':Cargo.toml'))['workspace']['package']['version']
         if version==old_version: raise ValueError('release PR must select a new workspace version')
-        changed=git(args.repo,'diff','--name-only',pr['base']['sha'],source).splitlines()
+        changed=git(args.repo,'diff','--name-only',previous,source).splitlines()
         if 'RELEASE_NOTES.md' not in changed or not git(args.repo,'show',source+':RELEASE_NOTES.md').strip():
             raise ValueError('release PR must include nonempty RELEASE_NOTES.md')
-        result={'intent':'stable','pull_request':number,'source_commit':source,'version':version,'tag':'v'+version,'notes':'RELEASE_NOTES.md','reviewed_head':head}
+        result={'intent':'stable','pull_request':number,'source_commit':source,'version':version,'tag':'v'+version,'notes':'RELEASE_NOTES.md','reviewed_head':head,'approval':approval,'previous_commit':previous}
     args.output.write_text(json.dumps(result, indent=2) + '\n')
 
 
@@ -164,6 +181,9 @@ def publish(args):
             raise ValueError('existing tag conflicts with recorded source; never repoint public tags')
     else:
         api.repo('git/refs',method='POST',payload={'ref':'refs/tags/'+tag,'sha':source})
+        created=api.repo('git/ref/tags/'+tag)
+        if created.get('object',{}).get('type')!='commit' or created['object'].get('sha')!=source:
+            raise ValueError('created tag failed authoritative source verification; preserve remote state and inspect')
     release=api.repo('releases/tags/'+tag,missing=True)
     if release is None:
         release=api.repo('releases',method='POST',payload={'tag_name':tag,'target_commitish':source,'name':tag,'body':(args.candidate/'release-notes.md').read_text(),'draft':True,'prerelease':False})

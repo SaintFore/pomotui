@@ -54,7 +54,7 @@ class ReleasePolicy(unittest.TestCase):
             git('add','.');git('commit','-qm','Release');source=git('rev-parse','HEAD')
             pr={'number':42,'merged':True,'state':'closed','title':'release: v0.2.0','merge_commit_sha':source,'head':{'sha':source},'base':{'ref':'main','sha':base},'user':{'login':'author'}}
             event=root/'event.json';event.write_text(json.dumps({'action':'closed','number':42,'pull_request':pr}))
-            routes={'/repos/test/project/pulls/42':(200,pr),'/repos/test/project/pulls/42/reviews?per_page=100&page=1':(200,[])}
+            routes={'/repos/test/project/pulls/42':(200,pr),'/repos/test/project/pulls/42/reviews?per_page=100&page=1':(200,[]),'/repos/test/project/pulls/42/commits?per_page=100&page=1':(200,[{'sha':source}])}
             with github_fixture(routes) as (url,calls):
                 command=['python3',str(CLI),'select','--event',str(event),'--repo',str(repo),'--repository','test/project','--api-url',url,'--output',str(root/'selected.json')]
                 result=subprocess.run(command,text=True,capture_output=True)
@@ -65,9 +65,20 @@ class ReleasePolicy(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr)
                 selected=json.loads((root/'selected.json').read_text())
                 self.assertEqual((selected['intent'],selected['source_commit'],selected['version']),('stable',source,'0.2.0'))
+                # The live main/base identity can advance after the PR closes.
+                pr['base']['sha']=source
+                result=subprocess.run(command,text=True,capture_output=True)
+                self.assertEqual(result.returncode,0,result.stderr)
                 routes['/repos/test/project/pulls/42/reviews?per_page=100&page=1']=(200,[{'user':{'login':'maintainer'},'state':'APPROVED','commit_id':base}])
                 result=subprocess.run(command,text=True,capture_output=True)
                 self.assertNotEqual(result.returncode,0,'stale approval must not authorize changed release source')
+                # A solo owner explicitly authorizes a release by merging its
+                # versioned release PR; a second human is not required.
+                pr['merged_by']={'login':'author'}
+                routes['/repos/test/project/collaborators/author/permission']=(200,{'permission':'admin'})
+                result=subprocess.run(command,text=True,capture_output=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(json.loads((root/'selected.json').read_text())['approval'],'maintainer-merge')
 
 def prepared_candidate(root):
     repo=root/'source';repo.mkdir()
@@ -93,7 +104,7 @@ def prepared_candidate(root):
 
 
 @contextlib.contextmanager
-def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=False, corrupt_download=False):
+def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=False, corrupt_download=False, wrong_created_tag=False):
     state={'tag':('f'*40 if conflicting_tag else None),'release':None,'assets':{},'writes':[],'notes':notes}
     class Handler(BaseHTTPRequestHandler):
         def reply(self,code,value,raw=False):
@@ -112,7 +123,7 @@ def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=F
         def do_POST(self):
             body=self.rfile.read(int(self.headers.get('Content-Length',0)));state['writes'].append(self.path)
             if self.path.endswith('/git/refs'):
-                state['tag']=json.loads(body)['sha'];return self.reply(201,{'ref':'refs/tags/v0.3.0'})
+                state['tag']='e'*40 if wrong_created_tag else json.loads(body)['sha'];return self.reply(201,{'ref':'refs/tags/v0.3.0'})
             if self.path.endswith('/releases'):
                 value=json.loads(body);value.update(id=1,upload_url=base+'/upload{?name,label}',html_url=base+'/release')
                 state['release']=value;return self.reply(201,value)
@@ -162,6 +173,35 @@ class ReleaseDelivery(unittest.TestCase):
                 self.assertNotEqual(result.returncode,0,'same version must not silently reuse conflicting public notes')
                 self.assertEqual(state['writes'],writes)
 
+    def test_manifest_transfer_keeps_hidden_metadata_notes_and_bundle_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            (candidate/'unrelated-build-cache').write_bytes(b'Not part of the recorded output')
+            result=subprocess.run(['python3',str(CLI),'pack','--candidate',str(candidate),'--output',str(root/'portable')],text=True,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            for name in ['candidate.json','source.bundle','release-notes.md','aur-stable/.SRCINFO','aur-git/.SRCINFO','acceptance.json','checks.json']:
+                self.assertEqual((candidate/name).read_bytes(),(root/'portable'/name).read_bytes())
+            self.assertFalse((root/'portable/unrelated-build-cache').exists())
+
+    def test_real_preflight_checks_both_aur_targets_before_github_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            for package in ['pomotui','pomotui-git']:
+                subprocess.run(['git','init','--bare','-q',str(root/(package+'.git'))],check=True)
+            command=['python3',str(CLI),'preflight','--candidate',str(candidate),'--acceptance',str(candidate/'acceptance.json'),'--checks',str(candidate/'checks.json'),'--aur-remote',str(root/'{package}.git'),'--aur-rpc-url','http://127.0.0.1:1/rpc','--output',str(root/'preflight.json')]
+            result=subprocess.run(command,text=True,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            report=json.loads((root/'preflight.json').read_text())
+            self.assertEqual({c['package'] for c in report['channels']},{'pomotui','pomotui-git'})
+            with publication_remote(manifest['source_commit']) as (url,state):
+                result=self.publish(root,candidate,url)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertFalse(state['release']['draft'])
+                # The preflight performs no actual AUR ref update.
+                for package in ['pomotui','pomotui-git']:
+                    refs=subprocess.check_output(['git','--git-dir',str(root/(package+'.git')),'show-ref'],text=True) if (root/(package+'.git')/'refs/heads/master').exists() else ''
+                    self.assertEqual(refs,'')
+
     def test_conflicting_tag_is_preserved_without_any_release_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);candidate,manifest=prepared_candidate(root)
@@ -171,6 +211,15 @@ class ReleaseDelivery(unittest.TestCase):
                 self.assertIn('never repoint',result.stderr)
                 self.assertEqual(state['writes'],[])
                 self.assertEqual(state['tag'],'f'*40)
+
+    def test_created_tag_is_read_back_before_release_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            with publication_remote(manifest['source_commit'],wrong_created_tag=True) as (url,state):
+                result=self.publish(root,candidate,url)
+                self.assertNotEqual(result.returncode,0,'write success is not authoritative tag verification')
+                self.assertIsNone(state['release'])
+                self.assertEqual(state['tag'],'e'*40)
 
     def test_upload_success_with_wrong_remote_bytes_is_not_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
