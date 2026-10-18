@@ -61,3 +61,5 @@ printf 'old_pid=%s\ncandidate_pid=%s\nold_service_sha256=%s\ncandidate_service_s
 echo 'PASS: clean install and real package upgrade served by candidate'
 
 python "$(dirname "${BASH_SOURCE[0]}")/scenarios/domain-state.py" "$old" "$candidate" "$output" "$user" "$uid"
+
+source "$(dirname "$0")/lifecycle.sh"
