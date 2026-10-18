@@ -53,6 +53,24 @@ class AurTest(candidate_test.CandidateTest):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         return result
 
+    def test_a_newer_candidate_advances_its_already_published_ancestor(self):
+        env=os.environ.copy();env['GITHUB_RUN_ID']='123'
+        self.aur('publish',env=env)
+        old=self.output
+        (self.repo/'packaging/aur/pomotui.install').write_text('Updated shared hook\n')
+        self.git('add','.');self.git('commit','-qm','Next source')
+        self.output=old.parent/'next'
+        self.plan()
+        manifest=built_candidate(self.output)
+        self.acceptance=self.output/'acceptance.json'
+        self.acceptance.write_text(json.dumps(acceptance(self.output)))
+        self.visible_version=manifest['git_version']+'-1'
+        result=self.aur('publish','--provenance-api-url','http://127.0.0.1:1')
+        self.assertEqual(result['stage'],'discoverable')
+        self.assertEqual(result['source_commit'],manifest['source_commit'])
+        actual=subprocess.check_output(['git','--git-dir',str(self.remote),'show','master:pomotui.install'])
+        self.assertEqual(actual,(self.output/'aur-git/pomotui.install').read_bytes())
+
     def test_a_newer_verified_descendant_is_reconciled_without_downgrade(self):
         from recovery_fixture import trusted_run
         old_output=self.output

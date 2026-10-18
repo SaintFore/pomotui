@@ -73,6 +73,7 @@ jobs:
           --checks "$RUNNER_TEMP/candidate/checks.json"
       - name: Preflight and publish the verified Git snapshot
         env:
+          GH_TOKEN: ${{ github.token }}
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail

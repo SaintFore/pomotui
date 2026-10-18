@@ -145,6 +145,13 @@ class AurChannel:
         publication=re.search(r'^Publication-Run: ([0-9]+)$',message,re.M)
         if not source or not identity or not publication or source[1]==self.manifest['source_commit']:
             return None
+        # An ancestor is the ordinary update path, not a competing newer run.
+        with tempfile.TemporaryDirectory(prefix='pomotui-candidate-history-') as temporary:
+            history=Path(temporary)/'history'
+            run('git','clone','--quiet','--bare',str(self.directory/'source.bundle'),str(history),env=self.env)
+            ancestor=subprocess.run(['git','--git-dir',str(history),'merge-base','--is-ancestor',source[1],self.manifest['source_commit']],capture_output=True)
+            if ancestor.returncode==0:
+                return None
         with tempfile.TemporaryDirectory(prefix='pomotui-newer-publication-') as temporary:
             directory=Path(temporary)/'candidate'
             origin=Path(temporary)/'origin.json'
