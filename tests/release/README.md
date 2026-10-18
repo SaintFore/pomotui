@@ -94,6 +94,77 @@ preserving the original database bytes. No database query is used to assert
 business state. Each scenario retains before/after snapshots, candidate process
 identity, pacman output, and failure diagnostics under `result/domain-state`.
 
+## Source-identified candidate preparation (#23)
+
+The non-publishing public interface is `packaging/release/candidate.py` (Python
+3.11+, Git, Docker, GNU tar with zstd support for build output inspection):
+
+```sh
+python3 packaging/release/candidate.py plan --source HEAD --output /tmp/candidate
+python3 packaging/release/candidate.py build --output /tmp/candidate
+python3 packaging/release/candidate.py verify --output /tmp/candidate --require-built
+```
+
+Planning reads the committed source, not dirty working files, and requires full
+Git history. Ordinary candidates require only `aur-git`. Stable intent must be
+explicit: add `--intent stable --notes release-notes.md` to `plan`; this requires
+`github-linux`, `aur-stable`, and `aur-git`. The workspace version is the only
+stable-version input; every workspace package must inherit it and its lockfile
+entry must agree. The stable tag is derived and checked against any existing
+local tag. The later publisher must also reconcile the authoritative remote tag.
+This command does not establish release-PR approval; the coordinator owns that
+authorization check.
+
+`candidate.json` records schema version, exact source commit, workspace version,
+commit-derived Git snapshot, tag intent, required channels, expected outputs,
+selected toolchain/target, and SHA-256 identities of the source, recipes,
+`.SRCINFO`, current shared hook, notes, and built artifacts. `planned` never
+passes `verify --require-built`. Building uses a disposable Arch image recorded
+by digest; it installs the target into the toolchain selected by the source's
+`rust-toolchain.toml`, executes the generated recipes' real build and checks,
+compares `makepkg --printsrcinfo`, verifies stable-source checksums, and inspects
+actual package metadata and packaged hook. The Git build freezes the recorded
+commit using a local Git bundle and makepkg's `--holdver`; the distributed recipe
+still fetches moving upstream HEAD and recalculates its snapshot version.
+
+Built outputs include `built/aur-stable/*.pkg.tar.zst` when stable was selected,
+`built/aur-git/*.pkg.tar.zst`, Linux binary archive/checksum, binary hashes, and
+`build.log`. Pass the recorded package path to the existing
+`acceptance.sh OLD_PACKAGE CANDIDATE_PACKAGE OUTPUT_DIRECTORY` boundary. A built
+candidate still records `acceptance: required`: package construction never
+substitutes for either real acceptance suite, credential preflight, or release
+approval. The Git package provides/conflicts with `pomotui`; the acceptance
+adapter must account for its distinct actual package name.
+
+The stable source is the generated `pomotui-VERSION-source.tar.gz`, whose exact
+bytes and embedded Git source identity are checked. The generated stable recipe
+uses that source asset's eventual GitHub Release URL, **not** a separately
+regenerated GitHub tag archive. After all gates, the publisher must reconcile or
+create the immutable `vVERSION` tag at the recorded commit, upload this exact
+source asset, verify it is externally available, then publish its matching AUR
+recipe. No source tag is created during preparation. The legacy platform workflow
+is now explicitly non-publishing and has no tag trigger, so creating a source tag
+cannot bypass the acceptance gate.
+
+The `Non-publishing Linux candidate` workflow exercises this path for relevant
+PRs without deployment secrets. Its stable fixture uses `0.0.0` only in a
+disposable local source commit, builds both real package recipes, and never
+publishes that commit, tag, or version. Run fast isolated boundary regressions
+with `python3 -m unittest discover -s tests/release -p '*_test.py'`.
+
+[Candidate build run 39109386492](https://github.com/SaintFore/pomotui/actions/runs/39109386492)
+passed both cases on 2026-10-18. The ordinary source was
+`660d9da3259a071f472d33e20dcb114a2fea283c`, producing
+`pomotui-git r191.g660d9da3259a-1`. The disposable stable source was
+`c79d701dd8ec9b027646ba450440d3ebe17f24ef`, producing `pomotui 0.0.0-1`
+and `pomotui-git r192.gc79d701dd8ec-1`. Both used Rust `1.96.1`, target
+`x86_64-unknown-linux-gnu`, and Arch image
+`archlinux@sha256:061679925e5d5028f2df9395d441ce6c4b9accf0157ff3486c06b6962e014ef1`.
+The generated recipes completed actual workspace release builds, workspace
+checks, package construction, canonical metadata comparison, and output/hook
+inspection. Source commits, package/archive/binary hashes and complete build
+logs are retained in that run's candidate artifacts. These are package-build
+results, not installation/upgrade acceptance or delivery evidence.
 ## Upgrade lifecycle and disabled intent
 
 The shared AUR hook treats an enabled `pomotui.socket` as the durable opt-in for
@@ -151,3 +222,15 @@ scenario took 9.358 seconds and 19.4 MB peak memory. The run artifact
 unit properties before each scenario, public statuses, pacman output and journals.
 This establishes the lifecycle boundary; it does not claim publication readiness
 or domain-state acceptance, which are verified separately.
+
+
+### Candidate adapter compatibility
+
+The feasibility-only baseline assumed both packages were named `pomotui` and
+required different old/new executable hashes. Production acceptance must also
+accept the actual `pomotui-git` package (which provides/conflicts with `pomotui`).
+Packaging-only changes can retain identical executable bytes. Those upgrades
+must still establish the recorded candidate package/version/hash, a replacement
+service PID, the installed candidate executable hash, and the effective packaged
+unit identity. Removing an unequal-code-hash assumption must never remove those
+candidate-identity checks.
