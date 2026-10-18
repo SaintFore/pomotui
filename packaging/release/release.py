@@ -11,7 +11,7 @@ import urllib.parse
 from pathlib import Path
 import re
 import subprocess
-from recovery import Journal, TransientError, atomic, locked
+from recovery import Journal, TransientError, atomic, locked, remote_verified, complete
 
 
 class DownloadRedirect(urllib.request.HTTPRedirectHandler):
@@ -54,6 +54,28 @@ class GitHub:
 
     def repo(self, path, **kwargs):
         return self.request(f'/repos/{self.repository}/{path}', **kwargs)
+
+    def tag_source(self, tag, ref=None):
+        obj=(ref or self.repo('git/ref/tags/'+tag))['object']
+        for _ in range(10):
+            if obj.get('type')=='commit' and re.fullmatch('[0-9a-f]{40}',obj.get('sha','')):
+                return obj['sha']
+            if obj.get('type')!='tag': break
+            obj=self.repo('git/tags/'+obj['sha'])['object']
+        raise ValueError('GitHub tag has invalid source commit identity: '+tag)
+
+    def assets(self, release, directory, names, upload=False, discoverable=False):
+        assets={item['name']:item for item in self.pages('releases/'+str(release['id'])+'/assets')}
+        for name in names:
+            expected=(directory/name).read_bytes()
+            if name not in assets and upload:
+                url=release['upload_url'].split('{')[0]+'?'+urllib.parse.urlencode({'name':name})
+                assets[name]=self.request(url,method='POST',payload=expected)
+            asset=assets.get(name,{})
+            urls=[asset.get('url')]
+            if discoverable: urls.append(asset.get('browser_download_url'))
+            if any(not url or self.request(url,raw=True)!=expected for url in urls):
+                raise ValueError('immutable GitHub asset conflict or missing user download: '+name)
 
     def pages(self, path):
         result=[]
@@ -128,14 +150,9 @@ def previous(args):
         releases.append((version,release))
     if not releases: raise ValueError('No published non-draft stable predecessor is available; an unannounced tag is not a released upgrade baseline')
     _,release=max(releases,key=lambda item:item[0]);tag=release['tag_name']
-    obj=api.repo('git/ref/tags/'+tag)['object']
-    for _ in range(10):
-        if obj['type']=='commit': break
-        if obj['type']!='tag': raise ValueError('published predecessor tag is not a source commit')
-        obj=api.repo('git/tags/'+obj['sha'])['object']
-    if obj.get('type')!='commit': raise ValueError('published predecessor tag chain is invalid')
+    remote=api.tag_source(tag)
     local=git(args.repo,'rev-parse',tag+'^{commit}')
-    if local!=obj['sha']: raise ValueError('published stable predecessor tag/source conflict; fetch and inspect immutable release identity')
+    if local!=remote: raise ValueError('published stable predecessor tag/source conflict; fetch and inspect immutable release identity')
     args.output.write_text(json.dumps({'version':tag[1:],'tag':tag,'source_commit':local,'release_id':release['id'],'url':release.get('html_url')},indent=2)+'\n')
     print(tag)
 
@@ -206,12 +223,7 @@ def publish(args):
     tag=manifest['tag_intent']; source=manifest['source_commit']
     ref=api.repo('git/ref/tags/'+tag,missing=True)
     if ref:
-        obj=ref['object']
-        for _ in range(10):
-            if obj['type']=='commit': break
-            if obj['type']!='tag': raise ValueError('existing tag has unsupported object identity')
-            obj=api.repo('git/tags/'+obj['sha'])['object']
-        if obj.get('type')!='commit' or obj['sha']!=source:
+        if api.tag_source(tag,ref)!=source:
             raise ValueError('existing tag conflicts with recorded source; never repoint public tags')
     else:
         api.repo('git/refs',method='POST',payload={'ref':'refs/tags/'+tag,'sha':source})
@@ -229,15 +241,7 @@ def publish(args):
     if release.get('prerelease') or release.get('tag_name')!=tag:
         raise ValueError('existing GitHub release identity conflicts with stable release')
     assets=[manifest['source_archive'],'pomotui-linux-x86_64.tar.gz','pomotui-linux-x86_64.sha256']
-    remote_assets={asset['name']:asset for asset in api.pages('releases/'+str(release['id'])+'/assets')}
-    for name in assets:
-        expected_bytes=(args.candidate/name).read_bytes()
-        if name not in remote_assets:
-            upload=release['upload_url'].split('{')[0]+'?'+urllib.parse.urlencode({'name':name})
-            remote_assets[name]=api.request(upload,method='POST',payload=expected_bytes)
-        received=api.request(remote_assets[name]['url'],raw=True)
-        if received!=expected_bytes:
-            raise ValueError(f'immutable GitHub asset conflict: {name}; preserve existing output and inspect source/checksums')
+    api.assets(release,args.candidate,assets,upload=True)
     observer({'channel':'github-linux','stage':'remote-verified','source_commit':source,'tag':tag,
               'candidate_sha256':digest(args.candidate/'candidate.json'),'detail':'all required immutable asset bytes verified; draft is not discoverable'})
     if release.get('draft'):
@@ -245,38 +249,53 @@ def publish(args):
     visible=api.repo('releases/tags/'+tag)
     if visible.get('draft') or visible.get('prerelease') or visible.get('tag_name')!=tag:
         raise ValueError('GitHub release is not discoverable as the intended stable release')
-    # User-facing asset URLs must serve the exact retained bytes, not merely
-    # appear in an upload API response. Authentication remains on trusted API.
-    for name in assets:
-        url=remote_assets[name].get('browser_download_url')
-        if not url: raise ValueError('GitHub asset has no user-visible download URL: '+name)
-        if api.request(url,raw=True)!=(args.candidate/name).read_bytes():
-            raise ValueError('GitHub user download checksum mismatch: '+name)
+    api.assets(visible,args.candidate,assets,discoverable=True)
     args.output.write_text(json.dumps({'channel':'github-linux','stage':'discoverable','source_commit':source,'tag':tag,'url':visible['html_url'],'aggregate':'pending-required-aur-channels'},indent=2)+'\n')
 
 
 def verify_github(args, manifest):
     api=GitHub(args.repository,args.api_url)
     tag=manifest['tag_intent']
-    obj=api.repo('git/ref/tags/'+tag)['object']
-    for _ in range(10):
-        if obj['type']=='commit': break
-        if obj['type']!='tag': raise ValueError('GitHub tag has unsupported source identity')
-        obj=api.repo('git/tags/'+obj['sha'])['object']
-    if obj.get('type')!='commit' or obj['sha']!=manifest['source_commit']:
+    if api.tag_source(tag)!=manifest['source_commit']:
         raise ValueError('GitHub tag source conflicts with recorded candidate')
     release=api.repo('releases/tags/'+tag)
     if release.get('draft') or release.get('prerelease') or release.get('tag_name')!=tag:
         raise ValueError('GitHub stable source is not publicly discoverable')
     if release.get('body')!=(args.candidate/'release-notes.md').read_text():
         raise ValueError('GitHub release notes conflict with recorded candidate')
-    assets={item['name']:item for item in api.pages('releases/'+str(release['id'])+'/assets')}
-    for name in [manifest['source_archive'],'pomotui-linux-x86_64.tar.gz','pomotui-linux-x86_64.sha256']:
-        asset=assets.get(name,{})
-        url=asset.get('browser_download_url')
-        if not url or api.request(url,raw=True)!=(args.candidate/name).read_bytes():
-            raise ValueError('GitHub user download checksum mismatch or missing asset: '+name)
+    api.assets(release,args.candidate,[manifest['source_archive'],'pomotui-linux-x86_64.tar.gz','pomotui-linux-x86_64.sha256'],discoverable=True)
     return {'channel':'github-linux','stage':'discoverable','source_commit':manifest['source_commit'],'tag':tag,'url':release['html_url']}
+
+
+def macos(args):
+    manifest=verify_gates(args)
+    publication=json.loads(args.publication.read_text())
+    if publication.get('source_commit')!=manifest['source_commit'] or publication.get('candidate_sha256')!=digest(args.candidate/'candidate.json') or publication.get('channels',{}).get('github-linux',{}).get('stage')!='discoverable':
+        raise ValueError('required publication has not verified Linux delivery after credential preflight for this candidate')
+    receipt=json.loads((args.macos/'build.json').read_text())
+    targets={'aarch64-apple-darwin':'aarch64','x86_64-apple-darwin':'x86_64'}
+    if receipt.get('source_commit')!=manifest['source_commit'] or receipt.get('target') not in targets or not manifest.get('tag_intent'):
+        raise ValueError('macOS build does not identify the accepted stable source/target')
+    stem='pomotui-macos-'+targets[receipt['target']]
+    names=[stem+'.tar.gz',stem+'.sha256']
+    if set(receipt.get('artifacts',{}))!=set(names) or any(digest(args.macos/name)!=receipt['artifacts'][name] for name in names):
+        raise ValueError('macOS artifact checksum conflicts with source-bound build receipt')
+    if (args.macos/names[1]).read_text()!=digest(args.macos/names[0])+'  '+names[0]+'\n':
+        raise ValueError('macOS checksum must identify archive basename and exact bytes')
+    with locked(args.output):
+        journal=Journal(args.output,args.candidate)
+        def attempt():
+            # Existing verified Linux delivery proves preflight preceded release
+            # creation. Optional publishers never create releases or tags.
+            verify_github(args,manifest)
+            api=GitHub(args.repository,args.api_url)
+            release=api.repo('releases/tags/'+manifest['tag_intent'])
+            api.assets(release,args.macos,names,upload=True,discoverable=True)
+            journal.event({'channel':'github-macos-'+targets[receipt['target']],
+                'stage':'discoverable','source_commit':manifest['source_commit'],
+                'artifacts':receipt['artifacts'],'url':release['html_url']})
+            journal.value['aggregate']='optional-complete';journal.save()
+        journal.execute(attempt,args.retry_attempts,args.retry_delay)
 
 
 def stable_attempt(args, journal):
@@ -304,8 +323,8 @@ def stable_attempt(args, journal):
                 discovery_attempts=args.discovery_attempts,discovery_delay=args.discovery_delay,
                 observer=event,provenance_api_url=args.provenance_api_url,source_repository=args.source_repository)
             previous=report['channels'].get(channel,{}).get('stage')
-            event(client.verify() if args.command=='verify-stable' or previous in ('remote-verified','pending-indexing','discoverable','superseded-discoverable') else client.publish())
-        report['aggregate']='complete' if all(value['stage'] in ('discoverable','superseded-discoverable') for value in report['channels'].values()) else 'pending-indexing'
+            event(client.verify() if args.command=='verify-stable' or remote_verified(previous) else client.publish())
+        report['aggregate']='complete' if all(complete(value['stage']) for value in report['channels'].values()) else 'pending-indexing'
         save()
         if report['aggregate']!='complete':
             raise ValueError('AUR remote content verified; pending discovery. Run verify-stable with the same candidate; no new commit or push is needed')
@@ -359,6 +378,14 @@ def main():
             p.add_argument('--api-url',default='https://api.github.com')
             p.add_argument('--output',type=Path,required=True)
         p.set_defaults(func=func)
+    p=commands.add_parser('publish-macos')
+    for name in ['candidate','acceptance','checks','macos','publication','output']:
+        p.add_argument('--'+name,type=Path,required=True)
+    p.add_argument('--repository',default=os.environ.get('GITHUB_REPOSITORY','SaintFore/pomotui'))
+    p.add_argument('--api-url',default='https://api.github.com')
+    p.add_argument('--retry-attempts',type=int,default=3)
+    p.add_argument('--retry-delay',type=float,default=2)
+    p.set_defaults(func=macos)
     for command in ['publish-stable','verify-stable']:
         p=commands.add_parser(command)
         p.add_argument('--candidate',type=Path,required=True)
