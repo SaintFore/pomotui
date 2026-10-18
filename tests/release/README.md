@@ -104,3 +104,26 @@ real manager. The conflict scenarios keep an old source-install executable
 responding, proving that a status response alone cannot establish acceptance;
 its exact override is diagnosed and its content and process are preserved.
 All scenario state belongs to the disposable acceptance user.
+
+### Hosted lifecycle evidence
+
+[Red run 39109196865](https://github.com/SaintFore/pomotui/actions/runs/39109196865)
+at `bd3ba03f6333` reproduced the actual systemd start-limit defect on 2026-10-18:
+the stopped-service case passed, but crash-loop recovery was refused with
+“start of the service was attempted too often” and the service remained failed.
+The manager explicitly required `reset-failed` before another start.
+
+[Green run 39109471604](https://github.com/SaintFore/pomotui/actions/runs/39109471604)
+at `e2d675cca5e015fc18a7c1b6f3297b5daae0c23a` passed clean install/upgrade and all
+six lifecycle scenarios on 2026-10-18. Pacman genuinely upgraded `0.3.0-1` to
+`0.3.0.r191.ge2d675cca5e0-1` for each scenario. Real stopped, failed and
+`start-limit-hit` services recovered to healthy candidate processes without a
+manual restart. Disabled socket/service remained disabled/inactive. Both live
+old source-install conflicts were diagnosed by exact user unit/drop-in path;
+their checksums and existing process IDs remained unchanged, and their executable
+hashes differed from the installed candidate. The complete booted acceptance
+scenario took 9.358 seconds and 19.4 MB peak memory. The run artifact
+`arch-acceptance-e2d675cca5e015fc18a7c1b6f3297b5daae0c23a` retains package hashes,
+unit properties before each scenario, public statuses, pacman output and journals.
+This establishes the lifecycle boundary; it does not claim publication readiness
+or domain-state acceptance, which are verified separately.

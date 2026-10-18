@@ -16,11 +16,11 @@ case "$*" in
     *"is-enabled --quiet pomotui.socket"*) exit "${POMOTUI_TEST_SOCKET_EXIT:-0}" ;;
     *"pomotui.service -p FragmentPath"*) printf '%s\n' "${POMOTUI_TEST_FRAGMENT:-/usr/lib/systemd/user/pomotui.service}" ;;
     *"pomotui.socket -p FragmentPath"*) echo /usr/lib/systemd/user/pomotui.socket ;;
-    *"DropInPaths"*) : ;;
+    *"DropInPaths"*) printf '%s\n' "${POMOTUI_TEST_DROPINS:-}" ;;
     *"MainPID"*) echo $$ ;;
     *"reset-failed"*) rm -f "$POMOTUI_TEST_LIMIT" ;;
     *"restart pomotui.service"*) test ! -f "$POMOTUI_TEST_LIMIT" || exit 1; printf 'active\n' >"$POMOTUI_TEST_STATE" ;;
-    *"/usr/bin/pomotui status"*) echo '{"snapshot":{"durable_health":{"state":"healthy"}}}'; exit "${POMOTUI_TEST_HEALTH_EXIT:-0}" ;;
+    *"/usr/bin/pomotui status"*) printf '{"snapshot":{"durable_health":{"state":"%s"}}}\n' "${POMOTUI_TEST_HEALTH_STATE:-healthy}"; exit "${POMOTUI_TEST_HEALTH_EXIT:-0}" ;;
 esac
 MOCK
 cat > "$test_root/sha256sum" <<'MOCK'
@@ -59,6 +59,10 @@ test ! -s "$test_root/disabled.err"
 POMOTUI_TEST_FRAGMENT=/home/tester/.config/systemd/user/pomotui.service post_upgrade 2> "$test_root/conflict.err"
 grep -q '/home/tester/.config/systemd/user/pomotui.service' "$test_root/conflict.err"
 ! grep -q 'restart\|reset-failed' "$test_root/calls"
+POMOTUI_TEST_DROPINS=/home/tester/.config/systemd/user/pomotui.service.d/source.conf post_upgrade 2> "$test_root/dropin.err"
+grep -q 'DropInPaths=/home/tester/.config/systemd/user/pomotui.service.d/source.conf' "$test_root/dropin.err"
+POMOTUI_TEST_HEALTH_STATE=failed post_upgrade 2> "$test_root/degraded.err"
+grep -q 'public status health check failed' "$test_root/degraded.err"
 POMOTUI_TEST_HEALTH_EXIT=1 post_upgrade 2> "$test_root/health.err"
 grep -q 'public status health check failed' "$test_root/health.err"
 POMOTUI_TEST_RUNNING_HASH=old post_upgrade 2> "$test_root/executable.err"
