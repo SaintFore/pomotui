@@ -1,0 +1,33 @@
+--- a/parse.go
++++ b/parse.go
+@@ -808,6 +808,7 @@
+ // https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#jobsjob_idconcurrency
+ func (p *parser) parseConcurrency(pos *Pos, n *yaml.Node) *Concurrency {
+ 	ret := &Concurrency{Pos: pos}
++	var queue *String
+ 
+ 	if n.Kind == yaml.ScalarNode {
+ 		ret.Group = p.parseString(n, false)
+@@ -820,12 +821,20 @@
+ 			ret.Group = p.parseString(e.val, false)
+ 		case "cancel-in-progress":
+ 			ret.CancelInProgress = p.parseBool(e.val)
+-		default:
+-			p.unexpectedKey(e.key, "concurrency", []string{"group", "cancel-in-progress"})
++		case "queue":
++			queue = p.parseString(e.val, false)
++			if queue != nil && queue.Value != "single" && queue.Value != "max" {
++				p.errorAt(queue.Pos, "queue must be single or max")
++			}
++		default:
++			p.unexpectedKey(e.key, "concurrency", []string{"group", "cancel-in-progress", "queue"})
+ 		}
+ 	}
+ 	if ret.Group == nil {
+ 		p.errorAt(pos, "group name is missing in \"concurrency\" section")
++	}
++	if queue != nil && queue.Value == "max" && ret.CancelInProgress != nil && ret.CancelInProgress.Expression == nil && ret.CancelInProgress.Value {
++		p.errorAt(queue.Pos, "queue max requires cancel-in-progress false")
+ 	}
+ 	return ret
+ }

@@ -51,7 +51,8 @@ jobs:
           exec > >(tee "$RUNNER_TEMP/source-checks.log") 2>&1
           cargo fmt --all --check
           sh packaging/tests/aur-install.sh
-          python3 -m unittest discover -s tests/release -p '*_test.py'
+          python3 tests/release/check-boundaries.py
+          python3 tests/release/check-boundaries.py --version 0.0.0
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --workspace --all-targets --all-features
           cargo build --workspace

@@ -12,7 +12,16 @@ on:
 permissions:
   contents: read
 jobs:
+  boundaries:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release boundaries before package builds
+        run: |
+          python3 tests/release/check-boundaries.py
+          python3 tests/release/check-boundaries.py --version 0.0.0
   candidate:
+    needs: boundaries
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -23,8 +32,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Candidate interface regression tests
-        run: python3 -m unittest discover -s tests/release -p '*_test.py'
       - name: Prepare source-identified Git candidate
         if: matrix.kind == 'git'
         run: python3 packaging/release/candidate.py plan --output "$RUNNER_TEMP/candidate"
@@ -40,21 +47,12 @@ jobs:
           sha256sum --check "$RUNNER_TEMP/candidate-before.sha256"
       - name: Require actual build evidence
         run: python3 packaging/release/candidate.py verify --output "$RUNNER_TEMP/candidate" --require-built
+      - name: Pack portable candidate through the release interface
+        run: python3 packaging/release/release.py pack --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/portable"
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: candidate-${{ matrix.kind }}-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/candidate/candidate.json
-            ${{ runner.temp }}/candidate/source.bundle
-            ${{ runner.temp }}/candidate/release-notes.md
-            ${{ runner.temp }}/candidate/*.tar.gz
-            ${{ runner.temp }}/candidate/*.sha256
-            ${{ runner.temp }}/candidate/*.log
-            ${{ runner.temp }}/candidate/aur-*/PKGBUILD
-            ${{ runner.temp }}/candidate/aur-*/.SRCINFO
-            ${{ runner.temp }}/candidate/aur-*/pomotui.install
-            ${{ runner.temp }}/candidate/built
+          path: ${{ runner.temp }}/portable
           include-hidden-files: true
           if-no-files-found: error
       - uses: actions/download-artifact@v4
@@ -63,3 +61,12 @@ jobs:
           path: ${{ runner.temp }}/downloaded-candidate
       - name: Verify retained candidate through consumer interface
         run: python3 packaging/release/candidate.py verify --output "$RUNNER_TEMP/downloaded-candidate" --require-built
+      - name: Retain candidate diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-diagnostics-${{ matrix.kind }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/candidate/*.log
+            ${{ runner.temp }}/candidate/candidate.json
+          if-no-files-found: warn

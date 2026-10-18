@@ -8,6 +8,26 @@ permissions:
   contents: read
 
 jobs:
+  workflows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select workflow tool cache
+        run: echo "XDG_CACHE_HOME=$RUNNER_TEMP/workflow-tools" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/workflow-tools/pomotui/workflow-lint/actionlint-*
+          key: workflow-lint-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/lint-workflows.py', 'tools/actionlint-queue.patch') }}
+      - name: Validate workflows with the pinned queue-aware tool
+        run: python3 tools/lint-workflows.py
+      - name: Check workflow validator behavior
+        run: python3 -m unittest discover -s tests/tools -p '*_test.py'
+  version-boundaries:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release boundaries at an alternate workspace version
+        run: python3 tests/release/check-boundaries.py --version 0.0.0
   check:
     runs-on: ubuntu-latest
     steps:
@@ -19,7 +39,7 @@ jobs:
       - name: Check AUR upgrade hooks
         run: sh packaging/tests/aur-install.sh
       - name: Check candidate and publication boundaries
-        run: python3 -m unittest discover -s tests/release -p '*_test.py'
+        run: python3 tests/release/check-boundaries.py
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
