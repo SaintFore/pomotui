@@ -127,3 +127,17 @@ PRs without deployment secrets. Its stable fixture uses `0.0.0` only in a
 disposable local source commit, builds both real package recipes, and never
 publishes that commit, tag, or version. Run fast isolated boundary regressions
 with `python3 -m unittest discover -s tests/release -p '*_test.py'`.
+
+[Candidate build run 39109386492](https://github.com/SaintFore/pomotui/actions/runs/39109386492)
+passed both cases on 2026-10-18. The ordinary source was
+`660d9da3259a071f472d33e20dcb114a2fea283c`, producing
+`pomotui-git r191.g660d9da3259a-1`. The disposable stable source was
+`c79d701dd8ec9b027646ba450440d3ebe17f24ef`, producing `pomotui 0.0.0-1`
+and `pomotui-git r192.gc79d701dd8ec-1`. Both used Rust `1.96.1`, target
+`x86_64-unknown-linux-gnu`, and Arch image
+`archlinux@sha256:061679925e5d5028f2df9395d441ce6c4b9accf0157ff3486c06b6962e014ef1`.
+The generated recipes completed actual workspace release builds, workspace
+checks, package construction, canonical metadata comparison, and output/hook
+inspection. Source commits, package/archive/binary hashes and complete build
+logs are retained in that run's candidate artifacts. These are package-build
+results, not installation/upgrade acceptance or delivery evidence.

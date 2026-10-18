@@ -49,6 +49,7 @@ jobs:
           path: |
             ${{ runner.temp }}/candidate/candidate.json
             ${{ runner.temp }}/candidate/source.bundle
+            ${{ runner.temp }}/candidate/release-notes.md
             ${{ runner.temp }}/candidate/*.tar.gz
             ${{ runner.temp }}/candidate/*.sha256
             ${{ runner.temp }}/candidate/*.log
