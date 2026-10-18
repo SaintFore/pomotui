@@ -258,9 +258,12 @@ candidate-identity checks.
 
 ### Automatic Git-package publication
 
-`git-package.yml` listens only to a successful `CI` push run for this repository's
-`main`. `git_refresh.py select --source COMMIT` compares committed source with its
-first parent (an explicit `--before` supports a larger change range). Source,
+`git-package.yml` listens to pushes on this repository's `main`.
+`git_refresh.py select --event EVENT.json` compares the push's complete committed
+`before`/`after` range, so a documentation-only final commit cannot hide an earlier
+source change in the same push. The event must identify a non-deleted main push.
+`select --source COMMIT` supports explicit local selection (`--before` chooses the
+baseline; otherwise the first parent is used). Source,
 packaging, toolchain, and release workflow changes select a candidate. Unrelated
 documentation and generated `.SRCINFO` snapshots do not. Publication never
 commits generated metadata back to the source repository.

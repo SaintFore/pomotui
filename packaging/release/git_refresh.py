@@ -19,9 +19,11 @@ def git(repo, *args):
 def select(repo, source, before=None):
     commit = git(repo, 'rev-parse', f'{source}^{{commit}}')
     parent = before or git(repo, 'rev-parse', f'{commit}^')
-    if subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', parent, commit], capture_output=True).returncode:
+    initial = parent == '0' * 40
+    if not initial and subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', parent, commit], capture_output=True).returncode:
         raise ValueError('Git refresh baseline is not an ancestor of candidate source')
-    paths = git(repo, 'diff', '--name-only', parent, commit).splitlines()
+    paths = (git(repo, 'ls-tree', '-r', '--name-only', commit) if initial else
+             git(repo, 'diff', '--name-only', parent, commit)).splitlines()
     # Snapshot metadata is generated in the candidate artifact, never committed
     # back to main. Ignore those paths if an older automation touches them.
     generated = {'packaging/aur/.SRCINFO', 'packaging/aur/pomotui-git/.SRCINFO'}
@@ -48,7 +50,9 @@ def main():
     commands = parser.add_subparsers(dest='action', required=True)
     selection = commands.add_parser('select')
     selection.add_argument('--repo', type=Path, default=Path('.'))
-    selection.add_argument('--source', required=True)
+    identity = selection.add_mutually_exclusive_group(required=True)
+    identity.add_argument('--source')
+    identity.add_argument('--event', type=Path)
     selection.add_argument('--before')
     publication = commands.add_parser('publish')
     publication.add_argument('--source', required=True)
@@ -60,7 +64,16 @@ def main():
     publication.add_argument('--discovery-attempts', type=int, default=6)
     publication.add_argument('--discovery-delay', type=float, default=10)
     args = parser.parse_args()
-    result = select(args.repo, args.source, args.before) if args.action == 'select' else publish(args)
+    if args.action == 'select':
+        if args.event:
+            event = json.loads(args.event.read_text())
+            if event.get('ref') != 'refs/heads/main' or event.get('deleted') or event.get('after') == '0' * 40:
+                raise ValueError('Git refresh requires a non-deleted main push')
+            result = select(args.repo, event['after'], event['before'])
+        else:
+            result = select(args.repo, args.source, args.before)
+    else:
+        result = publish(args)
     print(json.dumps(result))
 
 
