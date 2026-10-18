@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           cd packaging/aur
           metadata_dir=$(mktemp -d)
-          cp PKGBUILD "$metadata_dir/"
+          cp PKGBUILD pomotui.install "$metadata_dir/"
           chown -R builder:builder "$metadata_dir"
           (cd "$metadata_dir" && runuser -u builder -- makepkg --printsrcinfo) > "$RUNNER_TEMP/generated.SRCINFO"
           diff -u .SRCINFO "$RUNNER_TEMP/generated.SRCINFO"
