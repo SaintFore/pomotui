@@ -102,6 +102,9 @@ systemctl --user daemon-reload
 systemctl --user restart pomotui.service
 ```
 
+Maintainers can publish the stable AUR recipe through the
+[GitHub Actions workflow](docs/packaging/aur.md).
+
 ### macOS (Homebrew)
 
 ```sh

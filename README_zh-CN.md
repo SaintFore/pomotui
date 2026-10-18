@@ -91,6 +91,8 @@ systemctl --user daemon-reload
 systemctl --user restart pomotui.service
 ```
 
+维护者可通过 [GitHub Actions 工作流](docs/packaging/aur.md)发布 AUR 稳定包。
+
 ### macOS（Homebrew）
 
 ```sh
