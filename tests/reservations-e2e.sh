@@ -54,7 +54,8 @@ for filename in ['waybar-before.json', 'waybar-recovered.json']:
     assert waybar['text'].startswith('reservation ')
     assert 'Reservation task' in waybar['tooltip']
 source = (root/'config/pomotui/config.toml').read_text()
-assert source.startswith('reservation_minutes = 7\n')
+import tomllib
+assert tomllib.loads(source)['reservation_minutes'] == 7
 assert '# preserved settings' in source and '[keybindings]' in source
 PY
 target/debug/pomotui start focus --json > "$reservation_root/started.json"

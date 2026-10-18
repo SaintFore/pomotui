@@ -105,7 +105,45 @@ fn configuring_default_updates_root_toml_without_destroying_other_settings() {
     ));
     let saved = std::fs::read_to_string(&config).unwrap();
     assert!(saved.contains("# mine"));
-    assert!(saved.starts_with("reservation_minutes = 12\n"));
+    assert!(saved.contains("reservation_minutes = 12\n"));
+    assert!(saved.contains("quit = 'q'"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn configuring_default_preserves_escaped_keys_and_multiline_values() {
+    let root = std::env::temp_dir().join(format!(
+        "pomotui-reservation-config-syntax-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.toml");
+    let original = r#"# retain this comment
+sound = '''
+[not a table]
+reservation_minutes = 999
+'''
+"reservation_\u006dinutes" = 10 # retain this explanation
+focus_minutes = 50
+[keybindings]
+quit = 'q'
+"#;
+    std::fs::write(&config, original).unwrap();
+    let before = original.parse::<toml::Table>().unwrap();
+    let mut service = Service::new();
+    service.set_configuration_path(config.clone());
+    let state = snapshot(send(
+        &mut service,
+        "config-syntax",
+        Command::ConfigureReservation { minutes: 12 },
+    ));
+    assert_eq!(state.reservation_minutes, 12);
+    let saved = std::fs::read_to_string(&config).unwrap();
+    let mut expected = before;
+    expected.insert("reservation_minutes".into(), toml::Value::Integer(12));
+    assert_eq!(saved.parse::<toml::Table>().unwrap(), expected);
+    assert!(saved.contains("# retain this comment"));
+    assert!(saved.contains("# retain this explanation"));
     assert!(saved.contains("quit = 'q'"));
     std::fs::remove_dir_all(root).unwrap();
 }

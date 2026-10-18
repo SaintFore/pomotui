@@ -210,31 +210,26 @@ fn read_optional_settings(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-fn reservation_settings_source(source: &str, minutes: u64) -> String {
-    let mut in_root = true;
-    let mut lines = Vec::new();
-    for line in source.lines() {
-        if line.trim_start().starts_with('[') {
-            in_root = false;
-        }
-        let key = line.split_once('=').map(|(key, _)| key.trim());
-        if in_root
-            && key.is_some_and(|key| {
-                matches!(
-                    key,
-                    "reservation_minutes" | "\"reservation_minutes\"" | "'reservation_minutes'"
-                )
-            })
-        {
-            continue;
-        }
-        lines.push(line);
+fn reservation_settings_source(source: &str, minutes: u64) -> Result<String, String> {
+    let mut document = source
+        .parse::<toml_edit::Document>()
+        .map_err(|error| format!("invalid settings: {error}"))?;
+    let minutes = i64::try_from(minutes).map_err(|error| error.to_string())?;
+    if let Some(value) = document
+        .get_mut("reservation_minutes")
+        .and_then(toml_edit::Item::as_value_mut)
+    {
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(minutes);
+        *value.decor_mut() = decor;
+    } else {
+        document["reservation_minutes"] = toml_edit::value(minutes);
     }
-    format!(
-        "reservation_minutes = {minutes}\n{}{}",
-        lines.join("\n"),
-        if lines.is_empty() { "" } else { "\n" }
-    )
+    let updated = document.to_string();
+    updated
+        .parse::<toml::Table>()
+        .map_err(|error| format!("invalid updated settings: {error}"))?;
+    Ok(updated)
 }
 
 fn replace_settings(path: &Path, source: &str) -> Result<(), String> {
@@ -945,7 +940,10 @@ impl Service {
                 .as_ref()
                 .and_then(|source| source.as_deref())
                 .unwrap_or("");
-            let updated = reservation_settings_source(source, minutes);
+            let updated = match reservation_settings_source(source, minutes) {
+                Ok(updated) => updated,
+                Err(error) => return Self::rejected(error),
+            };
             if let Err(error) = replace_settings(path, &updated) {
                 return Self::rejected(error);
             }
