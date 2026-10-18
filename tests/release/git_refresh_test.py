@@ -38,6 +38,18 @@ class GitRefreshTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def test_batch_push_with_docs_only_final_commit_selects_all_source_changes(self):
+        self.change('crates/pomotui-service/src/main.rs')
+        source = self.change('docs/release.md')
+        event = self.repo / 'event.json'
+        event.write_text(json.dumps(dict(ref='refs/heads/main', before=self.before, after=source, deleted=False)))
+        result = subprocess.run(['python3', str(CLI), 'select', '--repo', str(self.repo), '--event', str(event)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = json.loads(result.stdout)
+        self.assertTrue(selected['selected'])
+        self.assertEqual(selected['source_commit'], source)
+        self.assertEqual(selected['changed'], ['crates/pomotui-service/src/main.rs'])
+
     def test_documentation_and_generated_index_metadata_do_not_refresh_again(self):
         self.change('docs/release.md')
         source = self.change('packaging/aur/pomotui-git/.SRCINFO')

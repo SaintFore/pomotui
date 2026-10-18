@@ -1,9 +1,7 @@
 name: Verified Git package
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
 
 permissions:
@@ -11,11 +9,7 @@ permissions:
 
 jobs:
   select:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+    if: github.event.deleted != true
     runs-on: ubuntu-24.04
     outputs:
       selected: ${{ steps.select.outputs.selected }}
@@ -23,15 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Select relevant committed source changes
         id: select
-        env:
-          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
         run: |
-          python3 packaging/release/git_refresh.py select --source "$SOURCE_COMMIT" > "$RUNNER_TEMP/selection.json"
+          python3 packaging/release/git_refresh.py select --event "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/selection.json"
           python3 - "$RUNNER_TEMP/selection.json" <<'PY'
           import json, os, sys
           result = json.load(open(sys.argv[1]))
