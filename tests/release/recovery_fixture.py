@@ -24,6 +24,8 @@ def trusted_run(directory, source, intent='git', selection=None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             state['calls'].append(self.path)
+            if self.path.startswith(('/archive', '/selection', '/journal/')) and self.headers.get('Accept') != 'application/vnd.github+json':
+                self.send_response(415);self.end_headers();return
             if self.path.endswith('/actions/runs/123'):
                 value={'repository':{'full_name':'SaintFore/pomotui'},'path':state['path'],
                     'event':state['event'],'head_branch':state['head_branch'],'run_attempt':max(state['attempts'])}

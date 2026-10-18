@@ -19,7 +19,7 @@ PATHS = {'stable': '.github/workflows/stable-release.yml', 'git': '.github/workf
 def extract(api, artifact, output):
     if artifact.get('expired'):
         raise ValueError('original publication artifacts expired; cannot safely reconstruct publication bytes')
-    data = api.request(artifact['archive_download_url'], raw=True)
+    data = api.request(artifact['archive_download_url'], raw=True, accept='application/vnd.github+json')
     output.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         for info in archive.infolist():
