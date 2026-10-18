@@ -28,6 +28,16 @@ old_version=$(pacman -Qp "$old")
 candidate_version=$(pacman -Qp "$candidate")
 [[ "$old_version" != "$candidate_version" ]]
 printf 'old=%s\ncandidate=%s\n' "$old_version" "$candidate_version" > "$output/identity.txt"
+# Clean candidate install uses the documented startup interface in fresh user state.
+pacman -U --noconfirm "$candidate"
+as_user systemctl --user daemon-reload
+as_user systemctl --user enable --now pomotui.socket
+as_user pomotui status --json | tee "$output/clean-status.json"
+as_user systemctl --user is-active pomotui.service
+as_user systemctl --user disable --now pomotui.socket
+as_user systemctl --user stop pomotui.service
+pacman -R --noconfirm pomotui
+rm -rf "/home/$user/.local/share/pomotui" "/home/$user/.config/pomotui"
 pacman -U --noconfirm "$old"
 old_hash=$(sha256sum /usr/bin/pomotui-service | cut -d' ' -f1)
 as_user systemctl --user daemon-reload
