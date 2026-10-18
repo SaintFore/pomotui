@@ -15,8 +15,10 @@ Pomotui uses `$XDG_RUNTIME_DIR/pomotui/pomotui.sock`,
 `$XDG_DATA_HOME/pomotui/pomotui.sqlite3`, and
 `$XDG_CONFIG_HOME/pomotui/config.toml` (with standard home-directory fallbacks).
 
-After a package upgrade, the package hook attempts to reload and restart an
-already running Timer Service. If it warns that the user service manager was
+After a package upgrade, the package hook reloads the user units and restarts
+the Timer Service if its socket is enabled or active, recovering stopped or failed
+services too. For other users it only restarts an already running Timer Service.
+If it warns that the user service manager was
 unavailable, or if the CLI reports that an older Timer Service does not support
 a newly installed command, run:
 

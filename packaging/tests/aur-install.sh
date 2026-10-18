@@ -13,7 +13,16 @@ MOCK
 cat >"$test_root/runuser" <<'MOCK'
 #!/bin/sh
 printf '%s\n' "$*" >>"$POMOTUI_TEST_CALLS"
+if [ "${POMOTUI_TEST_RECOVERY:-0}" = 1 ]; then
+    case "$*" in
+        *"is-enabled --quiet pomotui.socket"*|*"is-active --quiet pomotui.socket"*) exit "${POMOTUI_TEST_SOCKET_EXIT:-0}" ;;
+        *"is-active pomotui.service"*) test "$(cat "$POMOTUI_TEST_STATE")" = active; exit $? ;;
+        *"try-restart pomotui.service"*) exit 0 ;;
+        *"restart pomotui.service"*) printf 'active\n' >"$POMOTUI_TEST_STATE" ;;
+    esac
+fi
 case "$*" in
+    *"is-enabled --quiet pomotui.socket"*|*"is-active --quiet pomotui.socket"*) exit 1 ;;
     *"-u broken "*) exit 1 ;;
 esac
 MOCK
@@ -68,6 +77,25 @@ export POMOTUI_TEST_DISCOVERY_EXIT
 post_upgrade >"$test_root/discovery.out" 2>"$test_root/discovery.err"
 grep -q 'WARNING.*user services could not be discovered' "$test_root/discovery.err"
 unset POMOTUI_TEST_DISCOVERY_EXIT
+
+# A configured socket must recover a service that already failed during upgrade.
+POMOTUI_TEST_USERS='1000 tester no active'
+POMOTUI_TEST_RECOVERY=1
+POMOTUI_TEST_STATE="$test_root/service-state"
+export POMOTUI_TEST_RECOVERY POMOTUI_TEST_STATE
+printf 'failed\n' >"$POMOTUI_TEST_STATE"
+post_upgrade >"$test_root/recovery.out" 2>"$test_root/recovery.err"
+if [ "$(cat "$POMOTUI_TEST_STATE")" != active ]; then
+    echo 'FAIL: upgrade left the configured Timer Service failed; manual restart still required' >&2
+    exit 1
+fi
+# A user who disabled Pomotui must not have it started by a package upgrade.
+POMOTUI_TEST_SOCKET_EXIT=1
+export POMOTUI_TEST_SOCKET_EXIT
+printf 'inactive\n' >"$POMOTUI_TEST_STATE"
+post_upgrade >"$test_root/disabled.out" 2>"$test_root/disabled.err"
+test "$(cat "$POMOTUI_TEST_STATE")" = inactive
+unset POMOTUI_TEST_RECOVERY POMOTUI_TEST_SOCKET_EXIT
 
 # Run each actual prepare() with a stale AUR-side hook and a newer source hook.
 # The install script packaged by makepkg must come from the application source.

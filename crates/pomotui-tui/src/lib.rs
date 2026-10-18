@@ -168,6 +168,8 @@ pub struct App {
     pub color_overrides: ColorOverrides,
     pub pending_g: bool,
     pub palette_index: usize,
+    help_scroll: u16,
+    help_max_scroll: u16,
     pub input: String,
     pub input_cursor: usize,
     pub narrow: bool,
@@ -232,6 +234,8 @@ impl App {
             },
             pending_g: false,
             palette_index: 0,
+            help_scroll: 0,
+            help_max_scroll: 0,
             input: String::new(),
             input_cursor: 0,
             narrow: false,
@@ -831,7 +835,20 @@ impl App {
                 }
                 None
             }
-            Overlay::Help | Overlay::None => None,
+            Overlay::Help => {
+                self.help_scroll = match key {
+                    InputKey::Char('j') | InputKey::Down => self.help_scroll.saturating_add(1),
+                    InputKey::Char('k') | InputKey::Up => self.help_scroll.saturating_sub(1),
+                    InputKey::Char('d') => self.help_scroll.saturating_add(5),
+                    InputKey::Char('u') => self.help_scroll.saturating_sub(5),
+                    InputKey::Char('g') => 0,
+                    InputKey::Char('G') => self.help_max_scroll,
+                    _ => self.help_scroll,
+                }
+                .min(self.help_max_scroll);
+                None
+            }
+            Overlay::None => None,
             Overlay::CreateTask
             | Overlay::RenameTask
             | Overlay::ReviewVoidTitle
@@ -3637,7 +3654,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }
 
-fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colors) {
     if app.overlay == Overlay::None {
         return;
     }
@@ -3652,7 +3669,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) 
         }
         Overlay::PendingReview => 11.min(area.height.saturating_sub(2)),
         Overlay::Palette => area.height.saturating_sub(4).min(21),
-        Overlay::Help => area.height.saturating_sub(2).min(22),
+        Overlay::Help => area.height.saturating_sub(2),
         Overlay::Settings => 19.min(area.height.saturating_sub(2)),
         Overlay::RewardManager => 16.min(area.height.saturating_sub(2)),
         Overlay::CreateTask
@@ -4010,7 +4027,7 @@ fn palette_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors)
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colors) {
     let lines = if app.language == Language::SimplifiedChinese {
         vec![
             Line::from(Span::styled(
@@ -4023,7 +4040,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
             Line::from("  h/l 或 ←/→  切换当前区域内的页面"),
             Line::from("  归档：Enter 详情 · D 删除整链 · Esc 返回列表"),
             Line::from("  行动链：E 编辑复盘 · T 编辑任意条目标题"),
-            Line::from("  j/k 或 ↑/↓  选择任务                    q  退出"),
+            Line::from("  j/k 或 ↑/↓  移动选择                    q  退出"),
             Line::from(""),
             Line::from(Span::styled(
                 "时段",
@@ -4042,6 +4059,7 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("  n 新建   r 重命名   c 完成/重新打开   D 删除"),
+            Line::from("  已完成任务显示 ✓ 和删除线；按 c 取消完成"),
             Line::from(""),
             Line::from(Span::styled(
                 "工具",
@@ -4049,7 +4067,22 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .fg(colors.gold)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  : 命令面板   s 设置   Esc 关闭浮层"),
+            Line::from("  : 命令面板   s 设置   ? 帮助   Esc 关闭浮层"),
+            Line::from(""),
+            Line::from("历史与列表"),
+            Line::from("  gg/G 首项/末项（任务与历史） · u/d 上/下移五项"),
+            Line::from("  历史：Space 或 Alt-Space 标记 · v 范围选择 · D 删除"),
+            Line::from(""),
+            Line::from("工作链与奖励"),
+            Line::from("  行动链：F 失败复盘（待判断时） · R 打开奖励"),
+            Line::from("  归档详情：E 编辑复盘 · T 编辑条目标题"),
+            Line::from("  奖励：n 新建 · e 编辑 · D 删除 · C 领取已解锁奖励"),
+            Line::from(""),
+            Line::from("浮层与鼠标"),
+            Line::from("  复盘：S/Enter 成功 · F 失败 · j/k 选择任务"),
+            Line::from("  预约：Enter 确认 · j/k 选择任务 · 0 无任务"),
+            Line::from("  鼠标：点顶部回首页 · 点任务选择 · 点时段区启停"),
+            Line::from("  帮助：↑/↓ 或 j/k 滚动 · u/d 翻页 · g/G 首尾"),
         ]
     } else {
         vec![
@@ -4092,18 +4125,47 @@ fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("  :  executable command palette            s  settings"),
-            Line::from("  Esc closes any overlay"),
+            Line::from("  ? help · Esc closes any overlay"),
+            Line::from(""),
+            Line::from("HISTORY & LISTS"),
+            Line::from("  gg/G first/last Task or History row · u/d move five rows"),
+            Line::from("  History: Space/Alt-Space mark · v range · D delete"),
+            Line::from(""),
+            Line::from("CHAIN & REWARDS"),
+            Line::from("  Chain: F failure reflection (pending review) · R rewards"),
+            Line::from("  Archive detail: E edit reflection · T edit entry title"),
+            Line::from("  Rewards: n create · e edit · D delete · C claim unlocked"),
+            Line::from(""),
+            Line::from("OVERLAYS & MOUSE"),
+            Line::from("  Review: S/Enter success · F failure · j/k choose Task"),
+            Line::from("  Reservation: Enter confirm · j/k choose Task · 0 no Task"),
+            Line::from("  Mouse: top row home · Task row select · session area toggle"),
+            Line::from("  Help: ↑/↓ or j/k scroll · u/d page · g/G first/last"),
         ]
     };
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum();
+    app.help_max_scroll = rows
+        .saturating_sub(usize::from(area.height.saturating_sub(2)))
+        .min(usize::from(u16::MAX)) as u16;
+    app.help_scroll = app.help_scroll.min(app.help_max_scroll);
     frame.render_widget(
         Paragraph::new(lines)
+            .scroll((app.help_scroll, 0))
             .block(
                 panel(
                     text(app.language, "HELP · KEYBOARD & MOUSE", "帮助 · 键盘与鼠标"),
                     colors,
                 )
                 .border_style(Style::default().fg(colors.accent))
-                .title_bottom(text(app.language, " Esc close ", " Esc 关闭 ")),
+                .title_bottom(text(
+                    app.language,
+                    " ↑↓ scroll · u/d page · Esc close ",
+                    " ↑↓ 滚动 · u/d 翻页 · Esc 关闭 ",
+                )),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -4175,7 +4237,11 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
             .block(
                 panel(text(app.language, "SETTINGS", "设置"), colors)
                     .border_style(Style::default().fg(colors.accent))
-                    .title_bottom(text(app.language, " Esc close ", " Esc 关闭 ")),
+                    .title_bottom(text(
+                        app.language,
+                        " ↑↓ scroll · u/d page · Esc close ",
+                        " ↑↓ 滚动 · u/d 翻页 · Esc 关闭 ",
+                    )),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -5596,12 +5662,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         terminal
             .draw(|frame| {
-                render_overlay(
-                    frame,
-                    frame.area(),
-                    &app,
-                    colors(app.theme, app.color_overrides),
-                );
+                let palette = colors(app.theme, app.color_overrides);
+                render_overlay(frame, frame.area(), &mut app, palette);
             })
             .expect("draw");
         let rendered = terminal
@@ -6695,6 +6757,39 @@ mod tests {
         assert!(text.contains("Rename task"));
         assert!(text.contains("Complete task"));
         assert!(text.contains("Delete task"));
+    }
+
+    #[test]
+    fn help_scrolls_to_remaining_shortcuts_in_a_small_terminal() {
+        for language in [Language::English, Language::SimplifiedChinese] {
+            let mut app = App::new(None, Theme::VermilionPaperDark);
+            app.language = language;
+            app.overlay = Overlay::Help;
+            let mut terminal = Terminal::new(TestBackend::new(76, 16)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw");
+            assert!(app.help_max_scroll > 0);
+            app.handle_key(InputKey::Char('G'));
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw end");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            assert!(rendered.contains("j/k"));
+            assert!(rendered.contains("0"));
+            app.handle_key(InputKey::Char('g'));
+            assert_eq!(app.help_scroll, 0);
+            app.handle_key(InputKey::Down);
+            assert_eq!(app.help_scroll, 1);
+            app.handle_key(InputKey::Escape);
+            assert_eq!(app.overlay, Overlay::None);
+        }
     }
 
     #[test]
