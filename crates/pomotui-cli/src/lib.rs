@@ -15,7 +15,10 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
     let command = match words.as_slice() {
         ["fresh-start", "--confirm"] => Command::FreshStart { confirmed: true },
         ["fresh-start"] => return Err("Fresh Start requires --confirm".into()),
-        ["status" | "waybar"] => Command::Status,
+        ["status" | "waybar"] | ["reservation", "status"] => Command::Status,
+        ["reserve", options @ ..] => parse_reservation(options)?,
+        ["reservation", "success", id] => Command::ReservationSuccess { id: (*id).into() },
+        ["reservation", "minutes", minutes] => Command::ConfigureReservation { minutes: parse_minutes(minutes)? },
         ["start", "focus"] => Command::Start { kind: SessionKind::Focus, task_id: None },
         ["start", "focus", "--task", id] => Command::Start {
             kind: SessionKind::Focus,
@@ -126,9 +129,48 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["sync", "now"] => Command::SyncNow,
         ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
-        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
+        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|reserve [--minutes MINUTES] [--task ID|--no-task]|reservation <status|success ID|minutes MINUTES>|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
+}
+
+fn parse_minutes(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|minutes| minutes.checked_mul(60).is_some_and(|seconds| seconds > 0))
+        .ok_or_else(|| format!("invalid reservation minutes: {value}"))
+}
+
+fn parse_reservation(options: &[&str]) -> Result<Command, String> {
+    let mut minutes = None;
+    let mut task_id = None;
+    let mut use_current_task = true;
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        match *option {
+            "--minutes" if minutes.is_none() => {
+                minutes = Some(parse_minutes(
+                    options.next().ok_or("--minutes requires a value")?,
+                )?);
+            }
+            "--task" if use_current_task => {
+                task_id = Some(parse_id(options.next().ok_or("--task requires an ID")?)?);
+                use_current_task = false;
+            }
+            "--no-task" if use_current_task => use_current_task = false,
+            _ => {
+                return Err(
+                    "usage: pomotui reserve [--minutes MINUTES] [--task ID|--no-task]".into(),
+                );
+            }
+        }
+    }
+    Ok(Command::Reserve {
+        minutes,
+        task_id,
+        use_current_task,
+    })
 }
 
 fn parse_id(value: &str) -> Result<u64, String> {
@@ -167,13 +209,20 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
             "percentage": percentage(snapshot.remaining_seconds, snapshot.planned_seconds),
         })).map_err(|error| error.to_string()),
         Response::Snapshot { snapshot } => Ok(format!(
-            "{:?} {} · {} · round {}/{} · chain {}{}{}{}",
+            "{:?} {} · {} · round {}/{} · chain {}{}{}{}{}",
             snapshot.kind,
             clock(snapshot.remaining_seconds),
             snapshot.state,
             snapshot.completed_rounds,
             snapshot.rounds_per_cycle,
             snapshot.action_chain.length,
+            snapshot.reservation.as_ref().map_or_else(String::new, |reservation| format!(
+                " · reservation {} {} · {} · {}",
+                reservation.id,
+                if reservation.state == pomotui_protocol::ReservationStatus::AwaitingReview { "awaiting review".into() } else { clock(reservation.remaining_seconds) },
+                reservation.task_title.as_deref().unwrap_or("no task"),
+                snapshot.reservation_minutes,
+            )),
             if snapshot.pending_review.is_some() {
                 " · pending review"
             } else {
@@ -341,6 +390,8 @@ mod tests {
             &render(
                 &Response::Snapshot {
                     snapshot: Snapshot {
+                        reservation: None,
+                        reservation_minutes: 10,
                         state: "paused".into(),
                         kind: SessionKind::Focus,
                         remaining_seconds: 90,
@@ -474,6 +525,8 @@ mod tests {
     fn reminder_delivery_state_is_visible_in_human_and_json_status() {
         let response = Response::Snapshot {
             snapshot: Snapshot {
+                reservation: None,
+                reservation_minutes: 10,
                 state: "pending".into(),
                 kind: SessionKind::Focus,
                 remaining_seconds: 1_500,
@@ -519,6 +572,8 @@ mod tests {
     #[test]
     fn human_status_shows_chain_length_and_pending_review() {
         let mut snapshot = Snapshot {
+            reservation: None,
+            reservation_minutes: 10,
             state: "pending".into(),
             kind: SessionKind::ShortBreak,
             remaining_seconds: 300,
@@ -657,5 +712,56 @@ mod tests {
         assert!(config.exists());
         assert!(sync_file.exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+    #[test]
+    fn reservation_cli_uses_current_task_by_default_and_accepts_explicit_choices() {
+        let parse_words = |words: &[&str]| {
+            parse(
+                &words
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .0
+        };
+        assert_eq!(
+            parse_words(&["reserve"]),
+            Command::Reserve {
+                minutes: None,
+                task_id: None,
+                use_current_task: true
+            }
+        );
+        assert_eq!(
+            parse_words(&["reserve", "--minutes", "3", "--task", "7"]),
+            Command::Reserve {
+                minutes: Some(3),
+                task_id: Some(7),
+                use_current_task: false
+            }
+        );
+        assert_eq!(
+            parse_words(&["reserve", "--no-task"]),
+            Command::Reserve {
+                minutes: None,
+                task_id: None,
+                use_current_task: false
+            }
+        );
+        assert_eq!(
+            parse_words(&["reservation", "success", "abc"]),
+            Command::ReservationSuccess { id: "abc".into() }
+        );
+        assert_eq!(
+            parse_words(&["reservation", "minutes", "12"]),
+            Command::ConfigureReservation { minutes: 12 }
+        );
+        assert!(parse(&["reserve".into(), "--minutes".into(), "0".into()]).is_err());
     }
 }

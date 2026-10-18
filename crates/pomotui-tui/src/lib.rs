@@ -4327,6 +4327,8 @@ mod tests {
 
     fn snapshot(state: &str, kind: SessionKind) -> Snapshot {
         Snapshot {
+            reservation: None,
+            reservation_minutes: 10,
             state: state.into(),
             kind,
             remaining_seconds: 90,
