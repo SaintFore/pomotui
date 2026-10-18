@@ -159,6 +159,9 @@ def verify_gates(args):
         receipt=acceptance['packages'][channel]
         if receipt.get('passed') is not True or receipt.get('sha256')!=manifest['artifacts'][name]:
             raise ValueError(f'real upgrade acceptance mismatch: {channel}')
+    smoke=json.loads((args.candidate/'ubuntu-archive.json').read_text())
+    if smoke.get('passed') is not True or smoke.get('platform')!='ubuntu-24.04' or smoke.get('source_commit')!=manifest['source_commit'] or smoke.get('candidate_sha256')!=digest(args.candidate/'candidate.json') or smoke.get('archive_sha256')!=manifest['artifacts']['pomotui-linux-x86_64.tar.gz'] or smoke.get('binary_sha256')!=manifest['binary_sha256']:
+        raise ValueError('Ubuntu 24.04 distributed archive compatibility evidence missing or identifies another candidate')
     return manifest
 
 
@@ -170,7 +173,7 @@ def pack(args):
     for name in ['candidate.json',*manifest['artifacts']]:
         dest=args.output/name;dest.parent.mkdir(parents=True,exist_ok=True)
         shutil.copyfile(args.candidate/name,dest)
-    for name in ['acceptance.json','checks.json','origin.json']:
+    for name in ['acceptance.json','checks.json','origin.json','ubuntu-archive.json']:
         if (args.candidate/name).is_file(): shutil.copyfile(args.candidate/name,args.output/name)
 
 

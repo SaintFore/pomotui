@@ -6,6 +6,7 @@ real makepkg/systemd evidence is deliberately tested separately on hosted Arch.
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import tarfile
 
@@ -37,6 +38,7 @@ def built_candidate(output):
     for path in artifacts:
         manifest['artifacts'][str(path.relative_to(output))] = hashlib.sha256(path.read_bytes()).hexdigest()
     (output / 'candidate.json').write_text(json.dumps(manifest))
+    (output/'ubuntu-archive.json').write_text(json.dumps({'passed':True,'platform':'ubuntu-24.04','source_commit':manifest['source_commit'],'candidate_sha256':hashlib.sha256((output/'candidate.json').read_bytes()).hexdigest(),'archive_sha256':manifest['artifacts'][archive.name],'binary_sha256':manifest['binary_sha256']}))
     return manifest
 
 
@@ -47,3 +49,11 @@ def acceptance(output):
         candidate_sha256=hashlib.sha256((output / 'candidate.json').read_bytes()).hexdigest(),
         packages={channel:dict(passed=True, sha256=manifest['artifacts'][name])
                   for channel, name in manifest['packages'].items()})
+
+
+def pin_source_fixture(root):
+    """The test input is a known 0.3.0 release, independent of project version."""
+    manifest = root/'Cargo.toml'
+    manifest.write_text(re.sub(r'^version = ".*"$', 'version = "0.3.0"',manifest.read_text(),count=1,flags=re.M))
+    lock=root/'Cargo.lock'
+    lock.write_text(re.sub(r'(name = "pomotui-[^"]+"\nversion = ")[^"]+"',r'\g<1>0.3.0"',lock.read_text()))

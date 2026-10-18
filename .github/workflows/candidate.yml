@@ -8,8 +8,6 @@ on:
       - 'packaging/**'
       - 'tests/release/**'
       - '.github/workflows/candidate.yml'
-  push:
-    branches: [implement/spec19-ticket23]
   workflow_dispatch:
 permissions:
   contents: read

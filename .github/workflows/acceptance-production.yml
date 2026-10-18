@@ -1,55 +1,105 @@
-name: Nonpublishing production adapter proof
+name: Nonpublishing complete Linux delivery proof
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Public interface regression checks
-        run: |
-          python3 -m unittest discover -s tests/release -p '*_test.py'
-          sh packaging/tests/aur-install.sh
       - name: Build nonpublishing real stable and Git candidate
         run: |
           tests/release/stable-candidate-fixture.sh "$RUNNER_TEMP/candidate"
+          tests/release/check-candidate-source.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/checks"
           python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
           python3 packaging/release/release.py pack --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/portable"
       - uses: actions/upload-artifact@v4
         with:
-          name: adapter-candidate-${{ github.sha }}
+          retention-days: 90
+          name: delivery-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/portable
           include-hidden-files: true
           if-no-files-found: error
-  adapter:
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 90
+          name: delivery-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/checks/**
+            ${{ runner.temp }}/candidate/*.log
+            ${{ runner.temp }}/candidate/candidate.json
+  gate:
     needs: build
     env:
       GH_TOKEN: ${{ github.token }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: adapter-candidate-${{ github.sha }}
+          name: delivery-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/candidate
-      - name: Exercise actual candidate packages through full real upgrade gate
-        run: tests/release/verify-candidate.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/acceptance" --allow-nonpublishing-fixture-predecessor
+      - name: Required exact distributed Linux archive on Ubuntu 24.04
+        run: |
+          tests/release/ubuntu-archive.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ubuntu-archive"
+          cp "$RUNNER_TEMP/ubuntu-archive/ubuntu-archive.json" "$RUNNER_TEMP/candidate/ubuntu-archive.json"
+      - name: Actual candidate packages through complete real upgrade gate
+        run: |
+          tests/release/verify-candidate.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/acceptance" --allow-nonpublishing-fixture-predecessor
+          cp "$RUNNER_TEMP/acceptance/acceptance.json" "$RUNNER_TEMP/candidate/acceptance.json"
+          python3 packaging/release/release.py verify-gates --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json"
+          python3 packaging/release/release.py pack --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/portable"
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 90
+          name: delivery-accepted-${{ github.run_id }}
+          path: ${{ runner.temp }}/portable
+          include-hidden-files: true
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: production-adapter-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 90
+          name: delivery-gate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/ubuntu-archive/**
             ${{ runner.temp }}/acceptance/**/*.log
             ${{ runner.temp }}/acceptance/**/*.txt
             ${{ runner.temp }}/acceptance/**/*.json
             ${{ runner.temp }}/acceptance/**/*.sha256
             ${{ runner.temp }}/candidate/candidate.json
+          include-hidden-files: true
+  delivery:
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: delivery-accepted-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate
+      - name: Approved merge, all required channels, failed preflight and same-publication recovery
+        run: python3 tests/release/delivery-proof.py "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/delivery"
+      - name: Retain the accurate delivery report
+        if: always()
+        run: |
+          if test -s "$RUNNER_TEMP/delivery/delivery-report.md"; then cat "$RUNNER_TEMP/delivery/delivery-report.md" >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 90
+          name: delivery-chain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/delivery
           include-hidden-files: true

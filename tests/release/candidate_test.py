@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from publication_fixture import pin_source_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / 'packaging/release/candidate.py'
@@ -18,6 +19,7 @@ class CandidateTest(unittest.TestCase):
         self.repo.mkdir()
         for name in ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml']:
             shutil.copy(ROOT / name, self.repo / name)
+        pin_source_fixture(self.repo)
         shutil.copytree(ROOT / 'packaging', self.repo / 'packaging')
         for crate in (ROOT / 'crates').iterdir():
             dest = self.repo / 'crates' / crate.name

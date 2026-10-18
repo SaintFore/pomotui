@@ -66,3 +66,91 @@ AUR delivery distinguishes pushed/remote-verified from user discovery. A stale
 index remains pending indexing; retry verification with the same candidate
 rather than pushing another version. See the original Actions run summary and
 retained diagnostic artifacts for the failed stage and retry context.
+
+## Normal release and reports
+
+1. Prepare one PR titled `release: vX.Y.Z`, change the Cargo workspace version
+   and lockfile package versions, and write the user-facing `RELEASE_NOTES.md`.
+2. Review that final source and merge the PR. The merge is the release decision;
+   do not tag, compute checksums, dispatch AUR separately, or restart a user's
+   Timer Service as part of the release process.
+3. Read the single **Linux delivery** comment on that PR. Automation updates the
+   same comment with source/version, required channel stages, authoritative
+   verification evidence, current failures and the original-run retry command.
+   Relevant ordinary `main` pushes instead show their Git snapshot in the
+   **Verified Git package** Actions summary.
+
+Required delivery is Linux GitHub assets plus `pomotui` and `pomotui-git` AUR
+publication for stable releases; an independent Git upkeep run requires its
+Git AUR channel. Completion requires every required result to be verified and
+user discoverable. macOS build failures stay visible without blocking Linux.
+An older stable run can accept a newer Git snapshot only after independently
+restoring that newer run's trusted acceptance artifacts, proving descendant
+source history and verifying all current remote bytes and discovery. Its report
+identifies the actual newer source/version instead of claiming the old snapshot.
+
+Before acceptance is transported to publication, the exact Linux archive also
+starts a private Timer Service on Ubuntu 24.04 and obtains healthy public CLI
+status. This catches future Arch toolchain/glibc/SQLite runtime incompatibilities
+before publication. It uses the same immutable archive as the release, with
+private HOME, XDG directories and socket, and cleans up even after failure. Its
+receipt binds the source, candidate manifest, archive and executable hashes.
+Package receipts separately cover real systemd user managers and actual pacman
+clean install/upgrade for both packages, including released migrations, Current
+Sessions, Pending Reviews, Focus Reservations and conservative service recovery.
+
+## Same-publication recovery
+
+Read the original run's report and diagnostics first. GitHub retains candidate
+artifacts, receipts, journals and diagnostic artifacts for **90 days** (subject
+to repository retention settings). Every publication attempt records completed
+stages before proceeding. Failed checks and timeouts produce an incomplete
+report even when publication never starts. GitHub's existing failed-workflow
+notifications are the notification mechanism.
+
+Use **Re-run failed jobs** for a failed prerequisite. Once accepted artifacts
+exist, rerunning the original workflow restores those original bytes instead
+of rebuilding. To resume from a later Actions invocation:
+
+```sh
+# Replace ORIGINAL_RUN_ID with the original stable or Git publication run ID.
+gh workflow run resume-publication.yml --repo SaintFore/pomotui \
+  --field run_id=ORIGINAL_RUN_ID --field intent=stable --field verify_only=false
+```
+
+Use `intent=git` for Git upkeep. For stable publication that is remotely verified
+but waiting for AUR indexing, use `--field verify_only=true`: it only reads
+GitHub assets, AUR remote content and discovery; it does not push again. A stale
+index remains **pending-indexing**, never complete. Wait and run verification
+again with the same original run ID; do not bump a version to refresh the index.
+
+Transient network failures retry a bounded number of times and then retain a
+recovery state. A retry rereads authoritative content before writing, so an
+uncertain successful response cannot cause an overwrite or duplicate public
+release. Immutable tag, notes, asset or same-version recipe conflicts pause with
+the conflicting identity. Inspect and repair the cause explicitly; do not move
+tags, overwrite published bytes, force-push, downgrade the remote or reset data.
+
+Recovery requires the original trusted accepted artifacts. If those artifacts
+are expired, deleted or fail identity checks, automation pauses rather than
+recreating potentially published bytes. Retain an exact verified copy before
+expiry if long-term recovery is needed; increasing retention cannot recover
+already deleted artifacts. A maintainer must investigate unavailable originals
+and the actual public state before making a new release decision.
+
+Credential, package ownership and SSH host-key failures require explicit
+maintainer repair using the credential/trust procedure above, followed by the
+same-publication retry. Automation does not create accounts, change ownership,
+replace keys or accept new host keys. User unit overrides, drop-ins, unsupported
+or damaged data also require an explicit local repair after backup and inspection;
+automation preserves them and reports exact conflicts instead of deleting data.
+
+The manual **Nonpublishing complete Linux delivery proof** workflow validates
+the finished contract against disposable Git/HTTP publication targets. It builds
+real stable/Git fixture packages once, retains their identity across jobs, runs
+the real Arch gate and Ubuntu archive smoke, then invokes the normal release,
+Git-refresh and artifact-restore entry points for an approved merge, credential
+preflight failure before writes, pending discovery and read-only recovery. It
+also demonstrates required Linux success with an independent macOS failure, and
+automatic Git upkeep delivers to its own fresh remote without a stable output.
+It never creates a production stable version, tag, release or AUR push.

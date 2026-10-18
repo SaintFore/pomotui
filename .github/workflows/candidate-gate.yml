@@ -47,6 +47,8 @@ jobs:
       - name: Applicable checks for the recorded source
         if: steps.restore.outputs.restored != 'true'
         run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/source-checks.log") 2>&1
           cargo fmt --all --check
           sh packaging/tests/aur-install.sh
           python3 -m unittest discover -s tests/release -p '*_test.py'
@@ -72,6 +74,11 @@ jobs:
       - name: Build recorded real packages
         if: steps.restore.outputs.restored != 'true'
         run: python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+      - name: Required Ubuntu 24.04 distributed archive compatibility
+        if: steps.restore.outputs.restored != 'true'
+        run: |
+          tests/release/ubuntu-archive.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ubuntu-archive"
+          cp "$RUNNER_TEMP/ubuntu-archive/ubuntu-archive.json" "$RUNNER_TEMP/candidate/ubuntu-archive.json"
       - name: Required clean install, domain, migration and lifecycle acceptance
         if: steps.restore.outputs.restored != 'true'
         run: |
@@ -93,10 +100,13 @@ jobs:
           retention-days: 90
           name: gate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.intent }}
           path: |
+            ${{ runner.temp }}/source-checks.log
+            ${{ runner.temp }}/restore.json
             ${{ runner.temp }}/acceptance/**/*.log
             ${{ runner.temp }}/acceptance/**/*.json
             ${{ runner.temp }}/acceptance/**/*.txt
             ${{ runner.temp }}/acceptance/**/*.sha256
+            ${{ runner.temp }}/ubuntu-archive/**
             ${{ runner.temp }}/candidate/*.log
             ${{ runner.temp }}/candidate/candidate.json
           include-hidden-files: true
