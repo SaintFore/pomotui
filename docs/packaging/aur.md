@@ -151,5 +151,6 @@ real stable/Git fixture packages once, retains their identity across jobs, runs
 the real Arch gate and Ubuntu archive smoke, then invokes the normal release,
 Git-refresh and artifact-restore entry points for an approved merge, credential
 preflight failure before writes, pending discovery and read-only recovery. It
-also demonstrates required Linux success with an independent macOS failure.
+also demonstrates required Linux success with an independent macOS failure, and
+automatic Git upkeep delivers to its own fresh remote without a stable output.
 It never creates a production stable version, tag, release or AUR push.

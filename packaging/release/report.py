@@ -68,7 +68,9 @@ def render(args):
               'Retry failed jobs in this run before publication, or restore the same accepted publication:', '', '```sh']
     match = re.search(r'/runs/(\d+)',args.run_url)
     run = args.original_run or (match.group(1) if match else 'ORIGINAL_RUN_ID')
-    lines += [f'gh workflow run resume-publication.yml --field run_id={run} --field intent={args.intent} --field verify_only={str(args.verify_only).lower()}', '```', '',
+    discovery_pending = any(result.get('stage') in ('pending-indexing','superseded-pending-indexing') for result in channels.values())
+    verification_only = args.verify_only or (args.intent == 'stable' and discovery_pending)
+    lines += [f'gh workflow run resume-publication.yml --field run_id={run} --field intent={args.intent} --field verify_only={str(verification_only).lower()}', '```', '',
               'Use `verify_only=true` for stable pending discovery. Recovery requires the original accepted artifacts (90-day retention); expired artifacts pause rather than rebuild published bytes.', '']
     return '\n'.join(lines), selection
 

@@ -25,6 +25,7 @@ class DeliveryReport(unittest.TestCase):
             self.assertIn('r999.gbbbbbbbbbbbb-1',report)
             self.assertNotIn('Delivery: **complete**',report)
             self.assertIn('--field run_id=123',report)
+            self.assertIn('--field verify_only=true',report)
             value['channels']['aur-stable']['stage']='discoverable'; journal.write_text(json.dumps(value))
             subprocess.run(command,check=True)
             self.assertIn('Delivery: **complete**',(root/'report.md').read_text())

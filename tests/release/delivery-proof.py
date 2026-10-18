@@ -71,14 +71,18 @@ def main():
             push=root/'push.json';push.write_text(json.dumps({'ref':'refs/heads/main','before':subprocess.check_output(['git','-C',str(repo),'rev-parse',source+'^'],text=True).strip(),'after':source}))
             selected=command('automatic-git-selection','git_refresh.py','select','--event',push,'--repo',repo)
             assert json.loads(selected.stdout)['selected']
-            command('automatic-git-publication','git_refresh.py','publish','--source',source,'--candidate',candidate,'--acceptance',candidate/'acceptance.json','--checks',candidate/'checks.json','--remote',root/'pomotui-git.git','--rpc-url',rpc,'--discovery-attempts','1','--output',output/'aur-git.json')
+            independent=root/'independent-pomotui-git.git'
+            subprocess.run(['git','init','--bare','--initial-branch=master','-q',str(independent)],check=True)
+            command('automatic-git-publication','git_refresh.py','publish','--source',source,'--candidate',candidate,'--acceptance',candidate/'acceptance.json','--checks',candidate/'checks.json','--remote',independent,'--rpc-url',rpc,'--discovery-attempts','1','--output',output/'aur-git.json')
             assert json.loads((output/'aur-git.json').read_text())['aggregate']=='complete'
+            assert subprocess.check_output(['git','--git-dir',str(independent),'rev-list','--count','master'],text=True).strip()=='1'
+            assert subprocess.check_output(['git','--git-dir',str(root/'pomotui-git.git'),'rev-parse','master'])==heads['pomotui-git']
             jobs=output/'jobs.json';jobs.write_text(json.dumps({'gate':{'result':'success'},'publish':{'result':'success'},'macos':{'result':'failure'}}))
             command('stable-report','report.py','--intent','stable','--candidate',candidate,'--journal',output/'resumed-publication.json','--jobs',jobs,'--run-url','https://github.com/test/project/actions/runs/123','--output',output/'delivery-report.md')
             assert 'Delivery: **complete**' in (output/'delivery-report.md').read_text()
             assert 'macos=failure' in (output/'delivery-report.md').read_text()
             command('git-report','report.py','--intent','git','--candidate',candidate,'--journal',output/'aur-git.json','--run-url','https://github.com/test/project/actions/runs/123','--output',output/'git-report.md')
-        (output/'proof.json').write_text(json.dumps({'passed':True,'source_commit':source,'candidate_sha256':identity,'production_writes':False,'approved_merge':True,'preflight_before_writes':True,'pending_required_channel':True,'same_publication_artifact_restore':True,'discovery_only_no_writes':True,'automatic_git':True,'macos_failure_independent':True},indent=2)+'\n')
+        (output/'proof.json').write_text(json.dumps({'passed':True,'source_commit':source,'candidate_sha256':identity,'production_writes':False,'approved_merge':True,'preflight_before_writes':True,'pending_required_channel':True,'same_publication_artifact_restore':True,'discovery_only_no_writes':True,'automatic_git':True,'independent_git_fresh_remote':True,'macos_failure_independent':True},indent=2)+'\n')
     print('PASS complete Linux delivery through normal entry points with disposable targets')
 
 if __name__=='__main__':main()
