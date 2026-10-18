@@ -37,6 +37,7 @@ def built_candidate(output):
     for path in artifacts:
         manifest['artifacts'][str(path.relative_to(output))] = hashlib.sha256(path.read_bytes()).hexdigest()
     (output / 'candidate.json').write_text(json.dumps(manifest))
+    (output/'ubuntu-archive.json').write_text(json.dumps({'passed':True,'platform':'ubuntu-24.04','source_commit':manifest['source_commit'],'candidate_sha256':hashlib.sha256((output/'candidate.json').read_bytes()).hexdigest(),'archive_sha256':manifest['artifacts'][archive.name],'binary_sha256':manifest['binary_sha256']}))
     return manifest
 
 

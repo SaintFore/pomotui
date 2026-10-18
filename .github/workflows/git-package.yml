@@ -75,6 +75,7 @@ jobs:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/git-publication.log") 2>&1
           umask 077
           export AUR_SSH_KEY_FILE="$RUNNER_TEMP/aur-release-key"
           trap 'rm -f "$AUR_SSH_KEY_FILE"' EXIT
@@ -96,7 +97,45 @@ jobs:
           retention-days: 90
           name: git-publication-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/git-publication.log
             ${{ runner.temp }}/preflight.json
             ${{ runner.temp }}/aur-git.json
             ${{ runner.temp }}/restored-publication.json
           if-no-files-found: warn
+
+  report:
+    needs: [select, gate, publish]
+    if: always() && (needs.select.outputs.selected == 'true' || needs.select.result == 'failure')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: verified-candidate-*-git
+          path: ${{ runner.temp }}/candidate
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: git-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication
+      - name: Report a verified snapshot or the failed prerequisite
+        if: always()
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          SOURCE: ${{ needs.select.outputs.source }}
+        run: |
+          printf '%s\n' "$JOB_RESULTS" > "$RUNNER_TEMP/jobs.json"
+          python3 packaging/release/report.py --intent git --candidate "$RUNNER_TEMP/candidate" --journal "$RUNNER_TEMP/publication/aur-git.json" --jobs "$RUNNER_TEMP/jobs.json" --source "$SOURCE" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --output "$RUNNER_TEMP/delivery-report.md"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 90
+          name: delivery-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/delivery-report.md
+            ${{ runner.temp }}/jobs.json

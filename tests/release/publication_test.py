@@ -124,7 +124,7 @@ def prepared_candidate(root):
 
 
 @contextlib.contextmanager
-def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=False, corrupt_download=False, wrong_created_tag=False):
+def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=False, corrupt_download=False, wrong_created_tag=False, tag='v0.3.0'):
     state={'lost_response':False,'failures':{},'tag':('f'*40 if conflicting_tag else None),'release':None,'assets':{},'writes':[],'notes':notes}
     class Handler(BaseHTTPRequestHandler):
         def reply(self,code,value,raw=False):
@@ -134,9 +134,9 @@ def publication_remote(source, notes='Chosen release notes\n', conflicting_tag=F
             if state['failures'].get(path,0):
                 state['failures'][path]-=1
                 return self.reply(503,{'message':'temporary failure'})
-            if path.endswith('/git/ref/tags/v0.3.0'):
+            if path.endswith('/git/ref/tags/'+tag):
                 return self.reply(200,{'object':{'type':'commit','sha':state['tag']}}) if state['tag'] else self.reply(404,{})
-            if path.endswith('/releases/tags/v0.3.0'):
+            if path.endswith('/releases/tags/'+tag):
                 return self.reply(200,state['release']) if state['release'] else self.reply(404,{})
             if path.endswith('/releases/1/assets'): return self.reply(200,list(state['assets'].values()))
             if path.startswith('/asset/') or path.startswith('/download/'):

@@ -72,6 +72,11 @@ jobs:
       - name: Build recorded real packages
         if: steps.restore.outputs.restored != 'true'
         run: python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+      - name: Required Ubuntu 24.04 distributed archive compatibility
+        if: steps.restore.outputs.restored != 'true'
+        run: |
+          tests/release/ubuntu-archive.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ubuntu-archive"
+          cp "$RUNNER_TEMP/ubuntu-archive/ubuntu-archive.json" "$RUNNER_TEMP/candidate/ubuntu-archive.json"
       - name: Required clean install, domain, migration and lifecycle acceptance
         if: steps.restore.outputs.restored != 'true'
         run: |
@@ -97,6 +102,7 @@ jobs:
             ${{ runner.temp }}/acceptance/**/*.json
             ${{ runner.temp }}/acceptance/**/*.txt
             ${{ runner.temp }}/acceptance/**/*.sha256
+            ${{ runner.temp }}/ubuntu-archive/**
             ${{ runner.temp }}/candidate/*.log
             ${{ runner.temp }}/candidate/candidate.json
           include-hidden-files: true

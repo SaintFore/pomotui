@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   actions: read
+  pull-requests: write
 jobs:
   resume:
     runs-on: ubuntu-24.04
@@ -68,14 +69,23 @@ jobs:
           fi
       - name: Report retained stages
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTENT: ${{ inputs.intent }}
+          ORIGINAL_RUN: ${{ inputs.run_id }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
         run: |
-          if test -s "$RUNNER_TEMP/publication.json"; then cat "$RUNNER_TEMP/publication.json" >> "$GITHUB_STEP_SUMMARY"; fi
+          options=()
+          if [[ "$INTENT" == stable && -s "$RUNNER_TEMP/selection/selection.json" ]]; then options+=(--comment); fi
+          if [[ "$VERIFY_ONLY" == true ]]; then options+=(--verify-only); fi
+          python3 packaging/release/report.py --intent "$INTENT" --candidate "$RUNNER_TEMP/candidate" --selection "$RUNNER_TEMP/selection/selection.json" --journal "$RUNNER_TEMP/publication.json" --original-run "$ORIGINAL_RUN" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --output "$RUNNER_TEMP/delivery-report.md" "${options[@]}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           retention-days: 90
           name: publication-resume-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/delivery-report.md
             ${{ runner.temp }}/publication*.json
             ${{ runner.temp }}/publication.log
             ${{ runner.temp }}/restore.json

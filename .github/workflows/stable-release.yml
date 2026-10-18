@@ -156,3 +156,46 @@ jobs:
       - name: Report independent platform result
         if: always()
         run: echo 'macOS build result is independent of the required Linux publication gate.' >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    needs: [select, gate, publish, macos]
+    if: always() && (needs.select.outputs.intent == 'stable' || needs.select.result == 'failure')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: verified-candidate-*-stable
+          path: ${{ runner.temp }}/candidate
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stable-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication
+      - name: Update the release PR even when checks or publication failed
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          RELEASE_PR: ${{ github.event.pull_request.number }}
+          SOURCE: ${{ needs.select.outputs.source }}
+        run: |
+          printf '%s\n' "$JOB_RESULTS" > "$RUNNER_TEMP/jobs.json"
+          python3 packaging/release/report.py --intent stable --candidate "$RUNNER_TEMP/candidate" --journal "$RUNNER_TEMP/publication/stable-publication.json" --jobs "$RUNNER_TEMP/jobs.json" --source "$SOURCE" --pr "$RELEASE_PR" --comment --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --output "$RUNNER_TEMP/delivery-report.md"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 90
+          name: delivery-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/delivery-report.md
+            ${{ runner.temp }}/jobs.json
