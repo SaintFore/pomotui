@@ -3,8 +3,15 @@ name: Publish AUR
 on:
   workflow_dispatch:
     inputs:
+      package:
+        description: AUR package to publish
+        type: choice
+        options:
+          - pomotui
+          - pomotui-git
+        default: pomotui
       publish:
-        description: Push the validated stable package to AUR
+        description: Push the validated package to AUR
         type: boolean
         default: false
 
@@ -12,43 +19,60 @@ permissions:
   contents: read
 
 concurrency:
-  group: aur-pomotui
+  group: aur-${{ inputs.package || 'pomotui' }}
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
+    env:
+      AUR_PACKAGE: ${{ inputs.package || 'pomotui' }}
     steps:
       - name: Install packaging tools
         run: |
           pacman -Syu --noconfirm --needed git openssh curl
           useradd --create-home builder
       - uses: actions/checkout@v4
-      - name: Validate package metadata and released source
+      - name: Select package recipe
         shell: bash
         run: |
           set -euo pipefail
-          cd packaging/aur
+          case "$AUR_PACKAGE" in
+            pomotui) recipe_dir=packaging/aur ;;
+            pomotui-git) recipe_dir=packaging/aur/pomotui-git ;;
+            *) echo 'Unsupported AUR package' >&2; exit 1 ;;
+          esac
+          printf 'AUR_RECIPE_DIR=%s\n' "$recipe_dir" >> "$GITHUB_ENV"
+      - name: Validate package metadata and source
+        shell: bash
+        run: |
+          set -euo pipefail
           metadata_dir=$(mktemp -d)
-          cp PKGBUILD pomotui.install "$metadata_dir/"
+          cp "$AUR_RECIPE_DIR/PKGBUILD" packaging/aur/pomotui.install "$metadata_dir/"
           chown -R builder:builder "$metadata_dir"
           (cd "$metadata_dir" && runuser -u builder -- makepkg --printsrcinfo) > "$RUNNER_TEMP/generated.SRCINFO"
-          diff -u .SRCINFO "$RUNNER_TEMP/generated.SRCINFO"
-          source PKGBUILD
-          test "$pkgname" = pomotui
+          diff -u "$AUR_RECIPE_DIR/.SRCINFO" "$RUNNER_TEMP/generated.SRCINFO"
+          source "$AUR_RECIPE_DIR/PKGBUILD"
+          test "$pkgname" = "$AUR_PACKAGE"
           test "${#source[@]}" = 1
           test "${#sha256sums[@]}" = 1
-          test "${sha256sums[0]}" != SKIP
-          test "${source[0]#*::}" = "https://github.com/SaintFore/pomotui/archive/refs/tags/v${pkgver}.tar.gz"
-          curl --fail --location --retry 3 "${source[0]#*::}" -o "$RUNNER_TEMP/source.tar.gz"
-          printf '%s  %s\n' "${sha256sums[0]}" "$RUNNER_TEMP/source.tar.gz" | sha256sum --check
+          if [ "$AUR_PACKAGE" = pomotui-git ]; then
+            test "${sha256sums[0]}" = SKIP
+            test "${source[0]}" = 'pomotui::git+https://github.com/SaintFore/pomotui.git'
+            git ls-remote --exit-code https://github.com/SaintFore/pomotui.git HEAD
+          else
+            test "${sha256sums[0]}" != SKIP
+            test "${source[0]#*::}" = "https://github.com/SaintFore/pomotui/archive/refs/tags/v${pkgver}.tar.gz"
+            curl --fail --location --retry 3 "${source[0]#*::}" -o "$RUNNER_TEMP/source.tar.gz"
+            printf '%s  %s\n' "${sha256sums[0]}" "$RUNNER_TEMP/source.tar.gz" | sha256sum --check
+          fi
       - name: Prepare AUR commit
         shell: bash
         run: |
           set -euo pipefail
-          git clone https://aur.archlinux.org/pomotui.git "$RUNNER_TEMP/aur"
-          cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO packaging/aur/pomotui.install "$RUNNER_TEMP/aur/"
+          git clone "https://aur.archlinux.org/$AUR_PACKAGE.git" "$RUNNER_TEMP/aur"
+          cp "$AUR_RECIPE_DIR/PKGBUILD" "$AUR_RECIPE_DIR/.SRCINFO" packaging/aur/pomotui.install "$RUNNER_TEMP/aur/"
           cd "$RUNNER_TEMP/aur"
           git config user.name 'Pomotui release'
           git config user.email 'pomotui-release@users.noreply.github.com'
@@ -56,7 +80,7 @@ jobs:
           git diff --cached --check
           if ! git diff --cached --quiet; then
             source PKGBUILD
-            git commit -m "Update pomotui to ${pkgver}-${pkgrel}"
+            git commit -m "Update ${pkgname} to ${pkgver}-${pkgrel}"
           fi
           git show --stat --oneline HEAD
       - name: Push AUR commit
@@ -75,7 +99,7 @@ jobs:
           trap 'rm -f "$key_file"' EXIT
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$key_file"
           export GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/packaging/aur/known_hosts -o ConnectTimeout=20"
-          git -C "$RUNNER_TEMP/aur" push ssh://aur@aur.archlinux.org/pomotui.git HEAD:master
+          git -C "$RUNNER_TEMP/aur" push "ssh://aur@aur.archlinux.org/$AUR_PACKAGE.git" HEAD:master
       - name: Report validation result
         if: ${{ success() && !inputs.publish }}
         run: echo 'Package validated and AUR commit prepared. No push requested; run with publish=true to publish.'
