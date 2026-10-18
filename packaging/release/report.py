@@ -36,7 +36,8 @@ def render(args):
     for channel in required:
         result = channels.get(channel,{})
         history = [event.get('stage','') for event in journal.get('events',[]) if event.get('channel') == channel]
-        details = [('Observed stages: '+' → '.join(dict.fromkeys(history))) if history else '',result.get('diagnosis',''),result.get('remote_commit',''),result.get('url',''),result.get('retry','')]
+        metadata_version = result.get('version') or (candidate.get('git_version','')+'-1' if channel=='aur-git' and candidate.get('git_version') else candidate.get('version',''))
+        details = [('Metadata version: '+metadata_version) if metadata_version else '',('Observed stages: '+' → '.join(dict.fromkeys(history))) if history else '',result.get('diagnosis',''),result.get('remote_commit',''),result.get('url',''),result.get('retry','')]
         if result.get('actual_source_commit'):
             details.append('Verified current descendant '+result['actual_source_commit']+' / '+result.get('actual_version','')+'; original recorded source remains above')
         lines.append('| '+cell(channel)+' | '+cell(result.get('stage','not reached'))+' | '+cell('; '.join(str(x) for x in details if x))+' |')

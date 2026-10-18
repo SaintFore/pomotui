@@ -10,7 +10,7 @@ import tempfile
 import hashlib
 import shutil
 import urllib.parse
-from publication_fixture import built_candidate, acceptance
+from publication_fixture import built_candidate, acceptance, pin_source_fixture
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -104,6 +104,7 @@ def prepared_candidate(root):
     repo=root/'source';repo.mkdir()
     for name in ['Cargo.toml','Cargo.lock','rust-toolchain.toml']:
         shutil.copyfile(ROOT/name,repo/name)
+    pin_source_fixture(repo)
     shutil.copytree(ROOT/'packaging',repo/'packaging')
     for crate in (ROOT/'crates').iterdir():
         dest=repo/'crates'/crate.name;dest.mkdir(parents=True)
