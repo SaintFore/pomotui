@@ -26,21 +26,11 @@ sudo systemd-nspawn --version | tee "$out/nspawn-version.txt"
 docker pull archlinux:base-devel
 docker image inspect archlinux:base-devel --format '{{json .RepoDigests}}' > "$out/arch-image.json"
 mkdir -p "$out/previous/source" "$out/packages"
-# Select the newest immutable stable tag below a stable candidate, or the latest
-# stable for a Git candidate. No candidate source/version mutation is permitted.
-previous=$(python3 - "$candidate_dir/candidate.json" "$fixture" <<'PYCODE'
-import json,re,subprocess,sys
-m=json.load(open(sys.argv[1]))
-tags=subprocess.check_output(['git','tag','--list','v*'],text=True).splitlines()
-versions=sorted((tuple(map(int,t[1:].split('.'))),t) for t in tags if re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+',t))
-# Isolated stable-fixture is explicitly allowed to exercise latest production
-# predecessor even though its nonpublishing test version is 0.0.0.
-if m.get('tag_intent') and sys.argv[2] != '--allow-nonpublishing-fixture-predecessor':
-    versions=[(v,t) for v,t in versions if v<tuple(map(int,m['version'].split('.')))]
-if not versions: raise SystemExit('No immutable previous stable release available')
-print(versions[-1][1])
-PYCODE
-)
+# Select the newest published stable release below a stable candidate, or the
+# latest published stable for a Git candidate. Tags alone are not delivery. No candidate source/version mutation is permitted.
+previous_args=()
+if [[ -n "$fixture" ]]; then previous_args+=("$fixture"); fi
+previous=$(python3 packaging/release/release.py previous --candidate "$candidate_dir" --repo . --output "$out/previous-release.json" "${previous_args[@]}")
 git archive "$previous" | tar -x -C "$out/previous/source"
 { git rev-parse "$previous^{commit}"; python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["source_commit"])' "$candidate_dir/candidate.json"; } > "$out/sources.txt"
 docker run --rm -v "$out/previous:/previous" -v "$PWD/tests/release/build-previous.sh:/build.sh:ro" -e CANDIDATE_UID="$(id -u)" -e CANDIDATE_GID="$(id -g)" archlinux:base-devel bash /build.sh 2>&1 | tee "$out/previous-build.log"

@@ -304,7 +304,8 @@ and do not claim to replace real package or upgrade acceptance.
 ## Production candidate gate and stable GitHub coordinator (#24)
 
 `verify-candidate.sh CANDIDATE_DIRECTORY OUTPUT_DIRECTORY` verifies a built
-manifest, builds only the immutable previous stable predecessor, then boots a
+manifest, selects the newest published non-draft/non-prerelease stable GitHub
+release and verifies its immutable tag/source, builds only that predecessor, then boots a
 fresh Arch system and installs **the exact manifest package files**. Both stable
 and Git channels run the full clean-install/domain/migration/lifecycle matrix.
 Stable→Git is a real pacman conflict replacement; same-name Git reinstall also
@@ -342,3 +343,20 @@ review and solo-maintainer approval, moving API base, failed/mismatched gates or
 credentials, two-target preflight, immutable rerun, tag/asset/notes conflicts and
 upload-success-with-wrong-download rejection. Tiny transport fixtures test the
 publication boundary only; hosted real package acceptance supplies upgrade proof.
+
+Actual production-adapter proof passed:
+https://github.com/SaintFore/pomotui/actions/runs/39111512146 at
+`74e01588556c94d7be52bf3b1a19dd44d1fe3de4`. Both real generated package builds,
+portable upload/download, and both complete real Arch matrices passed. The
+nonpublishing source fixture changes only its temporary version to `0.0.0`; the
+actual predecessor was published v0.3.0 at
+`ad9ce4cf4c43997b807485d3a590563ad66c68f1`. The later predecessor selector hardening
+was separately exercised against the actual authenticated release API, resolving
+the same published release/source, and by an isolated regression proving an
+unpublished newer tag/draft is ignored. Guest behavior is unchanged.
+Full existing CI passed on the same source:
+https://github.com/SaintFore/pomotui/actions/runs/39111512132. Proof artifacts:
+`adapter-candidate-74e01588556c94d7be52bf3b1a19dd44d1fe3de4` and
+`production-adapter-74e01588556c94d7be52bf3b1a19dd44d1fe3de4-1`.
+The proof workflow is now nonpublishing manual-only after its narrow branch
+experiment; it cannot publish a release.

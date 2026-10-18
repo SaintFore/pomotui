@@ -20,6 +20,7 @@ jobs:
     outputs:
       artifact: verified-candidate-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.intent }}
     env:
+      GH_TOKEN: ${{ github.token }}
       SOURCE_COMMIT: ${{ inputs.source }}
       CANDIDATE_INTENT: ${{ inputs.intent }}
     steps:

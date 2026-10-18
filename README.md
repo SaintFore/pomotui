@@ -105,7 +105,8 @@ systemctl --user restart pomotui.service
 ```
 
 Maintainers select a stable version and `RELEASE_NOTES.md` in a PR titled
-`release: vX.Y.Z`. A current-source approval and merge to `main` starts the
+`release: vX.Y.Z`. A final-head review or an explicit authorized maintainer
+merge to `main` approves that PR for the
 [verified release workflow](docs/packaging/aur.md); ordinary merges do not select
 a stable release.
 

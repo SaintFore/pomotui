@@ -111,6 +111,30 @@ def select(args):
     args.output.write_text(json.dumps(result, indent=2) + '\n')
 
 
+def previous(args):
+    manifest=json.loads((args.candidate/'candidate.json').read_text())
+    api=GitHub(args.repository,args.api_url)
+    releases=[]
+    for release in api.pages('releases'):
+        tag=release.get('tag_name','')
+        if release.get('draft') or release.get('prerelease') or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+',tag): continue
+        version=tuple(map(int,tag[1:].split('.')))
+        if manifest.get('tag_intent') and not args.allow_nonpublishing_fixture_predecessor and version>=tuple(map(int,manifest['version'].split('.'))): continue
+        releases.append((version,release))
+    if not releases: raise ValueError('No published non-draft stable predecessor is available; an unannounced tag is not a released upgrade baseline')
+    _,release=max(releases,key=lambda item:item[0]);tag=release['tag_name']
+    obj=api.repo('git/ref/tags/'+tag)['object']
+    for _ in range(10):
+        if obj['type']=='commit': break
+        if obj['type']!='tag': raise ValueError('published predecessor tag is not a source commit')
+        obj=api.repo('git/tags/'+obj['sha'])['object']
+    if obj.get('type')!='commit': raise ValueError('published predecessor tag chain is invalid')
+    local=git(args.repo,'rev-parse',tag+'^{commit}')
+    if local!=obj['sha']: raise ValueError('published stable predecessor tag/source conflict; fetch and inspect immutable release identity')
+    args.output.write_text(json.dumps({'version':tag[1:],'tag':tag,'source_commit':local,'release_id':release['id'],'url':release.get('html_url')},indent=2)+'\n')
+    print(tag)
+
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -228,6 +252,14 @@ def main():
     p.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY','SaintFore/pomotui'))
     p.add_argument('--api-url', default='https://api.github.com')
     p.set_defaults(func=select)
+    p=commands.add_parser('previous')
+    p.add_argument('--candidate',type=Path,required=True)
+    p.add_argument('--repo',type=Path,default=Path('.'))
+    p.add_argument('--repository',default=os.environ.get('GITHUB_REPOSITORY','SaintFore/pomotui'))
+    p.add_argument('--api-url',default='https://api.github.com')
+    p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--allow-nonpublishing-fixture-predecessor',action='store_true')
+    p.set_defaults(func=previous)
     for command,func in [('verify-gates',verify_gates),('pack',pack),('preflight',preflight),('publish-github',publish)]:
         p=commands.add_parser(command)
         p.add_argument('--candidate',type=Path,required=True)

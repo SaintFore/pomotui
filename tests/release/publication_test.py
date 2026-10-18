@@ -80,6 +80,26 @@ class ReleasePolicy(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual(json.loads((root/'selected.json').read_text())['approval'],'maintainer-merge')
 
+class PreviousStable(unittest.TestCase):
+    def test_unpublished_newer_tag_is_not_an_upgrade_predecessor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);repo=root/'source';repo.mkdir()
+            def git(*args): return subprocess.check_output(['git','-C',str(repo),*args],text=True).strip()
+            git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid')
+            (repo/'source').write_text('Released source');git('add','.');git('commit','-qm','Released stable')
+            stable=git('rev-parse','HEAD');git('tag','v0.3.0')
+            (repo/'source').write_text('Unpublished candidate');git('commit','-qam','Unpublished tag')
+            git('tag','v0.4.0')
+            candidate=root/'candidate';candidate.mkdir();(candidate/'candidate.json').write_text(json.dumps({'version':'0.5.0','tag_intent':'v0.5.0'}))
+            routes={'/repos/test/project/releases?per_page=100&page=1':(200,[{'id':1,'tag_name':'v0.3.0','draft':False,'prerelease':False,'html_url':'https://example.invalid/v0.3.0'},{'id':2,'tag_name':'v0.4.0','draft':True,'prerelease':False}]),'/repos/test/project/git/ref/tags/v0.3.0':(200,{'object':{'type':'commit','sha':stable}})}
+            with github_fixture(routes) as (url,calls):
+                result=subprocess.run(['python3',str(CLI),'previous','--candidate',str(candidate),'--repo',str(repo),'--repository','test/project','--api-url',url,'--output',str(root/'previous.json')],text=True,capture_output=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                previous=json.loads((root/'previous.json').read_text())
+                self.assertEqual((previous['tag'],previous['source_commit']),('v0.3.0',stable))
+                self.assertNotIn(('GET','/repos/test/project/git/ref/tags/v0.4.0'),calls)
+
+
 def prepared_candidate(root):
     repo=root/'source';repo.mkdir()
     for name in ['Cargo.toml','Cargo.lock','rust-toolchain.toml']:

@@ -1,7 +1,6 @@
 name: Nonpublishing production adapter proof
 on:
-  push:
-    branches: [implement/spec19-ticket24]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -29,6 +28,8 @@ jobs:
           if-no-files-found: error
   adapter:
     needs: build
+    env:
+      GH_TOKEN: ${{ github.token }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
