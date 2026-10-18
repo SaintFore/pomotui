@@ -10,7 +10,6 @@ set -Eeuo pipefail
 rustup toolchain install 1.96.1 --profile minimal
 rustup default 1.96.1
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR=/work/target
 for identity in old candidate; do
     cd "/work/$identity"
     version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
@@ -20,7 +19,6 @@ for identity in old candidate; do
     cp packaging/aur/PKGBUILD packaging/aur/pomotui.install /work/package-$identity/
     tar --exclude=target --exclude=.git --transform="s,^,pomotui-$version/," -czf "/work/package-$identity/pomotui-$version.tar.gz" .
     cd /work/package-$identity
-    python_not_required=true
     sed -i "s/^pkgver=.*/pkgver=$version/; s|^source=.*|source=(\"pomotui-$version.tar.gz\")|; s/^sha256sums=.*/sha256sums=('SKIP')/" PKGBUILD
     makepkg --noconfirm --nocheck
     cp pomotui-*.pkg.tar.zst /work/artifacts/
