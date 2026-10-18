@@ -380,7 +380,7 @@ fn taskless_reservation_failure_creates_a_real_break_without_a_session() {
 }
 
 #[test]
-fn failure_requires_confirmation_and_reflection_without_consuming_the_reservation() {
+fn failure_requires_confirmation_without_consuming_the_reservation() {
     let mut service = Service::new();
     let issued = snapshot(send(
         &mut service,
@@ -393,9 +393,10 @@ fn failure_requires_confirmation_and_reflection_without_consuming_the_reservatio
     ))
     .reservation
     .unwrap();
-    for (key, reflection, confirmed) in
-        [("unconfirmed", "interrupted", false), ("blank", "  ", true)]
-    {
+    for (key, reflection, confirmed) in [
+        ("unconfirmed", "interrupted", false),
+        ("blank", "  ", false),
+    ] {
         assert!(matches!(
             send(
                 &mut service,
@@ -580,7 +581,7 @@ fn reservation_failure_identity_rewards_archive_and_fresh_start_converge_across_
         "preview",
         Command::ReservationFailure {
             id: issued.id.clone(),
-            reflection: "Interrupted".into(),
+            reflection: String::new(),
             confirmed: false,
         },
     );
@@ -590,7 +591,7 @@ fn reservation_failure_identity_rewards_archive_and_fresh_start_converge_across_
         "failure",
         Command::ReservationFailure {
             id: issued.id,
-            reflection: "Interrupted".into(),
+            reflection: String::new(),
             confirmed: true,
         },
     ));
@@ -623,6 +624,12 @@ fn reservation_failure_identity_rewards_archive_and_fresh_start_converge_across_
         pomotui_protocol::ChainBreakSource::ReservationReview
     );
     assert_eq!(imported.recent_ended_chains[0].length, 1);
+    assert_eq!(imported.recent_ended_chains[0].break_reflection, "");
+    drop(b);
+    b = Service::open(&databases[1]).unwrap();
+    let restored = snapshot(send(&mut b, "restored", Command::Status));
+    assert_eq!(restored.recent_ended_chains[0].break_reflection, "");
+    b.enable_background_sync();
     let ended = &failed.recent_ended_chains[0];
     snapshot(send(
         &mut a,

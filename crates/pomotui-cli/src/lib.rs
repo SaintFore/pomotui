@@ -18,6 +18,14 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["status" | "waybar"] | ["reservation", "status"] => Command::Status,
         ["reserve", options @ ..] => parse_reservation(options)?,
         ["reservation", "cancel", "success", id] | ["reservation", "success", id] => Command::ReservationSuccess { id: (*id).into() },
+        ["reservation", "failure", id, "--confirm"]
+        | ["reservation", "cancel", "failure", id, "--confirm"] => Command::ReservationFailure {
+            id: (*id).into(), reflection: String::new(), confirmed: true,
+        },
+        ["reservation", "failure", id]
+        | ["reservation", "cancel", "failure", id] => Command::ReservationFailure {
+            id: (*id).into(), reflection: String::new(), confirmed: false,
+        },
         ["reservation", "failure", id, reflection, "--confirm"]
         | ["reservation", "cancel", "failure", id, reflection, "--confirm"] => Command::ReservationFailure {
             id: (*id).into(), reflection: (*reflection).into(), confirmed: true,
@@ -137,7 +145,7 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["sync", "now"] => Command::SyncNow,
         ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
-        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|reserve [--minutes MINUTES] [--task ID|--no-task]|reservation <status|success ID|failure ID REFLECTION [--confirm]|cancel <success ID|failure ID REFLECTION [--confirm]>|minutes MINUTES>|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
+        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|reserve [--minutes MINUTES] [--task ID|--no-task]|reservation <status|success ID|failure ID [REFLECTION] [--confirm]|cancel <success ID|failure ID [REFLECTION] [--confirm]>|minutes MINUTES>|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
 }
@@ -823,6 +831,29 @@ mod reservation_tests {
 #[cfg(test)]
 mod reservation_failure_tests {
     use super::*;
+    #[test]
+    fn reservation_failure_allows_omitted_reflection_and_keeps_confirmation_explicit() {
+        for prefix in [
+            vec!["reservation", "failure", "r"],
+            vec!["reservation", "cancel", "failure", "r"],
+        ] {
+            for confirmed in [false, true] {
+                let mut words = prefix.clone();
+                if confirmed {
+                    words.push("--confirm");
+                }
+                let args = words.into_iter().map(String::from).collect::<Vec<_>>();
+                assert_eq!(
+                    parse(&args).unwrap().0,
+                    Command::ReservationFailure {
+                        id: "r".into(),
+                        reflection: String::new(),
+                        confirmed,
+                    }
+                );
+            }
+        }
+    }
     #[test]
     fn cancellation_requires_a_judgment_and_failure_confirmation() {
         let args = |words: &[&str]| {
