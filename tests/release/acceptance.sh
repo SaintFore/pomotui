@@ -3,8 +3,8 @@
 set -Eeuo pipefail
 old=$(realpath "$1")
 candidate=$(realpath "$2")
+mkdir -p "$3"
 output=$(realpath "$3")
-mkdir -p "$output"
 exec > >(tee "$output/acceptance.log") 2>&1
 started=$SECONDS
 user=pomotui-acceptance

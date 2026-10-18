@@ -159,6 +159,8 @@ def preflight(args):
 
 
 def publish(args):
+    if args.api_url=='https://api.github.com' and not os.environ.get('GH_TOKEN'):
+        raise ValueError('GitHub publication requires GH_TOKEN with repository contents write permission')
     manifest=verify_gates(args)
     selection=json.loads(args.selection.read_text())
     if selection.get('intent')!='stable' or any(selection.get(k)!=manifest.get(k) for k in ['source_commit','version']) or selection.get('tag')!=manifest['tag_intent']:
