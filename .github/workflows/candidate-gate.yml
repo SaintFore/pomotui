@@ -47,6 +47,8 @@ jobs:
       - name: Applicable checks for the recorded source
         if: steps.restore.outputs.restored != 'true'
         run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/source-checks.log") 2>&1
           cargo fmt --all --check
           sh packaging/tests/aur-install.sh
           python3 -m unittest discover -s tests/release -p '*_test.py'
@@ -98,6 +100,8 @@ jobs:
           retention-days: 90
           name: gate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.intent }}
           path: |
+            ${{ runner.temp }}/source-checks.log
+            ${{ runner.temp }}/restore.json
             ${{ runner.temp }}/acceptance/**/*.log
             ${{ runner.temp }}/acceptance/**/*.json
             ${{ runner.temp }}/acceptance/**/*.txt

@@ -7,28 +7,9 @@ permissions:
   contents: read
   actions: read
 jobs:
-  checks:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - name: Preserve all existing source and migration checks
-        run: |
-          cargo fmt --all --check
-          sh packaging/tests/aur-install.sh
-          python3 -m unittest discover -s tests/release -p '*_test.py'
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace --all-targets --all-features
-          cargo build --workspace
-          cargo build --release --workspace
-          tests/e2e.sh
-          tests/reservations-e2e.sh
-          sh tests/reservation-failure-e2e.sh
   build:
-    needs: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,12 +17,8 @@ jobs:
       - name: Build nonpublishing real stable and Git candidate
         run: |
           tests/release/stable-candidate-fixture.sh "$RUNNER_TEMP/candidate"
+          tests/release/check-candidate-source.sh "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/checks"
           python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
-          python3 - "$RUNNER_TEMP/candidate" <<'PY'
-          import json,pathlib,sys
-          root=pathlib.Path(sys.argv[1]);manifest=json.loads((root/'candidate.json').read_text())
-          (root/'checks.json').write_text(json.dumps({'passed':True,'source_commit':manifest['source_commit']})+'\n')
-          PY
           python3 packaging/release/release.py pack --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/portable"
       - uses: actions/upload-artifact@v4
         with:
@@ -56,6 +33,7 @@ jobs:
           retention-days: 90
           name: delivery-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/checks/**
             ${{ runner.temp }}/candidate/*.log
             ${{ runner.temp }}/candidate/candidate.json
   gate:

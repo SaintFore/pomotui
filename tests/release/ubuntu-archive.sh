@@ -35,7 +35,8 @@ python3 - "$candidate" "$output" <<'PY'
 import hashlib,json,pathlib,sys
 candidate,output=map(pathlib.Path,sys.argv[1:])
 status=json.loads((output/'public-status.json').read_text())
-if status.get('type')=='error': raise SystemExit('public status is an error')
+if status.get('result')!='snapshot' or status.get('snapshot',{}).get('durable_health',{}).get('state')!='healthy':
+    raise SystemExit('public status is not a durably healthy Snapshot')
 m=json.loads((candidate/'candidate.json').read_text())
 receipt={'schema':1,'passed':True,'platform':'ubuntu-24.04','source_commit':m['source_commit'],'candidate_sha256':hashlib.sha256((candidate/'candidate.json').read_bytes()).hexdigest(),'archive_sha256':m['artifacts']['pomotui-linux-x86_64.tar.gz'],'binary_sha256':m['binary_sha256']}
 (output/'ubuntu-archive.json').write_text(json.dumps(receipt,indent=2)+'\n')

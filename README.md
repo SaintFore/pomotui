@@ -108,7 +108,9 @@ Maintainers select a stable version and `RELEASE_NOTES.md` in a PR titled
 `release: vX.Y.Z`. A final-head review or an explicit authorized maintainer
 merge to `main` approves that PR for the
 [verified release workflow](docs/packaging/aur.md); ordinary merges do not select
-a stable release.
+a stable release. The PR receives a delivery report covering every required Linux
+channel, retained diagnostics and same-publication retry; Git-package updates
+report their tested snapshot in Actions. Pending AUR indexing stays pending.
 
 ### macOS (Homebrew)
 
