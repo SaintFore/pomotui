@@ -10,7 +10,7 @@ for state in stopped failed start-limit disabled conflict; do
     rm -f "/home/$user/.config/systemd/user/pomotui.service"
     pacman -U --noconfirm "$old"
     as_user systemctl --user daemon-reload
-    as_user systemctl --user reset-failed pomotui.service pomotui.socket
+    as_user systemctl --user reset-failed
     as_user systemctl --user enable --now pomotui.socket
     as_user pomotui status --json > "$lifecycle_dir/$state-before.json"
     case "$state" in
