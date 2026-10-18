@@ -202,6 +202,21 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
         return serde_json::to_string(response).map_err(|error| error.to_string());
     }
     match response {
+        Response::Snapshot {
+            snapshot: snapshot @ pomotui_protocol::Snapshot { reservation: Some(reservation), .. },
+        } if waybar => {
+            let awaiting = reservation.state == pomotui_protocol::ReservationStatus::AwaitingReview;
+            let state = if awaiting { "awaiting_review" } else { "countdown" };
+            let target = reservation.task_title.as_deref().unwrap_or("No task");
+            // Waybar tooltips use Pango markup, so Task text must be escaped.
+            let target = target.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            serde_json::to_string(&serde_json::json!({
+                "text": if awaiting { "reservation awaiting review".to_owned() } else { format!("reservation {}", clock(reservation.remaining_seconds)) },
+                "tooltip": format!("Focus reservation · {target} · {state}\n{:?} {} {} · round {}/{}{}", snapshot.kind, snapshot.state, clock(snapshot.remaining_seconds), snapshot.completed_rounds, snapshot.rounds_per_cycle, reminder_delivery_label(&snapshot.reminder_delivery)),
+                "class": ["reservation", state],
+                "percentage": percentage(reservation.remaining_seconds, reservation.duration_seconds),
+            })).map_err(|error| error.to_string())
+        },
         Response::Snapshot { snapshot } if waybar => serde_json::to_string(&serde_json::json!({
             "text": format!("{} {}", snapshot.state, clock(snapshot.remaining_seconds)),
             "tooltip": format!("{:?} · round {}/{}{}", snapshot.kind, snapshot.completed_rounds, snapshot.rounds_per_cycle, reminder_delivery_label(&snapshot.reminder_delivery)),
@@ -384,41 +399,72 @@ mod tests {
     use super::*;
     use pomotui_protocol::Snapshot;
 
+    fn waybar_snapshot() -> Snapshot {
+        Snapshot {
+            reservation: None,
+            reservation_minutes: 10,
+            state: "paused".into(),
+            kind: SessionKind::Focus,
+            remaining_seconds: 90,
+            planned_seconds: 100,
+            current_task: None,
+            current_task_id: None,
+            completed_rounds: 2,
+            rounds_per_cycle: 4,
+            next_kind: None,
+            durable_health: pomotui_protocol::DurableHealth {
+                state: pomotui_protocol::DurableHealthState::Healthy,
+                last_successful_commit: None,
+                error: None,
+            },
+            reminder_delivery: pomotui_protocol::ReminderDelivery::default(),
+            tasks: vec![],
+            today: Box::new(pomotui_protocol::TodaySummary::default()),
+            recent_history: vec![],
+            action_chain: pomotui_protocol::ActionChainSummary::default(),
+            pending_review: None,
+            recent_chain_links: vec![],
+            recent_ended_chains: vec![],
+            next_reward: None,
+            reward_milestones: vec![],
+            reward_debt: vec![],
+            current_chain_rewards: vec![],
+        }
+    }
+
+    #[test]
+    fn waybar_prioritizes_reservation_while_preserving_break_context() {
+        let mut snapshot = waybar_snapshot();
+        snapshot.kind = SessionKind::ShortBreak;
+        snapshot.state = "running".into();
+        snapshot.reservation = Some(pomotui_protocol::ReservationSummary {
+            id: "reservation-1".into(),
+            state: pomotui_protocol::ReservationStatus::Countdown,
+            task_id: Some(2),
+            task_title: Some("Write <blog> & notes".into()),
+            duration_seconds: 600,
+            remaining_seconds: 90,
+        });
+        let value: serde_json::Value =
+            serde_json::from_str(&render(&Response::Snapshot { snapshot }, false, true).unwrap())
+                .unwrap();
+        assert_eq!(value["text"], "reservation 01:30");
+        assert_eq!(
+            value["class"],
+            serde_json::json!(["reservation", "countdown"])
+        );
+        assert_eq!(value["percentage"], 15);
+        let tooltip = value["tooltip"].as_str().unwrap();
+        assert!(tooltip.contains("Write &lt;blog&gt; &amp; notes"));
+        assert!(tooltip.contains("ShortBreak running 01:30"));
+    }
+
     #[test]
     fn waybar_output_has_stable_fields() {
         let value: serde_json::Value = serde_json::from_str(
             &render(
                 &Response::Snapshot {
-                    snapshot: Snapshot {
-                        reservation: None,
-                        reservation_minutes: 10,
-                        state: "paused".into(),
-                        kind: SessionKind::Focus,
-                        remaining_seconds: 90,
-                        planned_seconds: 100,
-                        current_task: None,
-                        current_task_id: None,
-                        completed_rounds: 2,
-                        rounds_per_cycle: 4,
-                        next_kind: None,
-                        durable_health: pomotui_protocol::DurableHealth {
-                            state: pomotui_protocol::DurableHealthState::Healthy,
-                            last_successful_commit: None,
-                            error: None,
-                        },
-                        reminder_delivery: pomotui_protocol::ReminderDelivery::default(),
-                        tasks: vec![],
-                        today: Box::new(pomotui_protocol::TodaySummary::default()),
-                        recent_history: vec![],
-                        action_chain: pomotui_protocol::ActionChainSummary::default(),
-                        pending_review: None,
-                        recent_chain_links: vec![],
-                        recent_ended_chains: vec![],
-                        next_reward: None,
-                        reward_milestones: vec![],
-                        reward_debt: vec![],
-                        current_chain_rewards: vec![],
-                    },
+                    snapshot: waybar_snapshot(),
                 },
                 false,
                 true,

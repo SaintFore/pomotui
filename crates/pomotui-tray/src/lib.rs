@@ -1,11 +1,22 @@
-use pomotui_protocol::{SessionKind, Snapshot};
+use pomotui_protocol::{ReservationStatus, SessionKind, Snapshot};
 
 /// Formats the menu bar display text from a service snapshot.
 ///
 /// Shows an icon prefix and remaining time in `MM:SS` format.
-/// Returns `None` when the service is unreachable.
+/// A Focus Reservation takes priority over the underlying Session.
 #[must_use]
 pub fn format_tray_text(snapshot: &Snapshot) -> String {
+    if let Some(reservation) = &snapshot.reservation {
+        return if reservation.state == ReservationStatus::AwaitingReview {
+            "◷ Review".into()
+        } else {
+            format!(
+                "◷ {:02}:{:02}",
+                reservation.remaining_seconds / 60,
+                reservation.remaining_seconds % 60
+            )
+        };
+    }
     let icon = match snapshot.state.as_str() {
         "running" => "▶",
         "paused" => "⏸",
@@ -35,7 +46,33 @@ pub fn format_status_line(snapshot: &Snapshot) -> String {
         snapshot.completed_rounds, snapshot.rounds_per_cycle
     );
     let task = snapshot.current_task.as_deref().unwrap_or("No task");
-    format!("{state_label} {kind_label} · round {round} · {task}")
+    let session = format!("{state_label} {kind_label} · round {round} · {task}");
+    snapshot
+        .reservation
+        .as_ref()
+        .map_or(session.clone(), |reservation| {
+            let target = reservation.task_title.as_deref().unwrap_or("No task");
+            let status = if reservation.state == ReservationStatus::AwaitingReview {
+                "awaiting review".to_owned()
+            } else {
+                format!(
+                    "{:02}:{:02}",
+                    reservation.remaining_seconds / 60,
+                    reservation.remaining_seconds % 60
+                )
+            };
+            format!("Focus reservation · {target} · {status} · {session}")
+        })
+}
+
+/// Whether the tray's Start Focus action is currently available.
+/// The Timer Service still validates the command against its latest state.
+#[must_use]
+pub fn can_start_focus(snapshot: &Snapshot) -> bool {
+    if let Some(reservation) = &snapshot.reservation {
+        return reservation.state == ReservationStatus::Countdown;
+    }
+    snapshot.state != "running" && snapshot.pending_review.is_none()
 }
 
 #[cfg(test)]
@@ -81,6 +118,30 @@ mod tests {
             reward_debt: vec![],
             current_chain_rewards: vec![],
         }
+    }
+
+    #[test]
+    fn reservation_display_takes_priority_and_preserves_break_context() {
+        let mut snap = make_snapshot("running", SessionKind::ShortBreak, 180);
+        snap.reservation = Some(pomotui_protocol::ReservationSummary {
+            id: "reservation-1".into(),
+            state: pomotui_protocol::ReservationStatus::Countdown,
+            task_id: Some(2),
+            task_title: Some("Write blog".into()),
+            duration_seconds: 600,
+            remaining_seconds: 90,
+        });
+        assert_eq!(format_tray_text(&snap), "◷ 01:30");
+        assert_eq!(
+            format_status_line(&snap),
+            "Focus reservation · Write blog · 01:30 · Running Short Break · round 2/4 · Write code"
+        );
+        assert!(can_start_focus(&snap));
+        snap.reservation.as_mut().unwrap().state =
+            pomotui_protocol::ReservationStatus::AwaitingReview;
+        assert_eq!(format_tray_text(&snap), "◷ Review");
+        assert!(format_status_line(&snap).contains("awaiting review"));
+        assert!(!can_start_focus(&snap));
     }
 
     #[test]
