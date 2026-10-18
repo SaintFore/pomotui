@@ -1,7 +1,7 @@
 name: Real Arch acceptance experiment
 on:
   push:
-    branches: [implement/spec19-ticket20]
+    branches: [implement/spec19-ticket21]
   workflow_dispatch:
 concurrency:
   group: real-arch-experiment-${{ github.ref }}
