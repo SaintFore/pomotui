@@ -47,6 +47,8 @@ mod tests {
 
     fn make_snapshot(state: &str, kind: SessionKind, remaining: u64) -> Snapshot {
         Snapshot {
+            reservation: None,
+            reservation_minutes: 10,
             state: state.to_owned(),
             kind,
             remaining_seconds: remaining,

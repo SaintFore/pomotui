@@ -381,3 +381,13 @@ The opt-in [real Syncthing acceptance run](syncthing-acceptance.md) uses tempora
 profiles and two separate exchange directories. Its deterministic companion tests
 remain the daily development checks. Neither setup requires syncing SQLite or
 copying a companion reset file.
+
+### Focus Reservations from the CLI
+
+Use `pomotui reserve` while the Current Session is Pending to commit to beginning a Focus Session within the configured window. It defaults to the Current Task; use `--task ID` to choose another Task or `--no-task` to leave the Focus Session unattributed. `--minutes N` changes only this reservation's window.
+
+The initial default is ten minutes. Set `reservation_minutes = 10` at the root of the TOML configuration, or use `pomotui reservation minutes N` to save a new default immediately. The command preserves other settings and TOML tables. An explicit configuration-file value is loaded at service startup; changing the default never retimes an issued reservation.
+
+`pomotui reservation status --json` includes a stable reservation ID, its task, original duration, remaining seconds, and `countdown` or `awaiting_review` state. During countdown, `pomotui start focus` fulfills the reservation and starts the reserved task immediately, even when the next recommended Session is a Break Session. At expiry the service waits for judgment rather than automatically starting or failing. Use `pomotui reservation success ID` to confirm success and start from the current time. Earlier unrecorded focus time is not backfilled. Success alone does not add an Action Chain link or reward progress.
+
+A reservation survives closing the CLI and restarting the Timer Service. A Break Session may run during its countdown or pending judgment; fulfilling the reservation stops that break, preserving its actual history, and begins Focus. Pending judgment blocks ordinary starts of another Focus Session and new reservations. After Focus begins, the existing stop and Session Review choices remain available.

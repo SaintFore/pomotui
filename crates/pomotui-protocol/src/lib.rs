@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
@@ -26,6 +26,17 @@ pub enum Command {
     Status,
     FreshStart {
         confirmed: bool,
+    },
+    Reserve {
+        minutes: Option<u64>,
+        task_id: Option<u64>,
+        use_current_task: bool,
+    },
+    ReservationSuccess {
+        id: String,
+    },
+    ConfigureReservation {
+        minutes: u64,
     },
     Start {
         kind: SessionKind,
@@ -180,6 +191,10 @@ impl Request {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub reservation: Option<ReservationSummary>,
+    #[serde(default = "default_reservation_minutes")]
+    pub reservation_minutes: u64,
     pub state: String,
     pub kind: SessionKind,
     pub remaining_seconds: u64,
@@ -204,6 +219,29 @@ pub struct Snapshot {
     #[serde(default)]
     pub reward_debt: Vec<RewardDebtSummary>,
     pub current_chain_rewards: Vec<RewardUnlockSummary>,
+}
+
+/// Default time window for a new Focus Reservation.
+#[must_use]
+pub const fn default_reservation_minutes() -> u64 {
+    10
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationStatus {
+    Countdown,
+    AwaitingReview,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservationSummary {
+    pub id: String,
+    pub state: ReservationStatus,
+    pub task_id: Option<u64>,
+    pub task_title: Option<String>,
+    pub duration_seconds: u64,
+    pub remaining_seconds: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

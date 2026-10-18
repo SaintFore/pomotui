@@ -24,6 +24,7 @@ use pomotui_sync::{
     TaskStatus as SyncTaskStatus, plan_sync, project_reward_debt, project_session_reviews,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::path::Path;
 
 mod sync_worker;
@@ -166,6 +167,9 @@ pub struct Service {
     current_chain_id: u64,
     current_chain_length: u64,
     pending_review: Option<PendingReviewState>,
+    reservation: Option<ReservationState>,
+    reservation_minutes: u64,
+    reservation_config_path: Option<std::path::PathBuf>,
     chain_links: Vec<ChainLinkState>,
     next_chain_entry_id: u64,
     void_task_id: Option<u64>,
@@ -175,6 +179,94 @@ pub struct Service {
     next_reward_milestone_id: u64,
     next_reward_unlock_id: u64,
     sync: SyncState,
+}
+
+fn read_optional_settings(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(source) => {
+            source
+                .parse::<toml::Table>()
+                .map_err(|error| format!("invalid settings: {error}"))?;
+            Ok(Some(source))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn reservation_settings_source(source: &str, minutes: u64) -> String {
+    let mut in_root = true;
+    let mut lines = Vec::new();
+    for line in source.lines() {
+        if line.trim_start().starts_with('[') {
+            in_root = false;
+        }
+        let key = line.split_once('=').map(|(key, _)| key.trim());
+        if in_root
+            && key.is_some_and(|key| {
+                matches!(
+                    key,
+                    "reservation_minutes" | "\"reservation_minutes\"" | "'reservation_minutes'"
+                )
+            })
+        {
+            continue;
+        }
+        lines.push(line);
+    }
+    format!(
+        "reservation_minutes = {minutes}\n{}{}",
+        lines.join("\n"),
+        if lines.is_empty() { "" } else { "\n" }
+    )
+}
+
+fn replace_settings(path: &Path, source: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = path.with_extension(format!("toml.{}.tmp", EntityId::random().as_str()));
+    let result =
+        std::fs::write(&temporary, source).and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| error.to_string())
+}
+
+type ReservationMutationBackup = (
+    Timer,
+    TaskStore,
+    History,
+    SyncState,
+    u64,
+    Option<ReservationState>,
+    u64,
+);
+
+fn validate_reservation_minutes(minutes: u64) -> Result<u64, String> {
+    minutes
+        .checked_mul(60)
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| "reservation_minutes must be positive and fit a duration in seconds".into())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ReservationState {
+    id: String,
+    task_id: Option<u64>,
+    task_title: Option<String>,
+    duration_seconds: u64,
+    remaining_seconds: u64,
+    observed_at: u64,
+    awaiting_review: bool,
+}
+
+impl ReservationState {
+    fn remaining(&self, now: u64) -> u64 {
+        self.remaining_seconds
+            .saturating_sub(now.saturating_sub(self.observed_at))
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -332,6 +424,9 @@ impl Service {
             current_chain_id: 1,
             current_chain_length: 0,
             pending_review: None,
+            reservation: None,
+            reservation_minutes: 10,
+            reservation_config_path: None,
             chain_links: Vec::new(),
             next_chain_entry_id: 1,
             void_task_id: None,
@@ -476,6 +571,10 @@ impl Service {
         replacement.wall = self.wall;
         replacement.reminders_enabled = self.reminders_enabled;
         replacement.sound_enabled = self.sound_enabled;
+        replacement.reservation_minutes = self.reservation_minutes;
+        replacement
+            .reservation_config_path
+            .clone_from(&self.reservation_config_path);
         replacement.sync.path.clone_from(&self.sync.path);
         replacement.sync.background = self.sync.background;
         replacement.sync.beginning = document.beginning().clone();
@@ -707,6 +806,195 @@ impl Service {
         self.reminder.configure(sound, volume_percent.min(100));
     }
 
+    /// Sets the settings file used by frontend configuration commands.
+    pub fn set_configuration_path(&mut self, path: std::path::PathBuf) {
+        self.reservation_config_path = Some(path);
+    }
+
+    fn commit_reservation_configuration(&mut self, minutes: u64, key: Option<&str>) -> Response {
+        if let Err(error) = validate_reservation_minutes(minutes) {
+            return Self::rejected(error);
+        }
+        let previous = self.reservation_minutes;
+        let original = match self
+            .reservation_config_path
+            .as_ref()
+            .map(|path| read_optional_settings(path))
+            .transpose()
+        {
+            Ok(original) => original,
+            Err(error) => return Self::rejected(error),
+        };
+        if let Some(path) = &self.reservation_config_path {
+            let source = original
+                .as_ref()
+                .and_then(|source| source.as_deref())
+                .unwrap_or("");
+            let updated = reservation_settings_source(source, minutes);
+            if let Err(error) = replace_settings(path, &updated) {
+                return Self::rejected(error);
+            }
+        }
+        self.reservation_minutes = minutes;
+        match self.persist(key) {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(mut error) => {
+                self.reservation_minutes = previous;
+                if let Some(path) = &self.reservation_config_path {
+                    let restored = original.flatten().map_or_else(
+                        || std::fs::remove_file(path).map_err(|error| error.to_string()),
+                        |source| replace_settings(path, &source),
+                    );
+                    if let Err(restore_error) = restored {
+                        let _ = write!(error, "; restoring settings failed: {restore_error}");
+                    }
+                }
+                self.durable_rejected(error)
+            }
+        }
+    }
+
+    fn set_reservation_minutes(&mut self, minutes: u64) -> Result<(), String> {
+        validate_reservation_minutes(minutes)?;
+        self.reservation_minutes = minutes;
+        Ok(())
+    }
+
+    /// Configures future reservations without changing an issued deadline.
+    ///
+    /// # Errors
+    /// Returns a validation or persistence error.
+    pub fn configure_reservation_minutes(&mut self, minutes: u64) -> Result<(), String> {
+        let previous = self.reservation_minutes;
+        self.set_reservation_minutes(minutes)?;
+        if let Err(error) = self.persist(None) {
+            self.reservation_minutes = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn create_reservation(
+        &mut self,
+        minutes: Option<u64>,
+        task_id: Option<u64>,
+        use_current_task: bool,
+    ) -> Result<(), String> {
+        if !matches!(self.timer.current_session(), CurrentSession::Pending(_)) {
+            return Err("A Focus Reservation requires a Pending Session".into());
+        }
+        if self.pending_review.is_some() || self.reservation.is_some() {
+            return Err("Resolve the existing review or reservation first".into());
+        }
+        if use_current_task && task_id.is_some() {
+            return Err("Choose either the current Task or an explicit Task".into());
+        }
+        let duration_seconds =
+            validate_reservation_minutes(minutes.unwrap_or(self.reservation_minutes))?;
+        let task_id = if use_current_task {
+            self.timer.current_task().map(TaskId::get)
+        } else {
+            task_id
+        };
+        let task_title = task_id
+            .map(|id| {
+                self.tasks
+                    .get(TaskId::new(id))
+                    .map(|task| task.title().to_owned())
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        self.reservation = Some(ReservationState {
+            id: EntityId::random().as_str().into(),
+            task_id,
+            task_title,
+            duration_seconds,
+            remaining_seconds: duration_seconds,
+            observed_at: self.now,
+            awaiting_review: false,
+        });
+        Ok(())
+    }
+
+    fn fulfill_reservation(&mut self, id: &str) -> Result<(), String> {
+        let reservation = self
+            .reservation
+            .as_ref()
+            .ok_or("No Focus Reservation to review")?;
+        if reservation.id != id {
+            return Err("Focus Reservation identity has changed".into());
+        }
+        if self.pending_review.is_some() {
+            return Err("Resolve Pending Review first".into());
+        }
+        let task_id = reservation
+            .task_id
+            .filter(|id| self.tasks.get(TaskId::new(*id)).is_ok());
+        if !matches!(self.timer.current_session(), CurrentSession::Pending(_)) {
+            if matches!(self.timer.current_session(), CurrentSession::Running(session) if session.kind() == DomainKind::Focus)
+                || matches!(self.timer.current_session(), CurrentSession::Paused(session) if session.kind() == DomainKind::Focus)
+            {
+                return Err("Cannot replace a Focus Session with a reservation".into());
+            }
+            let planned = self.timer.planned_seconds();
+            let transition = self.timer.stop(self.now);
+            self.apply_transition(transition, planned)?;
+        }
+        let mut state = self.timer.state();
+        state.session = SessionState::Pending {
+            kind: DomainKind::Focus,
+        };
+        state.current_task = task_id.map(TaskId::new);
+        self.timer = Timer::restore(state).map_err(|error| error.to_string())?;
+        let planned = self.timer.planned_seconds();
+        let transition = self.timer.start(self.now, task_id.map(TaskId::new));
+        self.apply_transition(transition, planned)?;
+        self.reservation = None;
+        self.apply_deferred_task_deletions()
+    }
+
+    fn reservation_backup(&self) -> ReservationMutationBackup {
+        (
+            self.timer.clone(),
+            self.tasks.clone(),
+            self.history.clone(),
+            self.sync.clone(),
+            self.next_event_id,
+            self.reservation.clone(),
+            self.reservation_minutes,
+        )
+    }
+
+    fn restore_reservation_mutation(&mut self, backup: ReservationMutationBackup) {
+        (
+            self.timer,
+            self.tasks,
+            self.history,
+            self.sync,
+            self.next_event_id,
+            self.reservation,
+            self.reservation_minutes,
+        ) = backup;
+    }
+
+    fn commit_reservation_success(&mut self, id: &str, key: Option<&str>) -> Response {
+        let backup = self.reservation_backup();
+        match self
+            .fulfill_reservation(id)
+            .and_then(|()| self.persist(key))
+        {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(error) => {
+                self.restore_reservation_mutation(backup);
+                self.durable_rejected(error)
+            }
+        }
+    }
+
     pub fn tick(&mut self) {
         self.observe_time();
         self.dispatch_pending_reminders();
@@ -732,6 +1020,21 @@ impl Service {
         let starts = local_day_boundaries(self.wall);
         let summary = self.history.summarize(starts);
         Snapshot {
+            reservation_minutes: self.reservation_minutes,
+            reservation: self.reservation.as_ref().map(|reservation| {
+                pomotui_protocol::ReservationSummary {
+                    id: reservation.id.clone(),
+                    state: if reservation.awaiting_review {
+                        pomotui_protocol::ReservationStatus::AwaitingReview
+                    } else {
+                        pomotui_protocol::ReservationStatus::Countdown
+                    },
+                    task_id: reservation.task_id,
+                    task_title: reservation.task_title.clone(),
+                    duration_seconds: reservation.duration_seconds,
+                    remaining_seconds: reservation.remaining(self.now),
+                }
+            }),
             state: state.into(),
             kind: map_kind(kind),
             remaining_seconds: self.timer.remaining_seconds(self.now),
@@ -946,6 +1249,17 @@ impl Service {
     fn apply_observation(&mut self, now: u64, wall: i64) {
         self.now = now;
         self.wall = wall;
+        if let Some(reservation) = &mut self.reservation
+            && !reservation.awaiting_review
+            && reservation.remaining(self.now) == 0
+        {
+            reservation.awaiting_review = true;
+            reservation.remaining_seconds = 0;
+            reservation.observed_at = self.now;
+            if self.persist(None).is_err() {
+                return;
+            }
+        }
         let planned = self.timer.planned_seconds();
         if let Ok(transition) = self.timer.advance(self.now) {
             let changed = !transition.events().is_empty();
@@ -2781,7 +3095,30 @@ impl Handler for Service {
                 snapshot: self.snapshot(),
             };
         }
+        let reservation_mutation = matches!(
+            &request.command,
+            Command::Reserve { .. }
+                | Command::ReservationSuccess { .. }
+                | Command::ConfigureReservation { .. }
+        ) || (self.reservation.is_some()
+            && matches!(
+                &request.command,
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    ..
+                } | Command::StartTitle { .. }
+            ));
+        let rollback = reservation_mutation.then(|| self.reservation_backup());
         let result = match request.command {
+            Command::Reserve {
+                minutes,
+                task_id,
+                use_current_task,
+            } => self.create_reservation(minutes, task_id, use_current_task),
+            Command::ReservationSuccess { id } => self.fulfill_reservation(&id),
+            Command::ConfigureReservation { minutes } => {
+                return self.commit_reservation_configuration(minutes, mutation_key.as_deref());
+            }
             Command::FreshStart { confirmed } => {
                 if !confirmed {
                     return Self::rejected("Fresh Start requires explicit confirmation");
@@ -2807,6 +3144,22 @@ impl Handler for Service {
                 };
             }
             Command::Start { kind, task_id } => {
+                if kind == SessionKind::Focus
+                    && let Some(reservation) = &self.reservation
+                {
+                    if reservation.awaiting_review {
+                        return Self::rejected(
+                            "Reservation Review must be resolved before starting another Focus Session",
+                        );
+                    }
+                    if task_id.is_some() && task_id != reservation.task_id {
+                        return Self::rejected(
+                            "Start the reserved Task or resolve the reservation first",
+                        );
+                    }
+                    let id = reservation.id.clone();
+                    return self.commit_reservation_success(&id, mutation_key.as_deref());
+                }
                 if kind == SessionKind::Focus && self.pending_review.is_some() {
                     return Self::rejected(
                         "Pending Review must be resolved before starting another Focus Session",
@@ -2834,6 +3187,11 @@ impl Handler for Service {
                 }
             }
             Command::StartTitle { title } => {
+                if self.reservation.is_some() {
+                    return Self::rejected(
+                        "Start the reserved Task or resolve the reservation first",
+                    );
+                }
                 if self.pending_review.is_some() {
                     return Self::rejected(
                         "Pending Review must be resolved before starting another Focus Session",
@@ -3389,9 +3747,19 @@ impl Handler for Service {
                 Ok(()) => Response::Snapshot {
                     snapshot: self.snapshot(),
                 },
-                Err(error) => self.durable_rejected(error),
+                Err(error) => {
+                    if let Some(backup) = rollback {
+                        self.restore_reservation_mutation(backup);
+                    }
+                    self.durable_rejected(error)
+                }
             },
-            Err(error) => Self::rejected(error),
+            Err(error) => {
+                if let Some(backup) = rollback {
+                    self.restore_reservation_mutation(backup);
+                }
+                Self::rejected(error)
+            }
         }
     }
 }
@@ -3500,6 +3868,10 @@ struct PersistedService {
     current_chain_length: u64,
     #[serde(default)]
     pending_review: Option<PendingReviewState>,
+    #[serde(default)]
+    reservation: Option<ReservationState>,
+    #[serde(default = "pomotui_protocol::default_reservation_minutes")]
+    reservation_minutes: u64,
     #[serde(default)]
     chain_links: Vec<ChainLinkState>,
     #[serde(default = "default_next_identity")]
@@ -3626,7 +3998,7 @@ impl PersistedService {
         };
         let clock = PlatformClock::default();
         let persisted = Self {
-            data_format_version: 4,
+            data_format_version: 5,
             timer: PersistedTimer {
                 session,
                 current_task: state.current_task.map(TaskId::get),
@@ -3673,6 +4045,12 @@ impl PersistedService {
             current_chain_id: service.current_chain_id,
             current_chain_length: service.current_chain_length,
             pending_review: service.pending_review.clone(),
+            reservation_minutes: service.reservation_minutes,
+            reservation: service.reservation.clone().map(|mut reservation| {
+                reservation.remaining_seconds = reservation.remaining(service.now);
+                reservation.observed_at = service.now;
+                reservation
+            }),
             chain_links: service.chain_links.clone(),
             next_chain_entry_id: service.next_chain_entry_id,
             void_task_id: service.void_task_id,
@@ -3690,9 +4068,9 @@ impl PersistedService {
     fn decode(payload: &str) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
-        if !matches!(persisted.data_format_version, 0 | 2 | 3 | 4) {
+        if !matches!(persisted.data_format_version, 0 | 2 | 3 | 4 | 5) {
             return Err(format!(
-                "unsupported persisted-state format {}; supported formats are unversioned released state and formats 2, 3, and 4",
+                "unsupported persisted-state format {}; supported formats are unversioned released state and formats 2, 3, 4, and 5",
                 persisted.data_format_version
             ));
         }
@@ -3758,6 +4136,14 @@ impl PersistedService {
                 task_id: task_id.map(TaskId::new),
             },
         };
+        validate_reservation_minutes(persisted.reservation_minutes)?;
+        let reservation = persisted.reservation.map(|mut reservation| {
+            reservation.remaining_seconds = reservation
+                .remaining_seconds
+                .saturating_sub(recovery_elapsed);
+            reservation.observed_at = current_observation.monotonic_seconds;
+            reservation
+        });
         let timer = Timer::restore(TimerState {
             session,
             current_task: persisted.timer.current_task.map(TaskId::new),
@@ -3826,6 +4212,9 @@ impl PersistedService {
             current_chain_id: persisted.current_chain_id,
             current_chain_length: persisted.current_chain_length,
             pending_review: persisted.pending_review,
+            reservation,
+            reservation_minutes: persisted.reservation_minutes,
+            reservation_config_path: None,
             chain_links: persisted.chain_links,
             next_chain_entry_id: persisted.next_chain_entry_id,
             void_task_id: persisted.void_task_id,
@@ -7050,5 +7439,144 @@ mod tests {
             [(Some("First"), 900), (Some("Second"), 300), (None, 120)]
         );
         assert!(today.seven_day_dates[6].starts_with("20"));
+    }
+}
+
+#[cfg(test)]
+mod reservation_scenarios {
+    use super::*;
+    use pomotui_protocol::{PROTOCOL_VERSION, ReservationStatus};
+
+    fn send(service: &mut Service, key: &str, command: Command) -> Response {
+        service.handle(Request {
+            version: PROTOCOL_VERSION,
+            idempotency_key: Some(key.into()),
+            command,
+        })
+    }
+    fn snapshot(response: Response) -> Snapshot {
+        match response {
+            Response::Snapshot { snapshot } => snapshot,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn expiry_waits_for_judgment_and_success_ends_actual_rest_from_now() {
+        let mut service = Service::new();
+        snapshot(send(&mut service, "skip-focus", Command::Skip));
+        let reserved = snapshot(send(
+            &mut service,
+            "reserve",
+            Command::Reserve {
+                minutes: Some(1),
+                task_id: None,
+                use_current_task: true,
+            },
+        ));
+        let id = reserved.reservation.unwrap().id;
+        snapshot(send(
+            &mut service,
+            "rest",
+            Command::Start {
+                kind: SessionKind::ShortBreak,
+                task_id: None,
+            },
+        ));
+        service.apply_observation(service.now + 65, service.wall + 65);
+        let expired = snapshot(send(&mut service, "state", Command::Status));
+        assert_eq!(
+            expired.reservation.unwrap().state,
+            ReservationStatus::AwaitingReview
+        );
+        assert_eq!(expired.kind, SessionKind::ShortBreak);
+        assert_eq!(expired.action_chain.length, 0);
+        assert!(matches!(
+            send(
+                &mut service,
+                "bypass",
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: None
+                }
+            ),
+            Response::Error { .. }
+        ));
+        assert!(matches!(
+            send(
+                &mut service,
+                "another",
+                Command::Reserve {
+                    minutes: None,
+                    task_id: None,
+                    use_current_task: true
+                }
+            ),
+            Response::Error { .. }
+        ));
+        let success = snapshot(send(
+            &mut service,
+            "success",
+            Command::ReservationSuccess { id },
+        ));
+        assert_eq!(success.kind, SessionKind::Focus);
+        assert_eq!(success.state, "running");
+        assert_eq!(success.remaining_seconds, 25 * 60);
+        assert_eq!(success.completed_rounds, 0);
+        assert!(success.reservation.is_none());
+        assert_eq!(success.recent_history[0].kind, SessionKind::ShortBreak);
+        assert_eq!(success.recent_history[0].outcome, "Stopped");
+    }
+
+    #[test]
+    fn any_pending_kind_can_reserve_without_skipping_or_completing_the_break() {
+        for kind in [
+            DomainKind::Focus,
+            DomainKind::ShortBreak,
+            DomainKind::LongBreak,
+        ] {
+            let mut service = Service::new();
+            let mut state = service.timer.state();
+            state.session = SessionState::Pending { kind };
+            service.timer = Timer::restore(state).unwrap();
+            snapshot(send(
+                &mut service,
+                "reserve",
+                Command::Reserve {
+                    minutes: None,
+                    task_id: None,
+                    use_current_task: true,
+                },
+            ));
+            let started = snapshot(send(
+                &mut service,
+                "start",
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id: None,
+                },
+            ));
+            assert_eq!(started.state, "running");
+            assert_eq!(started.kind, SessionKind::Focus);
+            assert_eq!(started.completed_rounds, 0);
+            assert!(started.recent_history.is_empty());
+        }
+    }
+
+    #[test]
+    fn reservation_clock_ignores_wall_time_adjustment() {
+        let mut service = Service::new();
+        snapshot(send(
+            &mut service,
+            "reserve",
+            Command::Reserve {
+                minutes: None,
+                task_id: None,
+                use_current_task: true,
+            },
+        ));
+        service.apply_observation(service.now + 20, service.wall + 86400);
+        let status = service.snapshot();
+        assert_eq!(status.reservation.unwrap().remaining_seconds, 580);
     }
 }

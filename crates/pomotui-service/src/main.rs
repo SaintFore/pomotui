@@ -33,7 +33,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&data_dir)?;
     eprintln!("Timer Service opening {}", data_dir.display());
     let mut service = Service::open(&data_dir.join("pomotui.sqlite3"))?;
+    service.set_configuration_path(settings_path());
     if let Some(settings) = load_settings()? {
+        if let Some(minutes) = settings.reservation_minutes {
+            service.configure_reservation_minutes(minutes)?;
+        }
         if settings.volume > 100 {
             return Err("volume must be between 0 and 100".into());
         }
@@ -95,6 +99,7 @@ fn socket_path() -> std::path::PathBuf {
 #[derive(Deserialize)]
 #[serde(default)]
 struct ServiceSettings {
+    reservation_minutes: Option<u64>,
     #[serde(rename = "focus_minutes")]
     focus: u16,
     #[serde(rename = "short_break_minutes")]
@@ -110,6 +115,7 @@ struct ServiceSettings {
 impl Default for ServiceSettings {
     fn default() -> Self {
         Self {
+            reservation_minutes: None,
             focus: 25,
             short_break: 5,
             long_break: 15,
@@ -121,7 +127,7 @@ impl Default for ServiceSettings {
     }
 }
 
-fn load_settings() -> Result<Option<ServiceSettings>, Box<dyn std::error::Error>> {
+fn settings_path() -> std::path::PathBuf {
     let config_home = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
         || {
             std::env::var_os("HOME").map_or_else(
@@ -131,8 +137,11 @@ fn load_settings() -> Result<Option<ServiceSettings>, Box<dyn std::error::Error>
         },
         std::path::PathBuf::from,
     );
-    let path = config_home.join("pomotui/config.toml");
-    match std::fs::read_to_string(path) {
+    config_home.join("pomotui/config.toml")
+}
+
+fn load_settings() -> Result<Option<ServiceSettings>, Box<dyn std::error::Error>> {
+    match std::fs::read_to_string(settings_path()) {
         Ok(source) => Ok(Some(toml::from_str(&source)?)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
