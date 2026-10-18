@@ -29,9 +29,9 @@ class GitHub:
         self.repository = repository
         self.base = api_url.rstrip('/')
 
-    def request(self, path, method='GET', payload=None, raw=False, missing=False):
+    def request(self, path, method='GET', payload=None, raw=False, missing=False, accept=None):
         url = path if path.startswith(('https://', 'http://')) else self.base + path
-        headers = {'Accept':'application/octet-stream' if raw else 'application/vnd.github+json', 'User-Agent':'pomotui-release'}
+        headers = {'Accept':accept or ('application/octet-stream' if raw else 'application/vnd.github+json'), 'User-Agent':'pomotui-release'}
         authenticated_origin=urllib.parse.urlsplit(url).netloc==urllib.parse.urlsplit(self.base).netloc or (self.base=='https://api.github.com' and urllib.parse.urlsplit(url).netloc=='uploads.github.com')
         if os.environ.get('GH_TOKEN') and authenticated_origin:
             headers['Authorization'] = 'Bearer ' + os.environ['GH_TOKEN']
