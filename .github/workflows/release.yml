@@ -1,18 +1,15 @@
-name: Release
+name: Non-publishing platform builds
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build
+        description: Existing source tag to build without publishing
         required: true
         type: string
-  push:
-    tags:
-      - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -33,11 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
       - name: Install repository Rust toolchain and target
         run: |
-          rustup toolchain install
-          rustup target add ${{ matrix.target }}
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" ${{ matrix.target }}
       - name: Build
         run: cargo build --release --workspace --target ${{ matrix.target }}
       - name: Package
@@ -55,19 +53,3 @@ jobs:
           path: |
             ${{ matrix.archive }}.tar.gz
             ${{ matrix.archive }}.sha256
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
-          files: |
-            pomotui-*.tar.gz
-            pomotui-*.sha256

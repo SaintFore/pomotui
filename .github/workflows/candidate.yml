@@ -17,6 +17,10 @@ jobs:
   candidate:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [git, stable-fixture]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,7 +28,11 @@ jobs:
       - name: Candidate interface regression tests
         run: python3 -m unittest discover -s tests/release -p '*_test.py'
       - name: Prepare source-identified Git candidate
+        if: matrix.kind == 'git'
         run: python3 packaging/release/candidate.py plan --output "$RUNNER_TEMP/candidate"
+      - name: Prepare isolated nonpublishing stable fixture
+        if: matrix.kind == 'stable-fixture'
+        run: tests/release/stable-candidate-fixture.sh "$RUNNER_TEMP/candidate"
       - name: Build and validate real generated package
         run: python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
       - name: Require actual build evidence
@@ -32,7 +40,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: candidate-${{ github.sha }}
+          name: candidate-${{ matrix.kind }}-${{ github.sha }}
           path: |
             ${{ runner.temp }}/candidate/candidate.json
             ${{ runner.temp }}/candidate/*.tar.gz

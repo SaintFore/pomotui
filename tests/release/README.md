@@ -69,3 +69,61 @@ nspawn environment provides the required actual pacman and systemd user-manager
 boundary without depending on nested virtualization. This evidence establishes
 initial feasibility; it does not establish the remaining session/data/failure
 scenarios or constitute a complete production publication gate.
+
+## Source-identified candidate preparation (#23)
+
+The non-publishing public interface is `packaging/release/candidate.py` (Python
+3.11+, Git, Docker, GNU tar with zstd support for build output inspection):
+
+```sh
+python3 packaging/release/candidate.py plan --source HEAD --output /tmp/candidate
+python3 packaging/release/candidate.py build --output /tmp/candidate
+python3 packaging/release/candidate.py verify --output /tmp/candidate --require-built
+```
+
+Planning reads the committed source, not dirty working files, and requires full
+Git history. Ordinary candidates require only `aur-git`. Stable intent must be
+explicit: add `--intent stable --notes release-notes.md` to `plan`; this requires
+`github-linux`, `aur-stable`, and `aur-git`. The workspace version is the only
+stable-version input; every workspace package must inherit it and its lockfile
+entry must agree. The stable tag is derived and checked against any existing
+local tag. The later publisher must also reconcile the authoritative remote tag.
+This command does not establish release-PR approval; the coordinator owns that
+authorization check.
+
+`candidate.json` records schema version, exact source commit, workspace version,
+commit-derived Git snapshot, tag intent, required channels, expected outputs,
+selected toolchain/target, and SHA-256 identities of the source, recipes,
+`.SRCINFO`, current shared hook, notes, and built artifacts. `planned` never
+passes `verify --require-built`. Building uses a disposable Arch image recorded
+by digest; it installs the target into the toolchain selected by the source's
+`rust-toolchain.toml`, executes the generated recipes' real build and checks,
+compares `makepkg --printsrcinfo`, verifies stable-source checksums, and inspects
+actual package metadata and packaged hook. The Git build freezes the recorded
+commit using a local Git bundle and makepkg's `--holdver`; the distributed recipe
+still fetches moving upstream HEAD and recalculates its snapshot version.
+
+Built outputs include `built/aur-stable/*.pkg.tar.zst` when stable was selected,
+`built/aur-git/*.pkg.tar.zst`, Linux binary archive/checksum, binary hashes, and
+`build.log`. Pass the recorded package path to the existing
+`acceptance.sh OLD_PACKAGE CANDIDATE_PACKAGE OUTPUT_DIRECTORY` boundary. A built
+candidate still records `acceptance: required`: package construction never
+substitutes for either real acceptance suite, credential preflight, or release
+approval. The Git package provides/conflicts with `pomotui`; the acceptance
+adapter must account for its distinct actual package name.
+
+The stable source is the generated `pomotui-VERSION-source.tar.gz`, whose exact
+bytes and embedded Git source identity are checked. The generated stable recipe
+uses that source asset's eventual GitHub Release URL, **not** a separately
+regenerated GitHub tag archive. After all gates, the publisher must reconcile or
+create the immutable `vVERSION` tag at the recorded commit, upload this exact
+source asset, verify it is externally available, then publish its matching AUR
+recipe. No source tag is created during preparation. The legacy platform workflow
+is now explicitly non-publishing and has no tag trigger, so creating a source tag
+cannot bypass the acceptance gate.
+
+The `Non-publishing Linux candidate` workflow exercises this path for relevant
+PRs without deployment secrets. Its stable fixture uses `0.0.0` only in a
+disposable local source commit, builds both real package recipes, and never
+publishes that commit, tag, or version. Run fast isolated boundary regressions
+with `python3 -m unittest discover -s tests/release -p '*_test.py'`.

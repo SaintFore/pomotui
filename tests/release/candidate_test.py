@@ -102,6 +102,24 @@ class CandidateTest(unittest.TestCase):
         result = self.cli('verify', '--output', str(self.output), '--require-built', ok=False)
         self.assertIn('not built', result.stderr)
 
+    def test_build_label_without_real_outputs_cannot_pass_verification(self):
+        self.plan()
+        path = self.output / 'candidate.json'
+        manifest = json.loads(path.read_text())
+        manifest['state'] = 'built'
+        path.write_text(json.dumps(manifest))
+        result = self.cli('verify', '--output', str(self.output), '--require-built', ok=False)
+        self.assertIn('build evidence', result.stderr)
+
+    def test_recorded_version_must_match_the_actual_source_archive(self):
+        self.plan()
+        path = self.output / 'candidate.json'
+        manifest = json.loads(path.read_text())
+        manifest['version'] = '9.9.9'
+        path.write_text(json.dumps(manifest))
+        result = self.cli('verify', '--output', str(self.output), ok=False)
+        self.assertIn('source identity mismatch', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

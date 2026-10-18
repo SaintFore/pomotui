@@ -31,7 +31,7 @@ def plan(args):
         raise ValueError('full source history is required for a Git snapshot version')
     count = run('git', 'rev-list', '--count', commit, cwd=repo)
     version = tomllib.loads(run('git', 'show', f'{commit}:Cargo.toml', cwd=repo))['workspace']['package']['version']
-    if not re.fullmatch(r'0|[1-9][0-9]*', version.split('.')[0]) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
         raise ValueError('workspace version must be a stable semantic version')
     if args.intent == 'stable':
         tag = f'v{version}'
@@ -58,6 +58,7 @@ def plan(args):
                 raise ValueError(f'{member} must inherit the workspace version')
             if locked.get(package['name']) != version:
                 raise ValueError(f"lockfile version mismatch: {package['name']}")
+        manifest['expected_outputs'] = {'aur-git': f'built/aur-git/pomotui-git-{manifest["git_version"]}-1-x86_64.pkg.tar.zst'}
         manifest['toolchain'] = tomllib.loads(source('rust-toolchain.toml'))['toolchain']['channel']
         channels = [('aur-git', 'packaging/aur/pomotui-git', manifest['git_version'])]
         if args.intent == 'stable':
@@ -66,6 +67,8 @@ def plan(args):
             manifest['tag_intent'] = f'v{version}'
             manifest['required_channels'] = ['github-linux', 'aur-stable', 'aur-git']
             (args.output / 'release-notes.md').write_bytes(args.notes.read_bytes())
+            manifest['expected_outputs']['aur-stable'] = f'built/aur-stable/pomotui-{version}-1-x86_64.pkg.tar.zst'
+            manifest['expected_outputs']['github-linux'] = 'pomotui-linux-x86_64.tar.gz'
             channels.append(('aur-stable', 'packaging/aur', version))
         for channel, template, package_version in channels:
             dest = args.output / channel
@@ -105,11 +108,45 @@ def plan(args):
 
 def verify(args):
     manifest = json.loads((args.output / 'candidate.json').read_text())
+    archive_name = f"pomotui-{manifest['version']}-source.tar.gz"
+    if manifest['source_archive'] != archive_name:
+        raise ValueError('source identity mismatch: archive/version')
+    with tarfile.open(args.output / archive_name) as archive:
+        if archive.pax_headers.get('comment') != manifest['source_commit']:
+            raise ValueError('source identity mismatch: archive/commit')
+        cargo = tomllib.loads(archive.extractfile(f"pomotui-{manifest['version']}/Cargo.toml").read().decode())
+        if cargo['workspace']['package']['version'] != manifest['version']:
+            raise ValueError('source identity mismatch: workspace/version')
+    if sha(args.output / archive_name) != manifest['source_archive_sha256']:
+        raise ValueError('source identity mismatch: archive/checksum')
+    if manifest['tag_intent'] not in (None, f"v{manifest['version']}"):
+        raise ValueError('source identity mismatch: stable tag/version')
     for name, checksum in manifest['artifacts'].items():
+        path = Path(name)
+        if path.is_absolute() or '..' in path.parts:
+            raise ValueError(f'invalid artifact path: {name}')
         if sha(args.output / name) != checksum:
             raise ValueError(f'artifact identity mismatch: {name}')
     if args.require_built and manifest['state'] != 'built':
         raise ValueError('candidate is not built; planning is not build validation')
+    if manifest['state'] == 'built':
+        expected_channels = set(manifest['required_channels']) - {'github-linux'}
+        if set(manifest.get('packages', {})) != expected_channels or not manifest.get('build_image') or not manifest.get('binary_sha256'):
+            raise ValueError('missing real build evidence')
+        for channel, name in manifest['packages'].items():
+            if name not in manifest['artifacts'] or not (args.output / name).is_file():
+                raise ValueError(f'missing package build evidence: {channel}')
+        archive = args.output / 'pomotui-linux-x86_64.tar.gz'
+        checksum = args.output / 'pomotui-linux-x86_64.sha256'
+        if archive.name not in manifest['artifacts'] or checksum.name not in manifest['artifacts']:
+            raise ValueError('missing Linux archive build evidence')
+        if checksum.read_text() != f'{sha(archive)}  {archive.name}\n':
+            raise ValueError('Linux archive checksum mismatch')
+        with tarfile.open(archive) as tar:
+            for name in ['pomotui', 'pomotui-service', 'pomotui-tui']:
+                data = tar.extractfile(name).read()
+                if not data.startswith(b'\x7fELF') or hashlib.sha256(data).hexdigest() != manifest['binary_sha256'].get(name):
+                    raise ValueError(f'Linux executable build evidence mismatch: {name}')
     print(f"{manifest['state']}: {manifest['source_commit']}")
 
 
@@ -187,7 +224,7 @@ def main():
     args = parser.parse_args()
     try:
         {'plan': plan, 'build': build, 'verify': verify}[args.command](args)
-    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+    except (ValueError, OSError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'candidate: {error}\n')
 
 
