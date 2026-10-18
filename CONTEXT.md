@@ -139,3 +139,15 @@ _Avoid_: Stopped Session, completed session
 **Session Reminder**:
 The once-only desktop notification and optional sound emitted when a Session reaches its deadline. The sound may be disabled, selected from built-ins, or loaded from a local audio file with configurable volume; playback failure does not undo the transition, and Timer Service restarts must not repeat an emitted reminder.
 _Avoid_: Timer tick, repeated alarm
+
+## Accepted reservation design (not yet implemented)
+
+These terms describe the accepted direction in [ADR-0015](docs/adr/0015-reservations-share-the-action-chain.md); the existing terms above describe current behavior until that extension is implemented.
+
+**Focus Reservation**:
+The user's commitment to begin a Focus Session within a chosen time window, defaulting to ten minutes. It is optional, permits an earlier start, and shares the existing Action Chain rather than maintaining a separate chain; the configurable default is retained for future reservations while an issued reservation keeps its original deadline.
+_Avoid_: Pending Session, scheduled automatic start, reservation chain
+
+**Reservation Review**:
+The user's explicit judgment of whether a Focus Reservation was fulfilled by starting on time, including when the user forgot to record the start. Success preserves the Action Chain without adding a Chain Link or reward progress; failure ends it with the existing consequences for unclaimed and claimed rewards, while expiry alone makes no failure judgment.
+_Avoid_: Session Review, automatic failure, successful focus
