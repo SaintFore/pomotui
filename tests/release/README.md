@@ -360,3 +360,22 @@ https://github.com/SaintFore/pomotui/actions/runs/39111512132. Proof artifacts:
 `production-adapter-74e01588556c94d7be52bf3b1a19dd44d1fe3de4-1`.
 The proof workflow is now nonpublishing manual-only after its narrow branch
 experiment; it cannot publish a release.
+
+## Stable AUR delivery and discovery
+
+The approved stable workflow now invokes `release.py publish-stable`, consuming
+only the retained candidate, all-package acceptance receipt, source checks and
+release selection. It preflights both AUR repositories before any publication,
+publishes/verifies the GitHub source and Linux downloads, then delivers the exact
+generated `PKGBUILD`, `.SRCINFO` and shared hook to both required AUR channels.
+The source archive must be usable before the stable recipe is announced.
+
+The aggregate JSON contains candidate identity, per-channel results and ordered
+`pushed`, `remote-verified`, and discovery events. A bounded old AUR index produces
+`pending-indexing` and a failing workflow, never aggregate completion. Run
+`release.py verify-stable` with the same candidate, selection, acceptance, checks
+and output arguments to retry read-only verification; it creates no tag, release,
+asset, AUR commit or push. Remote byte conflicts remain paused independently of
+index availability. Publication tests use the normal CLI against disposable Git
+repositories and HTTP endpoints; these transport fixtures do not replace the
+separate real Arch package/upgrade acceptance evidence.

@@ -242,6 +242,68 @@ def publish(args):
     args.output.write_text(json.dumps({'channel':'github-linux','stage':'discoverable','source_commit':source,'tag':tag,'url':visible['html_url'],'aggregate':'pending-required-aur-channels'},indent=2)+'\n')
 
 
+def verify_github(args, manifest):
+    api=GitHub(args.repository,args.api_url)
+    tag=manifest['tag_intent']
+    obj=api.repo('git/ref/tags/'+tag)['object']
+    for _ in range(10):
+        if obj['type']=='commit': break
+        if obj['type']!='tag': raise ValueError('GitHub tag has unsupported source identity')
+        obj=api.repo('git/tags/'+obj['sha'])['object']
+    if obj.get('type')!='commit' or obj['sha']!=manifest['source_commit']:
+        raise ValueError('GitHub tag source conflicts with recorded candidate')
+    release=api.repo('releases/tags/'+tag)
+    if release.get('draft') or release.get('prerelease') or release.get('tag_name')!=tag:
+        raise ValueError('GitHub stable source is not publicly discoverable')
+    if release.get('body')!=(args.candidate/'release-notes.md').read_text():
+        raise ValueError('GitHub release notes conflict with recorded candidate')
+    assets={item['name']:item for item in api.pages('releases/'+str(release['id'])+'/assets')}
+    for name in [manifest['source_archive'],'pomotui-linux-x86_64.tar.gz','pomotui-linux-x86_64.sha256']:
+        asset=assets.get(name,{})
+        url=asset.get('browser_download_url')
+        if not url or api.request(url,raw=True)!=(args.candidate/name).read_bytes():
+            raise ValueError('GitHub user download checksum mismatch or missing asset: '+name)
+    return {'channel':'github-linux','stage':'discoverable','source_commit':manifest['source_commit'],'tag':tag,'url':release['html_url']}
+
+
+def stable(args):
+    from aur import AurChannel
+    manifest=verify_gates(args)
+    if set(manifest['required_channels'])!={'github-linux','aur-stable','aur-git'} or not manifest.get('tag_intent'):
+        raise ValueError('stable publication requires a stable candidate and every Linux channel')
+    destination=args.output
+    report={'source_commit':manifest['source_commit'],'version':manifest['version'],
+            'candidate_sha256':digest(args.candidate/'candidate.json'),
+            'aggregate':'in-progress','channels':{},'events':[]}
+    def save(): destination.write_text(json.dumps(report,indent=2)+'\n')
+    def event(value):
+        report['events'].append(value);report['channels'][value['channel']]=value;save()
+    try:
+        if args.command=='publish-stable':
+            args.preflight=destination.with_name(destination.stem+'-preflight.json')
+            args.output=args.preflight
+            preflight(args)
+            args.output=destination.with_name(destination.stem+'-github.json')
+            publish(args)
+        event(verify_github(args,manifest))
+        for channel,package in [('aur-stable','pomotui'),('aur-git','pomotui-git')]:
+            client=AurChannel(args.candidate,channel,
+                remote=args.aur_remote.replace('{package}',package) if args.aur_remote else None,
+                rpc_url=args.aur_rpc_url,acceptance=args.acceptance,
+                discovery_attempts=args.discovery_attempts,discovery_delay=args.discovery_delay,
+                observer=event)
+            event(client.publish() if args.command=='publish-stable' else client.verify())
+        report['aggregate']='complete' if all(value['stage']=='discoverable' for value in report['channels'].values()) else 'pending-indexing'
+        save()
+        if report['aggregate']!='complete':
+            raise ValueError('AUR remote content verified; pending discovery. Run verify-stable with the same candidate; no new commit or push is needed')
+    except (ValueError,OSError,subprocess.SubprocessError) as error:
+        if report['aggregate']=='in-progress': report['aggregate']='paused'
+        report['diagnosis']=str(error);save();raise
+    finally:
+        args.output=destination
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -279,6 +341,20 @@ def main():
             p.add_argument('--api-url',default='https://api.github.com')
             p.add_argument('--output',type=Path,required=True)
         p.set_defaults(func=func)
+    for command in ['publish-stable','verify-stable']:
+        p=commands.add_parser(command)
+        p.add_argument('--candidate',type=Path,required=True)
+        p.add_argument('--acceptance',type=Path,required=True)
+        p.add_argument('--checks',type=Path,required=True)
+        p.add_argument('--selection',type=Path,required=True)
+        p.add_argument('--repository',default=os.environ.get('GITHUB_REPOSITORY','SaintFore/pomotui'))
+        p.add_argument('--api-url',default='https://api.github.com')
+        p.add_argument('--aur-remote')
+        p.add_argument('--aur-rpc-url')
+        p.add_argument('--discovery-attempts',type=int,default=6)
+        p.add_argument('--discovery-delay',type=float,default=10)
+        p.add_argument('--output',type=Path,required=True)
+        p.set_defaults(func=stable)
     args = parser.parse_args()
     try:
         args.func(args)

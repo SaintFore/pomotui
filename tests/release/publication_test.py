@@ -251,5 +251,94 @@ class ReleaseDelivery(unittest.TestCase):
                 self.assertTrue(state['release']['draft'])
                 self.assertFalse((root/'result.json').exists())
 
+@contextlib.contextmanager
+def aur_index(versions):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            package=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)['arg[]'][0]
+            self.send_response(200);self.end_headers()
+            self.wfile.write(json.dumps({'results':[{'Name':package,'Version':versions[package]}]}).encode())
+        def log_message(self,*args): pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    try: yield f'http://127.0.0.1:{server.server_port}/rpc/v5/info'
+    finally: server.shutdown();thread.join();server.server_close()
+
+
+class StableAurDelivery(unittest.TestCase):
+    def command(self,action,root,candidate,url,rpc):
+        return subprocess.run(['python3',str(CLI),action,'--candidate',str(candidate),
+            '--acceptance',str(candidate/'acceptance.json'),'--checks',str(candidate/'checks.json'),
+            '--selection',str(root/'selection.json'),'--repository','test/project','--api-url',url,
+            '--aur-remote',str(root/'{package}.git'),'--aur-rpc-url',rpc,
+            '--discovery-attempts','1','--output',str(root/'stable.json')],text=True,capture_output=True)
+
+    def test_stable_publication_delivers_both_required_aur_channels_and_can_verify_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            for package in ['pomotui','pomotui-git']:
+                subprocess.run(['git','init','--bare','--initial-branch=master','-q',str(root/(package+'.git'))],check=True)
+            versions={'pomotui':'old-1','pomotui-git':manifest['git_version']+'-1'}
+            with publication_remote(manifest['source_commit']) as (url,state), aur_index(versions) as rpc:
+                result=self.command('publish-stable',root,candidate,url,rpc)
+                self.assertNotEqual(result.returncode,0,'pending indexing must not report overall success')
+                report=json.loads((root/'stable.json').read_text())
+                self.assertEqual(report['aggregate'],'pending-indexing')
+                self.assertEqual(report['channels']['aur-stable']['stage'],'pending-indexing')
+                self.assertEqual(report['channels']['aur-git']['stage'],'discoverable')
+                self.assertEqual([e['stage'] for e in report['events'] if e['channel']=='aur-stable'],['pushed','remote-verified','pending-indexing'])
+                heads={package:subprocess.check_output(['git','--git-dir',str(root/(package+'.git')),'rev-parse','master']) for package in versions}
+                for channel,package in [('aur-stable','pomotui'),('aur-git','pomotui-git')]:
+                    for name in ['PKGBUILD','.SRCINFO','pomotui.install']:
+                        actual=subprocess.check_output(['git','--git-dir',str(root/(package+'.git')),'show','master:'+name])
+                        self.assertEqual(actual,(candidate/channel/name).read_bytes())
+                versions['pomotui']=manifest['version']+'-1';writes=list(state['writes'])
+                result=self.command('verify-stable',root,candidate,url,rpc)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(json.loads((root/'stable.json').read_text())['aggregate'],'complete')
+                self.assertEqual(state['writes'],writes)
+                for package,head in heads.items():
+                    self.assertEqual(subprocess.check_output(['git','--git-dir',str(root/(package+'.git')),'rev-parse','master']),head)
+
+    def test_remote_content_mismatch_is_paused_independently_of_index_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            for package in ['pomotui','pomotui-git']:
+                subprocess.run(['git','init','--bare','--initial-branch=master','-q',str(root/(package+'.git'))],check=True)
+            versions={'pomotui':manifest['version']+'-1','pomotui-git':manifest['git_version']+'-1'}
+            with publication_remote(manifest['source_commit']) as (url,state), aur_index(versions) as rpc:
+                result=self.command('publish-stable',root,candidate,url,rpc)
+                self.assertEqual(result.returncode,0,result.stderr)
+                clone=root/'conflict'
+                subprocess.run(['git','clone','-q',str(root/'pomotui.git'),str(clone)],check=True)
+                (clone/'pomotui.install').write_text('Conflicting remote hook')
+                subprocess.run(['git','-C',str(clone),'add','.'],check=True)
+                subprocess.run(['git','-C',str(clone),'-c','user.name=Other','-c','user.email=other@example.invalid','commit','-qm','Conflicting remote'],check=True)
+                subprocess.run(['git','-C',str(clone),'push','-q','origin','HEAD:master'],check=True)
+                head=subprocess.check_output(['git','--git-dir',str(root/'pomotui.git'),'rev-parse','master'])
+                writes=list(state['writes'])
+                result=self.command('verify-stable',root,candidate,url,rpc)
+                self.assertNotEqual(result.returncode,0)
+                report=json.loads((root/'stable.json').read_text())
+                self.assertEqual(report['aggregate'],'paused')
+                self.assertIn('pomotui/pomotui.install',report['diagnosis'])
+                self.assertEqual(state['writes'],writes)
+                self.assertEqual(subprocess.check_output(['git','--git-dir',str(root/'pomotui.git'),'rev-parse','master']),head)
+
+    def test_unusable_github_source_blocks_both_aur_deliveries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);candidate,manifest=prepared_candidate(root)
+            for package in ['pomotui','pomotui-git']:
+                subprocess.run(['git','init','--bare','--initial-branch=master','-q',str(root/(package+'.git'))],check=True)
+            with publication_remote(manifest['source_commit'],corrupt_download=True) as (url,state), aur_index({}) as rpc:
+                result=self.command('publish-stable',root,candidate,url,rpc)
+                self.assertNotEqual(result.returncode,0)
+                for package in ['pomotui','pomotui-git']:
+                    head=subprocess.run(['git','--git-dir',str(root/(package+'.git')),'rev-parse','--verify','master'],capture_output=True)
+                    self.assertNotEqual(head.returncode,0)
+                report=json.loads((root/'stable.json').read_text())
+                self.assertEqual(report['aggregate'],'paused')
+                self.assertFalse(any(event['channel'].startswith('aur-') for event in report['events']))
+
 if __name__ == '__main__':
     unittest.main()

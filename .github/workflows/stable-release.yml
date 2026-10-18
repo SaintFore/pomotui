@@ -69,7 +69,7 @@ jobs:
         with:
           name: stable-selection-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selection
-      - name: Verify gates, preflight every required credential, publish Linux and verify delivery
+      - name: Publish verified Linux and both AUR channels; verify user discovery
         env:
           GH_TOKEN: ${{ github.token }}
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -82,13 +82,12 @@ jobs:
           test -n "$AUR_SSH_PRIVATE_KEY" || { echo 'Configure AUR_SSH_PRIVATE_KEY; publication paused before any public writes.' >&2; exit 1; }
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$AUR_SSH_KEY_FILE"
           python3 packaging/release/release.py verify-gates --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json"
-          python3 packaging/release/release.py preflight --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" --output "$RUNNER_TEMP/preflight.json"
-          python3 packaging/release/release.py publish-github --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" --selection "$RUNNER_TEMP/selection/selection.json" --preflight "$RUNNER_TEMP/preflight.json" --output "$RUNNER_TEMP/github-linux.json"
-      - name: Report GitHub channel without claiming aggregate completion
+          python3 packaging/release/release.py publish-stable --candidate "$RUNNER_TEMP/candidate" --acceptance "$RUNNER_TEMP/candidate/acceptance.json" --checks "$RUNNER_TEMP/candidate/checks.json" --selection "$RUNNER_TEMP/selection/selection.json" --output "$RUNNER_TEMP/stable-publication.json"
+      - name: Report each required channel and aggregate discovery
         if: always()
         run: |
-          echo 'Linux GitHub channel; stable and Git AUR delivery remain required before aggregate completion.' >> "$GITHUB_STEP_SUMMARY"
-          for report in "$RUNNER_TEMP/preflight.json" "$RUNNER_TEMP/github-linux.json"; do
+          echo 'Required Linux channels: GitHub, stable AUR and Git AUR. Only discoverable channels count toward completion.' >> "$GITHUB_STEP_SUMMARY"
+          for report in "$RUNNER_TEMP/stable-publication-preflight.json" "$RUNNER_TEMP/stable-publication-github.json" "$RUNNER_TEMP/stable-publication.json"; do
             if test -s "$report"; then cat "$report" >> "$GITHUB_STEP_SUMMARY"; fi
           done
           echo "Retry same candidate: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
@@ -97,8 +96,9 @@ jobs:
         with:
           name: stable-publication-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/preflight.json
-            ${{ runner.temp }}/github-linux.json
+            ${{ runner.temp }}/stable-publication-preflight.json
+            ${{ runner.temp }}/stable-publication-github.json
+            ${{ runner.temp }}/stable-publication.json
             ${{ runner.temp }}/stable-publication.log
           if-no-files-found: warn
   macos:
