@@ -1,0 +1,46 @@
+name: Non-publishing Linux candidate
+on:
+  pull_request:
+    paths:
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'packaging/**'
+      - 'tests/release/**'
+      - '.github/workflows/candidate.yml'
+  push:
+    branches: [implement/spec19-ticket23]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Candidate interface regression tests
+        run: python3 -m unittest discover -s tests/release -p '*_test.py'
+      - name: Prepare source-identified Git candidate
+        run: python3 packaging/release/candidate.py plan --output "$RUNNER_TEMP/candidate"
+      - name: Build and validate real generated package
+        run: python3 packaging/release/candidate.py build --output "$RUNNER_TEMP/candidate"
+      - name: Require actual build evidence
+        run: python3 packaging/release/candidate.py verify --output "$RUNNER_TEMP/candidate" --require-built
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/candidate/candidate.json
+            ${{ runner.temp }}/candidate/*.tar.gz
+            ${{ runner.temp }}/candidate/*.sha256
+            ${{ runner.temp }}/candidate/*.log
+            ${{ runner.temp }}/candidate/aur-*/PKGBUILD
+            ${{ runner.temp }}/candidate/aur-*/.SRCINFO
+            ${{ runner.temp }}/candidate/aur-*/pomotui.install
+            ${{ runner.temp }}/candidate/built
+          include-hidden-files: true
+          if-no-files-found: error
