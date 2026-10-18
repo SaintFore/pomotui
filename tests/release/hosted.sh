@@ -30,7 +30,7 @@ git rev-parse --short=12 HEAD > "$out/work/candidate-short"
 cp tests/release/build-packages.sh "$out/work/build-packages.sh"
 docker run --rm -v "$out/work:/work" archlinux:base-devel bash /work/build-packages.sh 2>&1 | tee "$out/build.log"
 # Keep build tools/caches out of the booted guest; install only runtime prerequisites.
-container=$(docker create archlinux:base-devel bash -ec 'pacman -Syu --noconfirm systemd dbus sqlite sudo; systemctl enable systemd-logind.service')
+container=$(docker create archlinux:base-devel bash -ec 'pacman -Syu --noconfirm systemd dbus sqlite sudo python; systemctl enable systemd-logind.service')
 docker start -a "$container" | tee "$out/rootfs.log"
 [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
 docker export "$container" | sudo tar -x -C "$root"
@@ -45,5 +45,8 @@ old=$(find "$out/work/artifacts" -name 'pomotui-0.3.0-*.pkg.tar.zst' ! -name 'po
 candidate=$(find "$out/work/artifacts" -name 'pomotui-*.r*.pkg.tar.zst' ! -name 'pomotui-debug-*' -printf '%f\n')
 [[ -n "$old" && -n "$candidate" ]]
 cp tests/release/acceptance.sh "$out/acceptance.sh"
+cp -r tests/release/scenarios "$out/scenarios"
+mkdir -p "$out/scenarios/fixtures"
+cp crates/pomotui-service/tests/fixtures/v0.*-production.sqlite3 "$out/scenarios/fixtures/"
 cp tests/release/lifecycle.sh "$out/lifecycle.sh"
-sudo timeout 180 systemd-run --machine=pomotui-acceptance --wait --pipe /usr/bin/bash /acceptance/acceptance.sh "/acceptance/work/artifacts/$old" "/acceptance/work/artifacts/$candidate" /acceptance/result 2>&1 | tee "$out/scenario.log"
+sudo timeout 300 systemd-run --machine=pomotui-acceptance --wait --pipe /usr/bin/bash /acceptance/acceptance.sh "/acceptance/work/artifacts/$old" "/acceptance/work/artifacts/$candidate" /acceptance/result 2>&1 | tee "$out/scenario.log"

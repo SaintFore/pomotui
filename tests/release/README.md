@@ -70,6 +70,51 @@ boundary without depending on nested virtualization. This evidence establishes
 initial feasibility; it does not establish the remaining session/data/failure
 scenarios or constitute a complete production publication gate.
 
+## Domain state across upgrades (#21)
+
+`scenarios/domain-state.py` extends the same three-argument acceptance boundary.
+Each scenario reinstalls v0.3.0 in isolated state, creates work through the public
+v6 socket, and upgrades through pacman. It checks the candidate process and
+executable before comparing public snapshots. It covers Running and Paused
+Sessions, attributed History, Pending Review, a successful review and claimed
+reward, reservation countdown and pending judgment, settings, and upgrades of
+both immutable released migration fixtures. Backup bytes are preserved across
+upgrade; independent backup restoration remains covered by `legacy_migration`.
+
+The Running Session check observes continued task attribution, planned duration,
+clock progression, and one resulting History record whose identity matches its
+Pending Review. The live public snapshot does not expose a Current Session ID;
+this is the strongest identity observation available at the approved seam.
+
+Reservation expiry uses a real one-minute deadline and never submits a judgment.
+Separate upgrades cover a live countdown and an already pending judgment.
+Corrupt databases, future schema versions, and future durable-state formats are
+injected only as unsupported input; startup must fail with its diagnostic while
+preserving the original database bytes. No database query is used to assert
+business state. Each scenario retains before/after snapshots, candidate process
+identity, pacman output, and failure diagnostics under `result/domain-state`.
+
+### Hosted domain-state evidence
+
+[Run 39109947982](https://github.com/SaintFore/pomotui/actions/runs/39109947982)
+passed on 2026-10-18 at source
+`22f4ef6046309601d6e4d17b934ce383433550fe`, including all domain-state scenarios
+and the integrated lifecycle suite. It upgraded recorded v0.3.0 source
+`ad9ce4cf4c43997b807485d3a590563ad66c68f1` to the candidate through real pacman.
+Running Session recovery changed PID 431 to 479 with candidate executable SHA-256
+`b4bf6a1d377bf5ce93ae5e5fbeb4015bba2c48c5fe5f1fc2b9641413a7d533d4`.
+Running and Paused timing, Pending Review, represented history/reviews/claimed
+reward/settings, reservation countdown/expiry/pending judgment, both released
+migration fixtures and backups, and corrupt/future-schema/future-format byte
+preservation all passed. The combined booted scenario took 160 seconds, including
+two real one-minute reservation deadlines, with 30.6 MB peak memory and no swap.
+
+[Artifact 12130197002](https://github.com/SaintFore/pomotui/actions/runs/39109947982/artifacts/12130197002)
+retains packages, source identities, journals, pacman logs, before/after public
+snapshots, per-scenario process identities and invalid-data diagnostic/checksum
+records. Ordinary [CI run 39109947981](https://github.com/SaintFore/pomotui/actions/runs/39109947981)
+also passed. No domain/service change was required by these state scenarios.
+
 ## Source-identified candidate preparation (#23)
 
 The non-publishing public interface is `packaging/release/candidate.py` (Python
