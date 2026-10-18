@@ -40,9 +40,28 @@ use.
 - **Action Chains and rewards** — reviewed sessions build a chain; reward milestones can be unlocked and claimed
 - **Reward Debt** — claimed rewards stay claimed; future successes repay any shortfall revealed by late reviews
 - **Cross-device convergence** — sync tasks, history, reviews, and chains through one provider-neutral file
+- **Focus Reservations** — reserve a future focus start, review commitments, and track countdowns in TUI and Waybar
 - **Fresh Start** — explicitly clear business data across synchronized computers while keeping ordinary settings
 - **Desktop integration** — notifications, completion sounds, systemd user socket, app launcher entry
 - **Bilingual UI** — English and Simplified Chinese, switchable in Settings
+
+## v0.3.0
+
+This feature release brings cross-device Shared Activity synchronization, Reward
+Debt, Fresh Start, and Focus Reservations to the versioned package. It also adds
+scrollable bilingual help and recovers configured Timer Services after AUR upgrades.
+
+The `pomotui` AUR package follows tagged releases; `pomotui-git` builds the latest
+source. Once the AUR recipe is updated, upgrade the versioned package with:
+
+```sh
+paru -Syu pomotui
+```
+
+Back up your Pomotui data before upgrading, and upgrade every synchronized computer
+together before resuming file replication. Existing released SQLite databases have
+migration support; older experimental synchronization files may require the
+[recovery procedure](#pre-release-upgrades-and-old-sync-formats).
 
 ## Requirements
 

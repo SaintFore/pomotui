@@ -4027,130 +4027,138 @@ fn palette_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors)
     frame.render_widget(List::new(items).block(block), area);
 }
 
+fn chinese_help_lines(colors: Colors) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "导航",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Tab  番茄钟区域 ↔ 工作链区域"),
+        Line::from("  h/l 或 ←/→  切换当前区域内的页面"),
+        Line::from("  归档：Enter 详情 · D 删除整链 · Esc 返回列表"),
+        Line::from("  行动链：E 编辑复盘 · T 编辑任意条目标题"),
+        Line::from("  j/k 或 ↑/↓  移动选择                    q  退出"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "时段",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Enter  确认所选任务          Space  开始/暂停/继续"),
+        Line::from("  X      停止当前时段          K      跳过当前时段"),
+        Line::from("  p 重新判断   a 预约/判断预约   b 开始预约专注"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "任务",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  n 新建   r 重命名   c 完成/重新打开   D 删除"),
+        Line::from("  已完成任务显示 ✓ 和删除线；按 c 取消完成"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "工具",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  : 命令面板   s 设置   ? 帮助   Esc 关闭浮层"),
+        Line::from(""),
+        Line::from("历史与列表"),
+        Line::from("  gg/G 首项/末项（任务与历史） · u/d 上/下移五项"),
+        Line::from("  历史：Space 或 Alt-Space 标记 · v 范围选择 · D 删除"),
+        Line::from(""),
+        Line::from("工作链与奖励"),
+        Line::from("  行动链：F 失败复盘（待判断时） · R 打开奖励"),
+        Line::from("  归档详情：E 编辑复盘 · T 编辑条目标题"),
+        Line::from("  奖励：n 新建 · e 编辑 · D 删除 · C 领取已解锁奖励"),
+        Line::from(""),
+        Line::from("浮层与鼠标"),
+        Line::from("  复盘：S/Enter 成功 · F 失败 · j/k 选择任务"),
+        Line::from("  预约：Enter 确认 · j/k 选择任务 · 0 无任务"),
+        Line::from("  鼠标：点顶部回首页 · 点任务选择 · 点时段区启停"),
+        Line::from("  帮助：↑/↓ 或 j/k 滚动 · u/d 翻页 · g/G 首尾"),
+    ]
+}
+
+fn english_help_lines(colors: Colors) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "NAVIGATION",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Tab  Timer area ↔ Work Chain area"),
+        Line::from("  h/l or ←/→  switch pages within the current area"),
+        Line::from("  Archive: Enter detail · D delete whole chain · Esc back"),
+        Line::from("  Chain: E edit Reflection · T edit any entry title"),
+        Line::from("  j/k move  gg/G ends  u/d page  Space mark  v range  q quit"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "SESSIONS",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Enter  confirm selected Task             Space  start/pause/resume"),
+        Line::from("  X      stop Current Session              K      skip Current Session"),
+        Line::from("  p      reopen review · a reserve / review reservation"),
+        Line::from("  b      begin reserved Focus now"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "TASKS",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  n  Create task     r  Rename task       c  Complete/reopen task"),
+        Line::from("  D  Delete task / selected History (confirmation required)"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "TOOLS",
+            Style::default()
+                .fg(colors.gold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  :  executable command palette            s  settings"),
+        Line::from("  ? help · Esc closes any overlay"),
+        Line::from(""),
+        Line::from("HISTORY & LISTS"),
+        Line::from("  gg/G first/last Task or History row · u/d move five rows"),
+        Line::from("  History: Space/Alt-Space mark · v range · D delete"),
+        Line::from(""),
+        Line::from("CHAIN & REWARDS"),
+        Line::from("  Chain: F failure reflection (pending review) · R rewards"),
+        Line::from("  Archive detail: E edit reflection · T edit entry title"),
+        Line::from("  Rewards: n create · e edit · D delete · C claim unlocked"),
+        Line::from(""),
+        Line::from("OVERLAYS & MOUSE"),
+        Line::from("  Review: S/Enter success · F failure · j/k choose Task"),
+        Line::from("  Reservation: Enter confirm · j/k choose Task · 0 no Task"),
+        Line::from("  Mouse: top row home · Task row select · session area toggle"),
+        Line::from("  Help: ↑/↓ or j/k scroll · u/d page · g/G first/last"),
+    ]
+}
+
 fn help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colors) {
     let lines = if app.language == Language::SimplifiedChinese {
-        vec![
-            Line::from(Span::styled(
-                "导航",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  Tab  番茄钟区域 ↔ 工作链区域"),
-            Line::from("  h/l 或 ←/→  切换当前区域内的页面"),
-            Line::from("  归档：Enter 详情 · D 删除整链 · Esc 返回列表"),
-            Line::from("  行动链：E 编辑复盘 · T 编辑任意条目标题"),
-            Line::from("  j/k 或 ↑/↓  移动选择                    q  退出"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "时段",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  Enter  确认所选任务          Space  开始/暂停/继续"),
-            Line::from("  X      停止当前时段          K      跳过当前时段"),
-            Line::from("  p 重新判断   a 预约/判断预约   b 开始预约专注"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "任务",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  n 新建   r 重命名   c 完成/重新打开   D 删除"),
-            Line::from("  已完成任务显示 ✓ 和删除线；按 c 取消完成"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "工具",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  : 命令面板   s 设置   ? 帮助   Esc 关闭浮层"),
-            Line::from(""),
-            Line::from("历史与列表"),
-            Line::from("  gg/G 首项/末项（任务与历史） · u/d 上/下移五项"),
-            Line::from("  历史：Space 或 Alt-Space 标记 · v 范围选择 · D 删除"),
-            Line::from(""),
-            Line::from("工作链与奖励"),
-            Line::from("  行动链：F 失败复盘（待判断时） · R 打开奖励"),
-            Line::from("  归档详情：E 编辑复盘 · T 编辑条目标题"),
-            Line::from("  奖励：n 新建 · e 编辑 · D 删除 · C 领取已解锁奖励"),
-            Line::from(""),
-            Line::from("浮层与鼠标"),
-            Line::from("  复盘：S/Enter 成功 · F 失败 · j/k 选择任务"),
-            Line::from("  预约：Enter 确认 · j/k 选择任务 · 0 无任务"),
-            Line::from("  鼠标：点顶部回首页 · 点任务选择 · 点时段区启停"),
-            Line::from("  帮助：↑/↓ 或 j/k 滚动 · u/d 翻页 · g/G 首尾"),
-        ]
+        chinese_help_lines(colors)
     } else {
-        vec![
-            Line::from(Span::styled(
-                "NAVIGATION",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  Tab  Timer area ↔ Work Chain area"),
-            Line::from("  h/l or ←/→  switch pages within the current area"),
-            Line::from("  Archive: Enter detail · D delete whole chain · Esc back"),
-            Line::from("  Chain: E edit Reflection · T edit any entry title"),
-            Line::from("  j/k move  gg/G ends  u/d page  Space mark  v range  q quit"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "SESSIONS",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  Enter  confirm selected Task             Space  start/pause/resume"),
-            Line::from("  X      stop Current Session              K      skip Current Session"),
-            Line::from("  p      reopen review · a reserve / review reservation"),
-            Line::from("  b      begin reserved Focus now"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "TASKS",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  n  Create task     r  Rename task       c  Complete/reopen task"),
-            Line::from("  D  Delete task / selected History (confirmation required)"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "TOOLS",
-                Style::default()
-                    .fg(colors.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  :  executable command palette            s  settings"),
-            Line::from("  ? help · Esc closes any overlay"),
-            Line::from(""),
-            Line::from("HISTORY & LISTS"),
-            Line::from("  gg/G first/last Task or History row · u/d move five rows"),
-            Line::from("  History: Space/Alt-Space mark · v range · D delete"),
-            Line::from(""),
-            Line::from("CHAIN & REWARDS"),
-            Line::from("  Chain: F failure reflection (pending review) · R rewards"),
-            Line::from("  Archive detail: E edit reflection · T edit entry title"),
-            Line::from("  Rewards: n create · e edit · D delete · C claim unlocked"),
-            Line::from(""),
-            Line::from("OVERLAYS & MOUSE"),
-            Line::from("  Review: S/Enter success · F failure · j/k choose Task"),
-            Line::from("  Reservation: Enter confirm · j/k choose Task · 0 no Task"),
-            Line::from("  Mouse: top row home · Task row select · session area toggle"),
-            Line::from("  Help: ↑/↓ or j/k scroll · u/d page · g/G first/last"),
-        ]
+        english_help_lines(colors)
     };
     let width = usize::from(area.width.saturating_sub(2)).max(1);
     let rows: usize = lines
         .iter()
         .map(|line| line.width().max(1).div_ceil(width))
         .sum();
-    app.help_max_scroll = rows
-        .saturating_sub(usize::from(area.height.saturating_sub(2)))
-        .min(usize::from(u16::MAX)) as u16;
+    app.help_max_scroll =
+        u16::try_from(rows.saturating_sub(usize::from(area.height.saturating_sub(2))))
+            .unwrap_or(u16::MAX);
     app.help_scroll = app.help_scroll.min(app.help_max_scroll);
     frame.render_widget(
         Paragraph::new(lines)
@@ -6782,7 +6790,7 @@ mod tests {
                 .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>();
             assert!(rendered.contains("j/k"));
-            assert!(rendered.contains("0"));
+            assert!(rendered.contains('0'));
             app.handle_key(InputKey::Char('g'));
             assert_eq!(app.help_scroll, 0);
             app.handle_key(InputKey::Down);
