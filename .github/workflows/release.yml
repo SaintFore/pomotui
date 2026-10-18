@@ -1,6 +1,12 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -11,6 +17,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -25,9 +32,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Install repository Rust toolchain and target
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
       - name: Build
         run: cargo build --release --workspace --target ${{ matrix.target }}
       - name: Package
@@ -56,6 +66,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           files: |
             pomotui-*.tar.gz
