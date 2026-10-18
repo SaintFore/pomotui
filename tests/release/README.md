@@ -424,3 +424,33 @@ move tags, reset user data, or invent a repair version. The publication journal
 and existing remote outputs remain available for investigation. GitHub's
 concurrency queue can replace an older pending job; its original accepted run ID
 is the recovery selector, independent of whichever job runs next.
+
+### Optional macOS release downloads
+
+`release.py publish-macos --candidate DIR --acceptance DIR/acceptance.json
+--checks DIR/checks.json --publication REQUIRED_JOURNAL --macos BUILD_DIR --output JOURNAL` reconciles one
+source-bound macOS build against an **existing**, discoverable, byte-verified
+Linux release. `BUILD_DIR/build.json` records the selected source commit, Darwin
+target and SHA-256 of the archive and portable basename checksum file. Only
+`aarch64-apple-darwin` and `x86_64-apple-darwin` are accepted. This command checks
+the original candidate's required gates and source-bound required-publication
+journal (Linux discoverable only after initial credential preflight), immutable tag, release notes and Linux
+assets before uploading; it never creates a tag or release. Existing matching
+assets are reused; conflicting bytes pause without replacement. Transient remote
+errors retry a bounded number of times using the same retained files.
+
+Stable workflows retain both architecture builds for 90 days and independently
+attach successful archives/checksums. Optional publication can continue after AUR
+discovery fails if Linux GitHub delivery is already verified. Its job summaries
+and journals expose failures and support retrying the failed job. The required
+Linux PR report depends only on selection, gate and required publication, so it
+neither waits for macOS nor counts macOS results toward Linux completion.
+`macos_test.py` exercises the normal CLI against isolated HTTP targets; it does
+not claim a real macOS build or an end-to-end macOS upgrade guarantee.
+
+All three shared AUR publication jobs use `queue: max` with
+`cancel-in-progress: false`: up to 100 pending jobs wait instead of a later Git
+refresh replacing an approved stable publication. The shared group still allows
+only one active writer. GitHub orders waiting jobs by queue-entry time, not event
+dispatch time; a full queue cancels additional jobs and remains a visible failure.
+See [GitHub concurrency documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).

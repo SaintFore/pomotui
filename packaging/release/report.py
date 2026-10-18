@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import urllib.request
 
+from recovery import complete as channel_complete
+
 MARKER = '<!-- pomotui-linux-delivery -->'
 STAMP = r'<!-- pomotui-linux-delivery-state (.*?) -->'
 
@@ -32,7 +34,7 @@ def render(args):
     selection = load(args.selection)
     required = candidate.get('required_channels', ['github-linux','aur-stable','aur-git']) if args.intent == 'stable' else ['aur-git']
     channels = journal.get('channels', {})
-    complete = bool(required) and all(channels.get(channel,{}).get('stage') in ('discoverable','superseded-discoverable') for channel in required)
+    complete = bool(required) and all(channel_complete(channels.get(channel,{}).get('stage')) for channel in required)
     # Never promote an incomplete/failed journal based on unrelated platform jobs.
     bound = bool(candidate) and journal.get('source_commit') == candidate.get('source_commit') and journal.get('version') == candidate.get('version') and journal.get('candidate_sha256') == hashlib.sha256((Path(args.candidate)/'candidate.json').read_bytes()).hexdigest()
     complete = complete and bound and journal.get('aggregate') == 'complete'

@@ -9,6 +9,14 @@ from pathlib import Path
 import time
 
 
+def complete(stage):
+    return stage in ('discoverable','superseded-discoverable')
+
+
+def remote_verified(stage):
+    return complete(stage) or stage in ('remote-verified','pending-indexing')
+
+
 class TransientError(OSError):
     """Retry the whole idempotent operation, rereading authoritative remotes."""
 

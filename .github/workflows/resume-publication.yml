@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 20
     concurrency:
       group: pomotui-aur-publication
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4

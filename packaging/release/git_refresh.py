@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from aur import AurChannel
-from recovery import Journal, locked
+from recovery import Journal, locked, remote_verified, complete
 
 RELEVANT = ('crates/', 'packaging/', 'assets/', 'completions/', 'scripts/', 'tests/release/')
 ROOT_FILES = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs'}
@@ -49,9 +49,9 @@ def publish(args):
                 discovery_delay=args.discovery_delay,observer=journal.event,
                 provenance_api_url=args.provenance_api_url,source_repository=args.source_repository)
             previous=journal.value['channels'].get('aur-git',{}).get('stage')
-            result=client.verify() if previous in ('remote-verified','pending-indexing','discoverable','superseded-discoverable') else client.publish()
+            result=client.verify() if remote_verified(previous) else client.publish()
             journal.event(result)
-            journal.value['aggregate']='complete' if result['stage'] in ('discoverable','superseded-discoverable') else 'pending-indexing'
+            journal.value['aggregate']='complete' if complete(result['stage']) else 'pending-indexing'
             journal.save()
             if journal.value['aggregate']!='complete':
                 raise ValueError('AUR remote verified; pending indexing, resume same candidate without another push')

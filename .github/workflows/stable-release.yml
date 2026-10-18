@@ -63,6 +63,7 @@ jobs:
       pull-requests: read
     concurrency:
       group: pomotui-aur-publication
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -141,6 +142,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           ARCHIVE: ${{ matrix.archive }}
+          SOURCE: ${{ needs.select.outputs.source }}
         run: |
           toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
           rustup toolchain install "$toolchain" --profile minimal
@@ -150,7 +152,17 @@ jobs:
           bins="pomotui pomotui-tui pomotui-service"
           if test -f pomotui-tray; then bins="$bins pomotui-tray"; fi
           tar czf "$RUNNER_TEMP/$ARCHIVE.tar.gz" $bins
-          shasum -a 256 "$RUNNER_TEMP/$ARCHIVE.tar.gz" > "$RUNNER_TEMP/$ARCHIVE.sha256"
+          cd "$RUNNER_TEMP"
+          shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.sha256"
+          python3 - "$ARCHIVE" "$TARGET" <<'PYTHON'
+          import hashlib,json,os,sys
+          from pathlib import Path
+          stem,target=sys.argv[1:]
+          names=[stem+'.tar.gz',stem+'.sha256']
+          receipt={'source_commit':os.environ['SOURCE'],'target':target,
+              'artifacts':{name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names}}
+          Path('build.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          PYTHON
       - uses: actions/upload-artifact@v4
         with:
           retention-days: 90
@@ -158,12 +170,70 @@ jobs:
           path: |
             ${{ runner.temp }}/${{ matrix.archive }}.tar.gz
             ${{ runner.temp }}/${{ matrix.archive }}.sha256
+            ${{ runner.temp }}/build.json
       - name: Report independent platform result
         if: always()
         run: echo 'macOS build result is independent of the required Linux publication gate.' >> "$GITHUB_STEP_SUMMARY"
 
-  report:
+  publish-macos:
     needs: [select, gate, publish, macos]
+    # AUR may still be pending after Linux delivery. The CLI verifies Linux's
+    # existing public bytes; optional jobs never create a release or tag.
+    if: always() && needs.gate.result == 'success' && needs.select.outputs.intent == 'stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        archive: [pomotui-macos-aarch64, pomotui-macos-x86_64]
+    concurrency:
+      group: pomotui-optional-${{ needs.select.outputs.source }}-${{ matrix.archive }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.select.outputs.source }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.gate.outputs.artifact }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.archive }}-${{ needs.select.outputs.source }}
+          path: ${{ runner.temp }}/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: stable-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication
+      - name: Reconcile successful optional assets against the verified Linux release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 packaging/release/release.py publish-macos
+          --candidate "$RUNNER_TEMP/candidate"
+          --acceptance "$RUNNER_TEMP/candidate/acceptance.json"
+          --checks "$RUNNER_TEMP/candidate/checks.json"
+          --publication "$RUNNER_TEMP/publication/stable-publication.json"
+          --macos "$RUNNER_TEMP/macos" --output "$RUNNER_TEMP/macos-publication.json"
+      - name: Report independent delivery result
+        if: always()
+        run: |
+          echo 'Optional macOS delivery; required Linux completion does not wait for or depend on this job. Retry this job to reconcile the same retained bytes.' >> "$GITHUB_STEP_SUMMARY"
+          if test -s "$RUNNER_TEMP/macos-publication.json"; then cat "$RUNNER_TEMP/macos-publication.json" >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 90
+          name: ${{ matrix.archive }}-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-publication.json
+          if-no-files-found: warn
+
+  report:
+    needs: [select, gate, publish]
     if: always() && (needs.select.outputs.intent == 'stable' || needs.select.result == 'failure')
     runs-on: ubuntu-24.04
     permissions:
