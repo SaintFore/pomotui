@@ -1,8 +1,6 @@
 name: Nonpublishing complete Linux delivery proof
 on:
   workflow_dispatch:
-  push:
-    branches: [implement/spec19-ticket28]
 permissions:
   contents: read
   actions: read

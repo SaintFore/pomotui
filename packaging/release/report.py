@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render delivery evidence and update a single release-PR status comment."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,10 +9,17 @@ import re
 import urllib.request
 
 MARKER = '<!-- pomotui-linux-delivery -->'
+STAMP = r'<!-- pomotui-linux-delivery-state (.*?) -->'
 
 
 def load(path):
-    return json.loads(Path(path).read_text()) if path and Path(path).is_file() else {}
+    if not path or not Path(path).is_file(): return {}
+    try:
+        value = json.loads(Path(path).read_text())
+        if not isinstance(value,dict): raise ValueError('expected a JSON object')
+        return value
+    except (OSError,ValueError) as error:
+        return {'_load_error':'Cannot read retained evidence '+str(path)+': '+str(error)}
 
 
 def cell(value):
@@ -26,10 +34,14 @@ def render(args):
     channels = journal.get('channels', {})
     complete = bool(required) and all(channels.get(channel,{}).get('stage') in ('discoverable','superseded-discoverable') for channel in required)
     # Never promote an incomplete/failed journal based on unrelated platform jobs.
-    complete = complete and journal.get('aggregate') == 'complete'
+    bound = bool(candidate) and journal.get('source_commit') == candidate.get('source_commit') and journal.get('version') == candidate.get('version') and journal.get('candidate_sha256') == hashlib.sha256((Path(args.candidate)/'candidate.json').read_bytes()).hexdigest()
+    complete = complete and bound and journal.get('aggregate') == 'complete'
     state = 'complete' if complete else journal.get('aggregate','blocked-before-publication')
     if state == 'complete': state = 'incomplete-evidence' if not complete else state
-    lines = [MARKER, '## Linux delivery', '', f'Delivery: **{state}**', '',
+    run_match = re.search(r'/runs/(\d+)',args.run_url)
+    report_run = int(run_match.group(1)) if run_match else 0
+    stamp = {'report_run':report_run,'attempt':int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),'publication_run':int(args.original_run or report_run),'source_commit':candidate.get('source_commit',selection.get('source_commit',args.source)),'version':candidate.get('version',selection.get('version'))}
+    lines = [MARKER, '<!-- pomotui-linux-delivery-state '+json.dumps(stamp,sort_keys=True)+' -->', '## Linux delivery', '', f'Delivery: **{state}**', '',
              f"Recorded source: `{candidate.get('source_commit',selection.get('source_commit',args.source or 'not selected'))}`", 
              f"Stable version: `{candidate.get('version',selection.get('version','not selected'))}`", '',
              '| Required channel | Stage | Verification / diagnosis |', '| --- | --- | --- |']
@@ -42,10 +54,13 @@ def render(args):
             details.append('Verified current descendant '+result['actual_source_commit']+' / '+result.get('actual_version','')+'; original recorded source remains above')
         lines.append('| '+cell(channel)+' | '+cell(result.get('stage','not reached'))+' | '+cell('; '.join(str(x) for x in details if x))+' |')
     lines += ['', 'Candidate SHA-256: `'+str(journal.get('candidate_sha256','not available'))+'`']
+    if journal and not bound: lines += ['', '**Diagnosis:** Retained journal does not identify this candidate; restore the original matching candidate and journal before claiming delivery.']
     if journal.get('diagnosis'): lines += ['', '**Diagnosis:** '+cell(journal['diagnosis'])]
+    jobs = load(args.jobs)
     if args.jobs:
-        jobs = load(args.jobs)
-        lines += ['', 'Workflow stages: '+', '.join(name+'='+value.get('result','unknown') for name,value in jobs.items())+'.']
+        lines += ['', 'Workflow stages: '+', '.join(name+'='+value.get('result','unknown') for name,value in jobs.items() if isinstance(value,dict))+'.']
+    for evidence in [candidate,journal,selection,jobs]:
+        if evidence.get('_load_error'): lines += ['', '**Diagnosis:** '+cell(evidence['_load_error'])]
     if not journal:
         lines += ['', 'Publication was not reached. Inspect the failed selection, source-check, build, acceptance, restore or credential step in the linked run; no completion is inferred.']
     lines += ['', 'macOS results are independent and never satisfy a required Linux channel.', '',
@@ -71,6 +86,14 @@ def update_comment(repository, number, body, api_url):
         comments = request(f'/repos/{repository}/issues/{number}/comments?per_page=100&page={page}')
         for comment in comments:
             if comment.get('user',{}).get('type') == 'Bot' and MARKER in comment.get('body',''):
+                previous = re.search(STAMP,comment.get('body',''))
+                incoming = re.search(STAMP,body)
+                if previous and incoming:
+                    old,new = json.loads(previous.group(1)),json.loads(incoming.group(1))
+                    if (int(old.get('report_run',0)),int(old.get('attempt',0))) > (int(new.get('report_run',0)),int(new.get('attempt',0))):
+                        return
+                    if old.get('publication_run') == new.get('publication_run') and old.get('source_commit') and new.get('source_commit') and (old['source_commit'] != new['source_commit'] or (old.get('version') and new.get('version') and old['version'] != new['version'])):
+                        raise ValueError('same-publication PR report identity conflicts; preserve previous report and inspect original selection')
                 request(f'/repos/{repository}/issues/comments/{comment["id"]}', 'PATCH', {'body':body})
                 return
         if len(comments)<100: break
