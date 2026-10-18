@@ -85,7 +85,11 @@ impl TaskTitle {
         Self::validate(normalized)
     }
 
-    fn restore(title: String) -> Result<Self, TaskError> {
+    /// Validates a stored title snapshot without normalizing its original text.
+    ///
+    /// # Errors
+    /// Returns an error when the snapshot violates title safety or size limits.
+    pub fn restore(title: String) -> Result<Self, TaskError> {
         Self::validate(title)
     }
 
