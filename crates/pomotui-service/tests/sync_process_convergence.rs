@@ -302,6 +302,11 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     let mut first = TimerService::start(root.join("first"), 4);
     let mut second = TimerService::start(root.join("second"), 7);
 
+    first.request(Command::RewardCreate {
+        name: "Tea break".into(),
+        threshold: 1,
+        budget: Some(12),
+    });
     let first_task = create_task(&first, "Written on first");
     stopped_review(&first, first_task, "first reflection");
     let first_link = first.data(Command::ActionChainCurrent)["links"][0]["id"]
@@ -311,11 +316,6 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         id: first_link,
         reflection: Some("edited on first".into()),
         chain_entry_title: Some("First entry".into()),
-    });
-    first.request(Command::RewardCreate {
-        name: "Tea break".into(),
-        threshold: 1,
-        budget: Some(12),
     });
     let unlock = first.data(Command::Rewards)["unlocks"][0]["id"]
         .as_u64()

@@ -64,6 +64,25 @@ fn released_databases_migrate_export_once_and_restore_independently() {
         .expect("create sync document");
 
         let mut migrated = Service::open(&database).expect("open released database");
+        let Response::Snapshot { snapshot } = migrated.handle(request(None, Command::Status))
+        else {
+            panic!("migrated status");
+        };
+        let cancelled = snapshot
+            .current_chain_rewards
+            .iter()
+            .find(|reward| reward.name == "Released deleted reward")
+            .expect("deleted reward history");
+        assert_eq!(cancelled.state, "unavailable");
+        assert!(matches!(
+            migrated.handle(request(
+                Some("cancelled-claim"),
+                Command::RewardClaim {
+                    unlock_id: cancelled.id,
+                }
+            )),
+            Response::Error { .. }
+        ));
         assert_eq!(backups(&root, "schema-migration").len(), 1);
         let schema_backup = backups(&root, "schema-migration").remove(0);
         let restore_root = root.join("isolated-restore");
@@ -192,7 +211,7 @@ fn released_databases_migrate_export_once_and_restore_independently() {
             reward.name == "Released available reward" && reward.state == "unlocked"
         }));
         assert!(snapshot.current_chain_rewards.iter().any(|reward| {
-            reward.name == "Released deleted reward" && reward.state == "unlocked"
+            reward.name == "Released deleted reward" && reward.state == "unavailable"
         }));
         assert!(
             snapshot

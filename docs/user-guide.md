@@ -118,7 +118,11 @@ Dashboard, press `Enter` to bind the selected Task to the Current Session and
 `Space` to start/pause/resume; `X` stops and `K` skips.
 
 Create or update a Reward Milestone using `10 | USDT | 100`: a positive integer
-threshold, a reward name, and an optional non-negative integer budget. Omit
+threshold, a reward name, and an optional non-negative integer budget. When creating
+a milestone or changing its threshold, the threshold must be strictly greater
+than the current Action Chain length. Name and budget edits remain allowed after
+a reward unlocks and do not change its saved snapshot. Deleting a milestone
+cancels its unclaimed rewards and preserves claimed history. Omit
 currency suffixes such as `CNY` from the budget. Invalid input shows a message
 inside the editor; correct the input and press `Enter` again to save.
 

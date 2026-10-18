@@ -1157,6 +1157,9 @@ impl App {
                     );
                     return None;
                 };
+                if !self.validate_reward_threshold(threshold) {
+                    return None;
+                }
                 if self.overlay == Overlay::UpdateReward {
                     pomotui_protocol::Command::RewardUpdate {
                         id: self.edit_reward_id.take()?,
@@ -1178,6 +1181,31 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         Some(self.emit(command))
+    }
+
+    fn validate_reward_threshold(&mut self, threshold: u64) -> bool {
+        if let Some(snapshot) = &self.snapshot {
+            let unchanged_threshold = self.overlay == Overlay::UpdateReward
+                && snapshot.reward_milestones.iter().any(|reward| {
+                    Some(reward.id) == self.edit_reward_id && reward.threshold == threshold
+                });
+            if !unchanged_threshold && threshold <= snapshot.action_chain.length {
+                self.message = Some(match self.language {
+                    Language::English => format!(
+                        "Threshold must exceed current chain length {} (minimum {})",
+                        snapshot.action_chain.length,
+                        snapshot.action_chain.length.saturating_add(1)
+                    ),
+                    Language::SimplifiedChinese => format!(
+                        "阈值必须大于当前链长 {}（最小可填 {}）",
+                        snapshot.action_chain.length,
+                        snapshot.action_chain.length.saturating_add(1)
+                    ),
+                });
+                return false;
+            }
+        }
+        true
     }
 
     fn emit(&mut self, command: pomotui_protocol::Command) -> Action {
@@ -2116,7 +2144,7 @@ fn rewards_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            text(language, "EARNED REWARDS", "已获得奖励"),
+            text(language, "REWARD STATUS", "奖励状态"),
             Style::default()
                 .fg(colors.gold)
                 .add_modifier(Modifier::BOLD),
@@ -2154,7 +2182,12 @@ fn append_earned_rewards(lines: &mut Vec<Line<'_>>, snapshot: &Snapshot, languag
             reward.name,
             text(language, "Length", "长度"),
             reward.threshold,
-            reward.state,
+            match reward.state.as_str() {
+                "unlocked" => text(language, "unlocked", "待领取"),
+                "claimed" => text(language, "claimed", "已领取"),
+                "unavailable" => text(language, "unavailable", "不可领取"),
+                state => state,
+            },
         )));
     }
 }
@@ -3736,6 +3769,11 @@ fn confirm_reward_delete_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, c
                 "{} “{reward}”?",
                 text(app.language, "Delete Reward Milestone", "删除奖励里程碑")
             )),
+            Line::from(text(
+                app.language,
+                "Unclaimed rewards will be cancelled; claimed history stays.",
+                "未领取的奖励将取消；已领取记录保留。",
+            )),
             Line::from(""),
             Line::from(text(
                 app.language,
@@ -3821,13 +3859,13 @@ fn text_entry_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
             Style::default().fg(colors.muted),
         )),
     ];
-    if matches!(app.overlay, Overlay::CreateReward | Overlay::UpdateReward) {
-        if let Some(message) = app.message.as_deref() {
-            lines.push(Line::from(Span::styled(
-                message,
-                Style::default().fg(colors.accent),
-            )));
-        }
+    if matches!(app.overlay, Overlay::CreateReward | Overlay::UpdateReward)
+        && let Some(message) = app.message.as_deref()
+    {
+        lines.push(Line::from(Span::styled(
+            message,
+            Style::default().fg(colors.accent),
+        )));
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -4646,6 +4684,50 @@ mod tests {
     }
 
     #[test]
+    fn reward_threshold_validation_preserves_input_and_allows_correction() {
+        let mut state = snapshot("idle", SessionKind::Focus);
+        state.action_chain.length = 40;
+        state.reward_milestones = vec![pomotui_protocol::RewardMilestoneSummary {
+            id: 1,
+            name: "Coffee".into(),
+            threshold: 20,
+            budget: None,
+        }];
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.language = Language::SimplifiedChinese;
+        app.overlay = Overlay::CreateReward;
+        for threshold in [20, 40] {
+            app.input = format!("{threshold} | Coffee");
+            assert_eq!(app.handle_key(InputKey::Enter), None);
+            assert_eq!(app.overlay, Overlay::CreateReward);
+            assert!(app.message.as_deref().unwrap().contains("最小可填 41"));
+            assert_eq!(app.input, format!("{threshold} | Coffee"));
+        }
+        app.overlay = Overlay::UpdateReward;
+        app.edit_reward_id = Some(1);
+        app.input = "40 | Coffee".into();
+        assert_eq!(app.handle_key(InputKey::Enter), None);
+        assert_eq!(app.edit_reward_id, Some(1));
+        app.input = "20 | Better coffee".into();
+        assert!(matches!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::RewardUpdate {
+                threshold: 20,
+                ..
+            }))
+        ));
+        app.overlay = Overlay::CreateReward;
+        app.input = "41 | Coffee".into();
+        assert!(matches!(
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::RewardCreate {
+                threshold: 41,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn reward_creation_shows_invalid_budget_and_allows_correction() {
         let mut app = App::new(
             Some(snapshot("pending", SessionKind::Focus)),
@@ -5321,7 +5403,11 @@ mod tests {
             assert!(rendered.contains("25"));
             assert!(rendered.contains("700"));
             assert!(rendered.contains("Fancy coffee"));
-            assert!(rendered.contains("claimed"));
+            assert!(
+                rendered
+                    .replace(' ', "")
+                    .contains(text(language, "claimed", "已领取"))
+            );
             assert!(!rendered.contains("#42"));
             assert!(!rendered.contains("#88"));
         }

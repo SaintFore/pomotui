@@ -374,12 +374,24 @@ impl Service {
             Self::new()
         };
         let created_void = service.ensure_void_task()?;
+        let mut cancelled_reward = false;
+        for unlock in &mut service.reward_unlocks {
+            if unlock.state == "unlocked"
+                && !service
+                    .reward_milestones
+                    .iter()
+                    .any(|milestone| milestone.id == unlock.milestone_id)
+            {
+                unlock.state = "unavailable".into();
+                cancelled_reward = true;
+            }
+        }
         service.applied_keys = keys;
         service.repository = Some(Box::new(repository));
         if let Some(backup) = schema_backup {
             service.sync.migration_backups.push(backup);
         }
-        if !had_payload || created_void || legacy {
+        if !had_payload || created_void || legacy || cancelled_reward {
             service.persist(None)?;
         }
         service.observe_time();
@@ -1335,7 +1347,11 @@ impl Service {
                     );
                 let state = if projected.claimed_at.is_some() {
                     "claimed"
-                } else if chain_id == self.current_chain_id
+                } else if self
+                    .reward_milestones
+                    .iter()
+                    .any(|milestone| milestone.id == milestone_id)
+                    && chain_id == self.current_chain_id
                     && self.reward_progress(milestone_id, Some(chain_id)) >= projected.threshold
                 {
                     "unlocked"
@@ -3115,6 +3131,11 @@ impl Handler for Service {
                 let name = name.trim();
                 if name.is_empty() || threshold == 0 {
                     Err("Reward Milestone requires a name and positive threshold".into())
+                } else if threshold <= self.current_chain_length {
+                    Err(format!(
+                        "Reward threshold must be greater than current Action Chain length {}",
+                        self.current_chain_length
+                    ))
                 } else {
                     (|| -> Result<(), String> {
                         self.reward_milestones.push(RewardMilestoneState {
@@ -3146,6 +3167,14 @@ impl Handler for Service {
                     .iter()
                     .position(|milestone| milestone.id == id)
                 {
+                    if threshold != self.reward_milestones[index].threshold
+                        && threshold <= self.current_chain_length
+                    {
+                        return Self::rejected(format!(
+                            "Reward threshold must be greater than current Action Chain length {}",
+                            self.current_chain_length
+                        ));
+                    }
                     let milestone = &mut self.reward_milestones[index];
                     name.clone_into(&mut milestone.name);
                     milestone.threshold = threshold;
@@ -3169,6 +3198,11 @@ impl Handler for Service {
                 if before == self.reward_milestones.len() {
                     Err(format!("Reward Milestone {id} does not exist"))
                 } else {
+                    for unlock in &mut self.reward_unlocks {
+                        if unlock.milestone_id == id && unlock.state != "claimed" {
+                            unlock.state = "unavailable".into();
+                        }
+                    }
                     if let Some(entity_id) = entity_id {
                         self.sync.records.push(SyncRecord::in_beginning(
                             self.sync.beginning.clone(),
@@ -5385,8 +5419,24 @@ mod tests {
     }
 
     #[test]
-    fn rewards_unlock_retroactively_and_settle_when_chain_fails() {
+    fn earned_rewards_settle_when_chain_fails() {
         let mut service = Service::new();
+        service.handle(request(
+            Some("claimed-rule"),
+            Command::RewardCreate {
+                name: "Claimed reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
+        service.handle(request(
+            Some("unclaimed-rule"),
+            Command::RewardCreate {
+                name: "At-risk reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
         service.handle(request(
             Some("task"),
             Command::TaskCreate {
@@ -5406,27 +5456,11 @@ mod tests {
             Command::ReviewSuccess { reflection: None },
         ));
 
-        service.handle(request(
-            Some("claimed-rule"),
-            Command::RewardCreate {
-                name: "Claimed reward".into(),
-                threshold: 1,
-                budget: None,
-            },
-        ));
         let claimed_id = service.snapshot().current_chain_rewards[0].id;
         service.handle(request(
             Some("claim"),
             Command::RewardClaim {
                 unlock_id: claimed_id,
-            },
-        ));
-        service.handle(request(
-            Some("unclaimed-rule"),
-            Command::RewardCreate {
-                name: "At-risk reward".into(),
-                threshold: 1,
-                budget: None,
             },
         ));
         assert_eq!(service.snapshot().current_chain_rewards.len(), 2);
@@ -5462,6 +5496,14 @@ mod tests {
     fn snapshot_exposes_complete_recent_ended_chain_details_for_frontends() {
         let mut service = Service::new();
         service.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Fancy coffee".into(),
+                threshold: 1,
+                budget: Some(35),
+            },
+        ));
+        service.handle(request(
             Some("task"),
             Command::TaskCreate {
                 title: "Build archive details".into(),
@@ -5479,14 +5521,6 @@ mod tests {
             Some("success"),
             Command::ReviewSuccess {
                 reflection: Some("Completed the data projection".into()),
-            },
-        ));
-        service.handle(request(
-            Some("reward"),
-            Command::RewardCreate {
-                name: "Fancy coffee".into(),
-                threshold: 1,
-                budget: Some(35),
             },
         ));
         service.handle(request(
@@ -5526,6 +5560,14 @@ mod tests {
     fn deleting_an_ended_chain_removes_its_reward_history_but_preserves_session_history() {
         let mut service = Service::new();
         service.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Coffee".into(),
+                threshold: 1,
+                budget: Some(35),
+            },
+        ));
+        service.handle(request(
             Some("task"),
             Command::TaskCreate {
                 title: "Retained work".into(),
@@ -5542,14 +5584,6 @@ mod tests {
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess { reflection: None },
-        ));
-        service.handle(request(
-            Some("reward"),
-            Command::RewardCreate {
-                name: "Coffee".into(),
-                threshold: 1,
-                budget: Some(35),
-            },
         ));
         service.handle(request(
             Some("start-failure"),
@@ -5984,6 +6018,14 @@ mod tests {
         }
 
         first.handle(request(
+            Some("reward"),
+            Command::RewardCreate {
+                name: "Chain reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
+        first.handle(request(
             Some("task"),
             Command::TaskCreate {
                 title: "Shared chain".into(),
@@ -6069,15 +6111,6 @@ mod tests {
             assert_eq!(entry.reflection.as_deref(), Some("corrected wording"));
             assert_eq!(entry.chain_entry_title.as_deref(), Some("corrected title"));
         }
-
-        first.handle(request(
-            Some("reward"),
-            Command::RewardCreate {
-                name: "Chain reward".into(),
-                threshold: 1,
-                budget: None,
-            },
-        ));
 
         first.handle(request(
             Some("start-failure"),
@@ -6272,6 +6305,14 @@ mod tests {
         let reward_name = first.reward_milestones[0].name.clone();
         let reward_budget = first.reward_milestones[0].budget;
 
+        first.handle(request(
+            Some("at-risk-reward"),
+            Command::RewardCreate {
+                name: "At-risk reward".into(),
+                threshold: 1,
+                budget: None,
+            },
+        ));
         for (service, prefix) in [(&mut first, "first"), (&mut second, "second")] {
             service.handle(request(
                 Some(prefix),
@@ -6283,7 +6324,13 @@ mod tests {
             service.handle(request(None, Command::StopReview));
             service.handle(request(None, Command::ReviewSuccess { reflection: None }));
         }
-        let unlock_id = first.snapshot().current_chain_rewards[0].id;
+        let unlock_id = first
+            .snapshot()
+            .current_chain_rewards
+            .iter()
+            .find(|reward| reward.name == reward_name)
+            .unwrap()
+            .id;
         first.handle(request(Some("claim"), Command::RewardClaim { unlock_id }));
         let union = plan_sync(&first.sync.records, &second.sync.records).expect("reward union");
         first
@@ -6295,25 +6342,16 @@ mod tests {
             .apply_sync_plan(&sync_path, &union, union.retained_records().len())
             .expect("second converges");
         for service in [&first, &second] {
-            assert_eq!(service.snapshot().current_chain_rewards.len(), 1);
-            assert_eq!(service.snapshot().current_chain_rewards[0].state, "claimed");
-            assert_eq!(
-                service.snapshot().current_chain_rewards[0].name,
-                reward_name
-            );
-            assert_eq!(
-                service.snapshot().current_chain_rewards[0].budget,
-                reward_budget
-            );
+            assert_eq!(service.snapshot().current_chain_rewards.len(), 2);
+            let snapshot = service.snapshot();
+            let claimed = snapshot
+                .current_chain_rewards
+                .iter()
+                .find(|reward| reward.name == reward_name)
+                .expect("claimed reward");
+            assert_eq!(claimed.state, "claimed");
+            assert_eq!(claimed.budget, reward_budget);
         }
-        first.handle(request(
-            Some("at-risk-reward"),
-            Command::RewardCreate {
-                name: "At-risk reward".into(),
-                threshold: 1,
-                budget: None,
-            },
-        ));
         let union = plan_sync(&second.sync.records, &first.sync.records).expect("at-risk union");
         second
             .apply_sync_plan(&sync_path, &union, union.retained_records().len())
