@@ -50,7 +50,7 @@ mod tray {
 
                 let running = snapshot.state == "running";
                 let paused = snapshot.state == "paused";
-                start_item.set_enabled(!running);
+                start_item.set_enabled(pomotui_tray::can_start_focus(&snapshot));
                 pause_item.set_enabled(running || paused);
                 stop_item.set_enabled(running || paused);
             }
