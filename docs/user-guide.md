@@ -66,6 +66,32 @@ Waybar custom-module example:
 }
 ```
 
+### Reservation status in Waybar and the tray
+
+`pomotui waybar` reads the Timer Service even when the TUI is closed. A Focus
+Reservation takes display priority: `reservation MM:SS` uses CSS classes
+`reservation` and `countdown`; `reservation awaiting review` uses `reservation`
+and `awaiting_review`. The percentage follows the reservation window. The tooltip
+shows its target Task (`No task` when unattributed), plus the underlying Session's
+kind, state, remaining time, and round, including a Break Session that is still
+running. Task markup is escaped for Waybar tooltips.
+
+```css
+#custom-pomotui.reservation.countdown { color: #c7a66a; }
+#custom-pomotui.reservation.awaiting_review { color: #e07868; }
+```
+
+Early Focus start restores the ordinary Session display. Expiry waits for your
+judgment; use the TUI or CLI to resolve it. A Waybar click cannot bypass that
+judgment. Restarting the Timer Service restores the same reservation state.
+Without a reservation, the existing Session text, classes, and percentage remain
+unchanged.
+
+The macOS tray shows `◷ MM:SS` or `◷ Review`; its status menu shows the reservation
+target alongside the underlying Session. Start Focus is disabled while judgment
+is pending; use the TUI or CLI to judge success or failure. Service-side checks
+remain authoritative if a menu action races with expiry.
+
 ## TUI
 
 Press `g` in Settings to switch between English and Simplified Chinese and save

@@ -34,8 +34,10 @@ start_service
 target/debug/pomotui reservation minutes 7 --json > "$reservation_root/configured.json"
 target/debug/pomotui task create "Reservation task" --json > "$reservation_root/task.json"
 target/debug/pomotui reserve --task 1 --json > "$reservation_root/reserved.json"
+target/debug/pomotui waybar > "$reservation_root/waybar-before.json"
 stop_service
 start_service
+target/debug/pomotui waybar > "$reservation_root/waybar-recovered.json"
 python3 - "$reservation_root" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -46,6 +48,11 @@ assert b['reservation_minutes'] == 7
 assert b['reservation']['duration_seconds'] == 420
 assert b['reservation']['task_title'] == 'Reservation task'
 assert b['reservation']['remaining_seconds'] <= a['reservation']['remaining_seconds']
+for filename in ['waybar-before.json', 'waybar-recovered.json']:
+    waybar = json.loads((root/filename).read_text())
+    assert waybar['class'] == ['reservation', 'countdown']
+    assert waybar['text'].startswith('reservation ')
+    assert 'Reservation task' in waybar['tooltip']
 source = (root/'config/pomotui/config.toml').read_text()
 assert source.startswith('reservation_minutes = 7\n')
 assert '# preserved settings' in source and '[keybindings]' in source
@@ -61,5 +68,12 @@ assert s['planned_seconds'] == 3000
 assert s['action_chain']['length'] == 0
 assert not s['recent_history']
 PY
+target/debug/pomotui waybar > "$reservation_root/waybar-started.json"
+python3 - "$reservation_root/waybar-started.json" <<'PYBAR'
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s['class'] == ['running', 'focus']
+assert s['text'].startswith('running ')
+PYBAR
 target/debug/pomotui stop --no-review --json > "$reservation_root/stopped.json"
-printf '%s\n' 'Reservation CLI / restart acceptance passed'
+printf '%s\n' 'Reservation CLI / Waybar / restart acceptance passed'
