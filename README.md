@@ -228,6 +228,20 @@ When a reviewed Session has no Task, assign one with `--task ID`, or use
 `--void "Chain Entry Title"`. Run a command with `--json` to obtain stable
 internal identities for editing entries or claiming rewards.
 
+## Set a Daily Chain Goal
+
+In the TUI, press `s` then `d`. Enter the number of successfully reviewed
+Completed Rounds you want to finish each day. Use `Tab` to move between
+fields, the arrow keys to move through the calendar, and `[` or `]` to
+change months. The start defaults to tomorrow in the selected time zone.
+The end date is inclusive. Leave it blank to keep the goal enabled.
+
+The goal is off by default. While it is active, the chain and Today views
+show daily progress. A missed day ends the Action Chain at midnight in the
+selected time zone. The archive shows the date, completed count, and target.
+Changes to an active quota and disabling take effect the next day. A
+successful Session Review counts on the date the Focus Session finished.
+
 ## Add Pomotui to Waybar
 
 Add `"custom/pomotui"` to one of Waybar's `modules-left`, `modules-center`, or

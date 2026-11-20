@@ -9,11 +9,11 @@ use pomotui_platform::{
     elapsed_during_recovery, read_sync_file, replace_sync_file,
 };
 use pomotui_protocol::{
-    ActionChainSummary, ChainBreakSource, ChainLinkSummary, Command, DurableHealth,
-    DurableHealthState, EndedChainSummary, Handler, PendingReviewSummary, ProtocolError,
-    RecentSessionSummary, ReminderDelivery, Request, Response, RewardMilestoneSummary,
-    RewardUnlockSummary, SessionKind, Snapshot, SyncStatus, TaskFocusSummary, TaskSummary,
-    TodaySummary,
+    ActionChainSummary, ChainBreakSource, ChainLinkSummary, Command, DailyChainGoalMiss,
+    DurableHealth, DurableHealthState, EndedChainSummary, Handler, PendingReviewSummary,
+    ProtocolError, RecentSessionSummary, ReminderDelivery, Request, Response,
+    RewardMilestoneSummary, RewardUnlockSummary, SessionKind, Snapshot, SyncStatus,
+    TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use pomotui_sync::{
     ActivityProjection, ClaimEvidence, Document as SyncDocument, EntityId,
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::path::Path;
 
+mod daily_chain_goal;
 mod sync_worker;
 pub use sync_worker::{SyncFileAdapter, SyncServiceHandler, SyncWorker, SyncWorkerTrigger};
 
@@ -169,6 +170,7 @@ type ServiceClock = std::sync::Arc<dyn Clock<Error = std::io::Error> + Send + Sy
 
 pub struct Service {
     clock: ServiceClock,
+    device_time_zone: pomotui_sync::Tz,
     timer: Timer,
     tasks: TaskStore,
     history: History,
@@ -357,11 +359,17 @@ struct SyncState {
     beginning: pomotui_sync::Beginning,
     path: Option<std::path::PathBuf>,
     records: Vec<SyncRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daily_goal_observed_through: Option<i64>,
+    #[serde(skip)]
+    daily_goal_next_cutoff: Option<i64>,
     task_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default)]
     session_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default, alias = "review_entries")]
     session_review_entries: std::collections::BTreeMap<EntityId, u64>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    archive_chain_ids: std::collections::BTreeMap<EntityId, u64>,
     #[serde(default)]
     reward_milestone_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default)]
@@ -421,6 +429,8 @@ struct ChainBreakState {
     id: u64,
     #[serde(default)]
     source: ChainBreakSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daily_chain_goal: Option<DailyChainGoalMiss>,
     #[serde(default)]
     reservation_entity_id: Option<EntityId>,
     session_id: Option<u64>,
@@ -495,6 +505,7 @@ impl Service {
 
     fn new_using_clock(clock: ServiceClock) -> Self {
         Self {
+            device_time_zone: daily_chain_goal::device_time_zone(),
             timer: Timer::new(
                 SessionDurations::new(25 * 60, 5 * 60, 15 * 60)
                     .expect("nonzero built-in durations"),
@@ -753,8 +764,7 @@ impl Service {
         replacement.apply_task_projections(plan.task_projections())?;
         replacement.apply_activity_projections(plan.activity_projections());
         replacement.ensure_void_task()?;
-        replacement.apply_session_review_projection(plan.session_review_projection())?;
-        replacement.apply_reward_projection(plan.reward_projection());
+        replacement.apply_chain_and_reward_projections(&plan)?;
         if let Some(key) = key {
             replacement.applied_keys.insert(key.into());
         }
@@ -851,6 +861,8 @@ impl Service {
         let old_ended_chains = self.ended_chains.clone();
         let old_reward_unlocks = self.reward_unlocks.clone();
         let old_reward_milestones = self.reward_milestones.clone();
+        let old_next_reward_milestone_id = self.next_reward_milestone_id;
+        let old_next_reward_unlock_id = self.next_reward_unlock_id;
         let old_current_chain_id = self.current_chain_id;
         let old_current_chain_length = self.current_chain_length;
         let old_next_chain_entry_id = self.next_chain_entry_id;
@@ -860,8 +872,7 @@ impl Service {
             .apply_task_projections(plan.task_projections())
             .and_then(|()| {
                 self.apply_activity_projections(plan.activity_projections());
-                self.apply_session_review_projection(plan.session_review_projection())?;
-                self.apply_reward_projection(plan.reward_projection());
+                self.apply_chain_and_reward_projections(plan)?;
                 self.set_clock_warning(plan.retained_records());
                 self.persist(None)
             })
@@ -874,6 +885,8 @@ impl Service {
             self.ended_chains = old_ended_chains;
             self.reward_unlocks = old_reward_unlocks;
             self.reward_milestones = old_reward_milestones;
+            self.next_reward_milestone_id = old_next_reward_milestone_id;
+            self.next_reward_unlock_id = old_next_reward_unlock_id;
             self.current_chain_id = old_current_chain_id;
             self.current_chain_length = old_current_chain_length;
             self.next_chain_entry_id = old_next_chain_entry_id;
@@ -1168,6 +1181,7 @@ impl Service {
         self.end_current_chain(ChainBreakState {
             id: entry_id,
             source: ChainBreakSource::ReservationReview,
+            daily_chain_goal: None,
             reservation_entity_id: Some(reservation_entity_id),
             session_id: None,
             task_id: reservation.task_id,
@@ -1291,6 +1305,7 @@ impl Service {
         let starts = local_day_boundaries(self.wall);
         let summary = self.history.summarize(starts);
         Snapshot {
+            daily_chain_goal: self.daily_chain_goal_snapshot(),
             reservation_minutes: self.reservation_minutes,
             reservation: self.reservation.as_ref().map(|reservation| {
                 pomotui_protocol::ReservationSummary {
@@ -1413,6 +1428,7 @@ impl Service {
                         .collect(),
                     break_id: chain.chain_break.id,
                     break_source: chain.chain_break.source,
+                    break_daily_chain_goal: chain.chain_break.daily_chain_goal.clone(),
                     break_task_title: chain.chain_break.task_title.clone(),
                     break_actual_seconds: chain.chain_break.actual_seconds,
                     break_reflection: chain.chain_break.reflection.clone(),
@@ -1520,6 +1536,9 @@ impl Service {
     fn apply_observation(&mut self, now: u64, wall: i64) {
         self.now = now;
         self.wall = wall;
+        if self.settle_daily_goal_if_due().is_err() {
+            return;
+        }
         if let Some(reservation) = &mut self.reservation
             && reservation.timing.advance(self.now)
         {
@@ -1542,6 +1561,20 @@ impl Service {
             }
         }
         let planned = self.timer.planned_seconds();
+        let completed_at = match self.timer.state().session {
+            SessionState::Running {
+                accumulated_seconds,
+                started_at,
+                ..
+            } => {
+                let overshoot = accumulated_seconds
+                    .saturating_add(self.now.saturating_sub(started_at))
+                    .saturating_sub(planned);
+                self.wall
+                    .saturating_sub(i64::try_from(overshoot).unwrap_or(i64::MAX))
+            }
+            _ => self.wall,
+        };
         if let Ok(transition) = self.timer.advance(self.now) {
             let changed = !transition.events().is_empty();
             let completed = transition.events().iter().any(|event| {
@@ -1554,7 +1587,7 @@ impl Service {
                 )
             });
             let reminder_key = format!("session-event-{}", self.next_event_id);
-            self.record(&transition, planned);
+            self.record_at(&transition, planned, completed_at);
             if completed {
                 let effects = self.enabled_reminder_effects();
                 if self
@@ -1575,11 +1608,15 @@ impl Service {
     }
 
     fn record(&mut self, transition: &Transition, planned_seconds: u64) {
+        self.record_at(transition, planned_seconds, self.wall);
+    }
+
+    fn record_at(&mut self, transition: &Transition, planned_seconds: u64, ended_at: i64) {
         for event in transition.events() {
             let record = SessionRecord::from_event(
                 *event,
                 self.next_event_id,
-                self.wall,
+                ended_at,
                 planned_seconds,
                 &self.tasks,
             );
@@ -1603,6 +1640,7 @@ impl Service {
             let chain_break = stopped_focus.then(|| ChainBreakState {
                 id: self.next_chain_entry_id,
                 source: ChainBreakSource::FocusStopped,
+                daily_chain_goal: None,
                 reservation_entity_id: None,
                 session_id: Some(record.id),
                 task_id: record.task_id.map(TaskId::get),
@@ -1781,7 +1819,9 @@ impl Service {
         })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.current_chain_length = self.current_chain_length.saturating_add(1);
-        self.unlock_eligible_rewards();
+        if !self.reconcile_daily_goal()? {
+            self.unlock_eligible_rewards();
+        }
         Ok(())
     }
 
@@ -1995,7 +2035,6 @@ impl Service {
             }
         }
         self.reward_milestones = milestones;
-        let previous_unlocks = self.reward_unlocks.clone();
         self.reward_unlocks = projection
             .unlocks
             .iter()
@@ -2027,19 +2066,19 @@ impl Service {
                         (global == &projected.milestone_entity_id).then_some(*local)
                     })
                     .unwrap_or(0);
-                let id = previous_unlocks
+                let id = self
+                    .sync
+                    .reward_unlock_entities
                     .iter()
-                    .find(|unlock| {
-                        unlock.milestone_id == milestone_id && unlock.chain_id == chain_id
-                    })
-                    .map_or_else(
-                        || {
-                            let id = self.next_reward_unlock_id;
-                            self.next_reward_unlock_id = id.saturating_add(1);
-                            id
-                        },
-                        |unlock| unlock.id,
-                    );
+                    .find_map(|(id, entity)| (entity == &projected.entity_id).then_some(*id))
+                    .unwrap_or_else(|| {
+                        let id = self.next_reward_unlock_id;
+                        self.next_reward_unlock_id = id.saturating_add(1);
+                        self.sync
+                            .reward_unlock_entities
+                            .insert(id, projected.entity_id.clone());
+                        id
+                    });
                 let state = if projected.claimed_at.is_some() {
                     "claimed"
                 } else if self
@@ -2130,6 +2169,7 @@ impl Service {
         let review_actual_seconds = review.actual_seconds;
         let chain_break = ChainBreakState {
             source: ChainBreakSource::SessionReview,
+            daily_chain_goal: None,
             reservation_entity_id: None,
             id: self.next_chain_entry_id,
             session_id: Some(review_session_id),
@@ -2151,10 +2191,21 @@ impl Service {
         })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.end_current_chain(chain_break);
+        self.reconcile_daily_goal()?;
         Ok(())
     }
 
     fn end_current_chain(&mut self, chain_break: ChainBreakState) {
+        if let Some((entity, _)) = self
+            .sync
+            .session_review_entries
+            .iter()
+            .find(|(_, entry)| **entry == chain_break.id)
+        {
+            self.sync
+                .archive_chain_ids
+                .insert(entity.clone(), self.current_chain_id);
+        }
         self.ended_chains.push(EndedChainState {
             id: self.current_chain_id,
             links: std::mem::take(&mut self.chain_links),
@@ -2835,8 +2886,7 @@ impl Service {
         self.sync.records = plan.retained_records().to_vec();
         self.apply_task_projections(plan.task_projections())?;
         self.apply_activity_projections(plan.activity_projections());
-        self.apply_session_review_projection(plan.session_review_projection())?;
-        self.apply_reward_projection(plan.reward_projection());
+        self.apply_chain_and_reward_projections(&plan)?;
         self.apply_deferred_task_deletions()?;
         self.set_clock_warning(plan.retained_records());
         self.sync.legacy_export_completed = true;
@@ -3013,6 +3063,14 @@ impl Service {
         self.history = History::restore(records);
     }
 
+    fn apply_chain_and_reward_projections(&mut self, plan: &SyncPlan) -> Result<(), String> {
+        if !self.reconcile_daily_goal()? {
+            self.apply_session_review_projection(plan.session_review_projection())?;
+            self.apply_reward_projection(plan.reward_projection());
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_session_review_projection(
         &mut self,
@@ -3083,18 +3141,19 @@ impl Service {
                 chain_entry_title: review.chain_entry_title.clone(),
             })
         }
-        let existing_chain_ids = self
-            .ended_chains
-            .iter()
-            .filter_map(|chain| {
+        for chain in &self.ended_chains {
+            if let Some((entity, _)) = self
+                .sync
+                .session_review_entries
+                .iter()
+                .find(|(_, entry)| **entry == chain.chain_break.id)
+            {
                 self.sync
-                    .session_review_entries
-                    .iter()
-                    .find_map(|(entity, local)| {
-                        (*local == chain.chain_break.id).then(|| (entity.clone(), chain.id))
-                    })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+                    .archive_chain_ids
+                    .entry(entity.clone())
+                    .or_insert(chain.id);
+            }
+        }
         let deleted_break_entries = self
             .sync
             .records
@@ -3113,8 +3172,14 @@ impl Service {
             .retain(|reward| !deleted_chain_ids.contains(&reward.chain_id));
         let mut next_entry_id = self.next_chain_entry_id;
         let mut ended_chains = Vec::new();
-        let mut used_chain_ids = std::collections::BTreeSet::new();
-        let mut next_chain_id = 1_u64;
+        let mut next_chain_id = self
+            .sync
+            .archive_chain_ids
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         for chain in &projection.ended_chains {
             let links = chain
                 .links
@@ -3125,38 +3190,51 @@ impl Service {
                 .chain_break
                 .as_ref()
                 .ok_or_else(|| "ended projected chain has no Chain Break".to_owned())?;
-            let (source, session_id, reservation_entity_id) = match &break_review.source {
-                ProjectedChainBreakSource::SessionReview { session_entity_id }
-                | ProjectedChainBreakSource::FocusStopped { session_entity_id } => (
-                    if matches!(
-                        &break_review.source,
-                        ProjectedChainBreakSource::FocusStopped { .. }
-                    ) {
-                        ChainBreakSource::FocusStopped
-                    } else {
-                        ChainBreakSource::SessionReview
-                    },
-                    Some(
-                        self.sync
-                            .session_entities
-                            .iter()
-                            .find_map(|(local, global)| {
-                                (global == session_entity_id).then_some(*local)
-                            })
-                            .ok_or_else(|| {
-                                "projected Chain Break source Session is not local".to_owned()
-                            })?,
+            let (source, session_id, reservation_entity_id, daily_chain_goal) =
+                match &break_review.source {
+                    ProjectedChainBreakSource::SessionReview { session_entity_id }
+                    | ProjectedChainBreakSource::FocusStopped { session_entity_id } => (
+                        if matches!(
+                            &break_review.source,
+                            ProjectedChainBreakSource::FocusStopped { .. }
+                        ) {
+                            ChainBreakSource::FocusStopped
+                        } else {
+                            ChainBreakSource::SessionReview
+                        },
+                        Some(
+                            self.sync
+                                .session_entities
+                                .iter()
+                                .find_map(|(local, global)| {
+                                    (global == session_entity_id).then_some(*local)
+                                })
+                                .ok_or_else(|| {
+                                    "projected Chain Break source Session is not local".to_owned()
+                                })?,
+                        ),
+                        None,
+                        None,
                     ),
-                    None,
-                ),
-                ProjectedChainBreakSource::ReservationReview {
-                    reservation_entity_id,
-                } => (
-                    ChainBreakSource::ReservationReview,
-                    None,
-                    Some(reservation_entity_id.clone()),
-                ),
-            };
+                    ProjectedChainBreakSource::ReservationReview {
+                        reservation_entity_id,
+                    } => (
+                        ChainBreakSource::ReservationReview,
+                        None,
+                        Some(reservation_entity_id.clone()),
+                        None,
+                    ),
+                    ProjectedChainBreakSource::DailyChainGoal(reason) => (
+                        ChainBreakSource::DailyChainGoal,
+                        None,
+                        None,
+                        Some(DailyChainGoalMiss {
+                            date: reason.date.to_string(),
+                            achieved: reason.achieved,
+                            quota: reason.quota,
+                        }),
+                    ),
+                };
             let task_id = if break_review.task_kind == Some(ReviewedTaskKind::SystemVoid) {
                 Some(
                     self.void_task_id
@@ -3188,16 +3266,12 @@ impl Service {
                     .attribute(session_id, TaskId::new(task_id), title)
                     .map_err(str::to_owned)?;
             }
-            let chain_id = existing_chain_ids
-                .get(&break_review.review_entity_id)
-                .copied()
-                .filter(|id| used_chain_ids.insert(*id))
-                .unwrap_or_else(|| {
-                    while used_chain_ids.contains(&next_chain_id) {
-                        next_chain_id = next_chain_id.saturating_add(1);
-                    }
+            let chain_id = *self
+                .sync
+                .archive_chain_ids
+                .entry(break_review.review_entity_id.clone())
+                .or_insert_with(|| {
                     let id = next_chain_id;
-                    used_chain_ids.insert(id);
                     next_chain_id = next_chain_id.saturating_add(1);
                     id
                 });
@@ -3206,6 +3280,7 @@ impl Service {
                 links,
                 chain_break: ChainBreakState {
                     source,
+                    daily_chain_goal,
                     reservation_entity_id,
                     id: entry_id(
                         &mut next_entry_id,
@@ -3229,11 +3304,7 @@ impl Service {
             .collect::<Result<Vec<_>, _>>()?;
         self.ended_chains = ended_chains;
         self.chain_links = chain_links;
-        self.current_chain_id = used_chain_ids
-            .last()
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
+        self.current_chain_id = next_chain_id;
         self.current_chain_length = self.chain_links.len() as u64;
         self.next_chain_entry_id = next_entry_id;
         Ok(())
@@ -3500,6 +3571,7 @@ impl Default for Service {
 impl Handler for Service {
     #[allow(clippy::too_many_lines)]
     fn handle(&mut self, request: Request) -> Response {
+        self.observe_time();
         if self.durable_health == DurableHealthState::Degraded && request.command.mutates() {
             return Response::Error {
                 error: ProtocolError::DurableWriteUnavailable {
@@ -3510,7 +3582,6 @@ impl Handler for Service {
                 },
             };
         }
-        self.observe_time();
         let mutation_key = request.idempotency_key.clone();
         if let Some(key) = &mutation_key
             && self.applied_keys.contains(key)
@@ -3532,7 +3603,22 @@ impl Handler for Service {
                     ..
                 } | Command::StartTitle { .. }
             ));
-        let rollback = reservation_mutation.then(|| self.reservation_backup());
+        let review_mutation = matches!(
+            &request.command,
+            Command::ReviewSuccess { .. }
+                | Command::ReviewSuccessAssign { .. }
+                | Command::ReviewFailure { .. }
+        );
+        let rollback = (reservation_mutation || review_mutation).then(|| self.reservation_backup());
+        let review_rollback = review_mutation.then(|| {
+            (
+                self.pending_review.clone(),
+                self.chain_backup(),
+                self.reward_milestones.clone(),
+                self.next_reward_milestone_id,
+                self.next_reward_unlock_id,
+            )
+        });
         let result = match request.command {
             Command::Reserve {
                 minutes,
@@ -3551,6 +3637,9 @@ impl Handler for Service {
                     confirmed,
                     mutation_key.as_deref(),
                 );
+            }
+            Command::ConfigureDailyChainGoal { settings } => {
+                return self.commit_daily_chain_goal(settings, mutation_key.as_deref());
             }
             Command::ConfigureReservation { minutes } => {
                 return self.commit_reservation_configuration(minutes, mutation_key.as_deref());
@@ -4152,25 +4241,30 @@ impl Handler for Service {
                 };
             }
         };
-        match result {
+        let response = match result {
             Ok(()) => match self.persist(mutation_key.as_deref()) {
-                Ok(()) => Response::Snapshot {
-                    snapshot: self.snapshot(),
-                },
-                Err(error) => {
-                    if let Some(backup) = rollback {
-                        self.restore_reservation_mutation(backup);
-                    }
-                    self.durable_rejected(error)
+                Ok(()) => {
+                    return Response::Snapshot {
+                        snapshot: self.snapshot(),
+                    };
                 }
+                Err(error) => self.durable_rejected(error),
             },
-            Err(error) => {
-                if let Some(backup) = rollback {
-                    self.restore_reservation_mutation(backup);
-                }
-                Self::rejected(error)
-            }
+            Err(error) => Self::rejected(error),
+        };
+        if let Some(backup) = rollback {
+            self.restore_reservation_mutation(backup);
         }
+        if let Some((pending, chain, milestones, next_milestone_id, next_unlock_id)) =
+            review_rollback
+        {
+            self.pending_review = pending;
+            self.restore_chain_mutation(chain);
+            self.reward_milestones = milestones;
+            self.next_reward_milestone_id = next_milestone_id;
+            self.next_reward_unlock_id = next_unlock_id;
+        }
+        response
     }
 }
 
@@ -4621,7 +4715,11 @@ impl PersistedService {
                 })
                 .collect::<Result<_, String>>()?,
         );
+        let mut sync = persisted.sync;
+        sync.daily_goal_next_cutoff = pomotui_sync::DailyGoalSchedule::new(&sync.records)
+            .next_cutoff(sync.daily_goal_observed_through.unwrap_or(i64::MIN / 1000));
         Ok(Service {
+            device_time_zone: daily_chain_goal::device_time_zone(),
             clock,
             timer,
             tasks,
@@ -4654,7 +4752,7 @@ impl PersistedService {
             reward_unlocks: persisted.reward_unlocks,
             next_reward_milestone_id: persisted.next_reward_milestone_id,
             next_reward_unlock_id: persisted.next_reward_unlock_id,
-            sync: persisted.sync,
+            sync,
         })
     }
 }

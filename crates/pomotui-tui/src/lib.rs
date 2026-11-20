@@ -1,5 +1,6 @@
 pub mod animation;
 pub mod config;
+mod goal;
 
 use pomotui_protocol::{SessionKind, Snapshot};
 use ratatui::{
@@ -91,6 +92,7 @@ pub enum Overlay {
     ReservationMinutes,
     Palette,
     Settings,
+    DailyChainGoal,
     Help,
     CreateTask,
     RenameTask,
@@ -168,6 +170,7 @@ pub struct App {
     pub color_overrides: ColorOverrides,
     pub pending_g: bool,
     pub palette_index: usize,
+    goal_editor: Option<goal::Editor>,
     help_scroll: u16,
     help_max_scroll: u16,
     pub input: String,
@@ -234,6 +237,7 @@ impl App {
             },
             pending_g: false,
             palette_index: 0,
+            goal_editor: None,
             help_scroll: 0,
             help_max_scroll: 0,
             input: String::new(),
@@ -671,7 +675,12 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn handle_overlay_key(&mut self, key: InputKey) -> Option<Action> {
         if key == InputKey::Escape {
-            self.overlay = Overlay::None;
+            self.overlay = if self.overlay == Overlay::DailyChainGoal {
+                self.goal_editor = None;
+                Overlay::Settings
+            } else {
+                Overlay::None
+            };
             self.input.clear();
             self.input_cursor = 0;
             return None;
@@ -832,6 +841,15 @@ impl App {
                         .to_string();
                     self.input_cursor = self.input.len();
                 }
+                if key == InputKey::Char('d') {
+                    self.goal_editor = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| goal::Editor::new(&snapshot.daily_chain_goal));
+                    if self.goal_editor.is_some() {
+                        self.overlay = Overlay::DailyChainGoal;
+                    }
+                }
                 if key == InputKey::Char('g') {
                     self.language = match self.language {
                         Language::English => Language::SimplifiedChinese,
@@ -840,6 +858,12 @@ impl App {
                     return Some(Action::SetLanguage(self.language));
                 }
                 None
+            }
+            Overlay::DailyChainGoal => {
+                let command = self.goal_editor.as_mut()?.key(key)?;
+                self.overlay = Overlay::Settings;
+                self.goal_editor = None;
+                Some(Action::Command(command))
             }
             Overlay::Help => {
                 self.help_scroll = match key {
@@ -2069,6 +2093,9 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
                 .add_modifier(Modifier::BOLD),
         )),
     ];
+    if let Some(goal) = goal::status_line(&snapshot.daily_chain_goal, language) {
+        lines.insert(1, goal);
+    }
     if let Some(reward) = &snapshot.next_reward {
         lines.push(Line::from(format!(
             "{}: {} @ {}",
@@ -2207,11 +2234,6 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                 } else {
                     " "
                 };
-                let title = chain
-                    .break_chain_entry_title
-                    .as_deref()
-                    .or(chain.break_task_title.as_deref())
-                    .unwrap_or_else(|| chain_break_fallback(chain.break_source, language));
                 let style = if index == app.archive_cursor {
                     Style::default()
                         .fg(colors.background)
@@ -2222,24 +2244,10 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                 };
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "{marker} {} {} · {title} · {}",
+                        "{marker} {} {} · {}",
                         text(language, "Length", "长度"),
                         chain.length,
-                        match chain.break_source {
-                            pomotui_protocol::ChainBreakSource::ReservationReview => {
-                                text(language, "Reservation failure", "预约失败").into()
-                            }
-                            pomotui_protocol::ChainBreakSource::FocusStopped => format!(
-                                "{} · {}",
-                                text(language, "Focus stopped early", "专注提前停止"),
-                                chain
-                                    .break_actual_seconds
-                                    .map_or_else(|| "—".into(), chain_duration)
-                            ),
-                            pomotui_protocol::ChainBreakSource::SessionReview => chain
-                                .break_actual_seconds
-                                .map_or_else(|| "—".into(), chain_duration),
-                        }
+                        chain_break_description(chain, language, false)
                     ),
                     style,
                 )));
@@ -2328,30 +2336,12 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
                 link.reflection.as_deref().unwrap_or("—")
             )));
         } else {
-            let break_title = chain
-                .break_chain_entry_title
-                .as_deref()
-                .or(chain.break_task_title.as_deref())
-                .unwrap_or_else(|| chain_break_fallback(chain.break_source, language));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "{} └─ {}. {} · {break_title} · {}",
+                    "{} └─ {}. {}",
                     if selected { "›" } else { " " },
                     index + 1,
-                    match chain.break_source {
-                        pomotui_protocol::ChainBreakSource::ReservationReview => {
-                            text(language, "RESERVATION FAILURE", "预约失败")
-                        }
-                        pomotui_protocol::ChainBreakSource::FocusStopped => {
-                            text(language, "FOCUS STOPPED EARLY", "专注提前停止")
-                        }
-                        pomotui_protocol::ChainBreakSource::SessionReview => {
-                            text(language, "CHAIN BREAK", "行动链中断")
-                        }
-                    },
-                    chain
-                        .break_actual_seconds
-                        .map_or_else(|| "—".into(), chain_duration)
+                    chain_break_description(chain, language, true)
                 ),
                 style,
             )));
@@ -2650,7 +2640,7 @@ fn today_lines(
         ))];
     };
     let touched = snapshot.today.task_focus.len();
-    vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             human_duration(snapshot.today.focus_seconds),
             Style::default()
@@ -2684,7 +2674,11 @@ fn today_lines(
             ),
             Style::default().fg(colors.muted),
         )),
-    ]
+    ];
+    if let Some(goal) = goal::status_line(&snapshot.daily_chain_goal, language) {
+        lines[2] = goal;
+    }
+    lines
 }
 
 fn today_panel(
@@ -2773,6 +2767,9 @@ fn today_report_lines(
                 .add_modifier(Modifier::BOLD),
         )),
     ];
+    if let Some(goal) = goal::status_line(&snapshot.daily_chain_goal, language) {
+        lines.insert(2, goal);
+    }
     let maximum = snapshot
         .today
         .seven_day_focus_seconds
@@ -3347,14 +3344,55 @@ fn human_duration_precise(seconds: u64) -> String {
     }
 }
 
-fn chain_break_fallback(
-    source: pomotui_protocol::ChainBreakSource,
+fn chain_break_description(
+    chain: &pomotui_protocol::EndedChainSummary,
     language: Language,
-) -> &'static str {
-    if source == pomotui_protocol::ChainBreakSource::ReservationReview {
-        text(language, "Reservation", "预约")
-    } else {
-        text(language, "No Task", "无任务")
+    detailed: bool,
+) -> String {
+    use pomotui_protocol::ChainBreakSource;
+
+    if chain.break_source == ChainBreakSource::DailyChainGoal {
+        let label = text(language, "Daily goal missed", "每日目标未达成");
+        let mut description = chain.break_daily_chain_goal.as_ref().map_or_else(
+            || label.into(),
+            |miss| format!("{label} · {} · {}/{}", miss.date, miss.achieved, miss.quota),
+        );
+        if let Some(title) = &chain.break_chain_entry_title {
+            description.push_str(" · ");
+            description.push_str(title);
+        }
+        return description;
+    }
+    let title = chain
+        .break_chain_entry_title
+        .as_deref()
+        .or(chain.break_task_title.as_deref())
+        .unwrap_or_else(|| {
+            if chain.break_source == ChainBreakSource::ReservationReview {
+                text(language, "Reservation", "预约")
+            } else {
+                text(language, "No Task", "无任务")
+            }
+        });
+    let duration = chain
+        .break_actual_seconds
+        .map_or_else(|| "—".into(), chain_duration);
+    let reason = match chain.break_source {
+        ChainBreakSource::ReservationReview if detailed => {
+            text(language, "RESERVATION FAILURE", "预约失败")
+        }
+        ChainBreakSource::ReservationReview => text(language, "Reservation failure", "预约失败"),
+        ChainBreakSource::FocusStopped if detailed => {
+            text(language, "FOCUS STOPPED EARLY", "专注提前停止")
+        }
+        ChainBreakSource::FocusStopped => text(language, "Focus stopped early", "专注提前停止"),
+        _ => text(language, "CHAIN BREAK", "行动链中断"),
+    };
+    match chain.break_source {
+        ChainBreakSource::ReservationReview if !detailed => format!("{title} · {reason}"),
+        ChainBreakSource::SessionReview if !detailed => format!("{title} · {duration}"),
+        ChainBreakSource::FocusStopped if !detailed => format!("{title} · {reason} · {duration}"),
+        _ => format!("{reason} · {title} · {duration}"),
     }
 }
 
@@ -3723,6 +3761,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colo
         Overlay::Palette => area.height.saturating_sub(4).min(21),
         Overlay::Help => area.height.saturating_sub(2),
         Overlay::Settings => 19.min(area.height.saturating_sub(2)),
+        Overlay::DailyChainGoal => 18.min(area.height.saturating_sub(2)),
         Overlay::RewardManager => 16.min(area.height.saturating_sub(2)),
         Overlay::CreateTask
         | Overlay::RenameTask
@@ -3757,6 +3796,11 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colo
         Overlay::Palette => palette_overlay(frame, modal, app, colors),
         Overlay::Help => help_overlay(frame, modal, app, colors),
         Overlay::Settings => settings_overlay(frame, modal, app, colors),
+        Overlay::DailyChainGoal => {
+            if let Some(editor) = &app.goal_editor {
+                goal::render(frame, modal, editor, colors, app.language);
+            }
+        }
         Overlay::RewardManager => reward_manager_overlay(frame, modal, app, colors),
         Overlay::CreateTask
         | Overlay::RenameTask
@@ -4291,6 +4335,14 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
                 .as_ref()
                 .map_or(10, |snapshot| snapshot.reservation_minutes)
         )),
+        Line::from(format!(
+            "  d  {}  {}",
+            text(app.language, "Daily Chain Goal", "每日保链"),
+            app.snapshot
+                .as_ref()
+                .and_then(|snapshot| goal::status(&snapshot.daily_chain_goal, app.language))
+                .unwrap_or_else(|| text(app.language, "Off", "关闭").into())
+        )),
         Line::from(Span::styled(
             text(app.language, "CONFIGURATION", "配置"),
             Style::default()
@@ -4322,11 +4374,7 @@ fn settings_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors
             .block(
                 panel(text(app.language, "SETTINGS", "设置"), colors)
                     .border_style(Style::default().fg(colors.accent))
-                    .title_bottom(text(
-                        app.language,
-                        " ↑↓ scroll · u/d page · Esc close ",
-                        " ↑↓ 滚动 · u/d 翻页 · Esc 关闭 ",
-                    )),
+                    .title_bottom(text(app.language, " Esc close ", " Esc 关闭 ")),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -5086,6 +5134,159 @@ mod tests {
     }
 
     #[test]
+    fn daily_chain_goal_calendar_saves_dates_across_month_boundaries() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::RanPaperDark,
+        );
+        app.key('s');
+        app.key('d');
+        app.key('\u{8}');
+        app.key('3');
+        app.key('\t');
+        app.handle_key(InputKey::Right);
+        app.key('\t');
+        app.handle_key(InputKey::Right);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let shown = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(shown.contains("2026-02-02"), "{shown}");
+        assert!(shown.contains("Mo Tu We Th Fr Sa Su"), "{shown}");
+        assert_eq!(
+            app.key('\n'),
+            Some(Action::Command(
+                pomotui_protocol::Command::ConfigureDailyChainGoal {
+                    settings: Some(pomotui_protocol::DailyChainGoalSettings {
+                        quota: 3,
+                        start_date: Some("2026-02-01".into()),
+                        end_date: Some("2026-02-02".into()),
+                        time_zone: "Asia/Shanghai".into(),
+                    })
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn daily_chain_goal_status_and_missed_archive_show_authoritative_counts() {
+        use pomotui_protocol::{
+            ChainBreakSource, DailyChainGoalChange, DailyChainGoalMiss, DailyChainGoalSettings,
+        };
+
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.daily_chain_goal.active = Some(DailyChainGoalSettings {
+            quota: 3,
+            start_date: Some("2026-01-29".into()),
+            end_date: None,
+            time_zone: "Asia/Shanghai".into(),
+        });
+        state.daily_chain_goal.achieved = 2;
+        state.daily_chain_goal.scheduled = Some(DailyChainGoalChange {
+            effective_date: "2026-01-31".into(),
+            settings: None,
+        });
+        let mut ended = ended_chain(5, "Earlier work", 7);
+        ended.break_source = ChainBreakSource::DailyChainGoal;
+        ended.break_actual_seconds = None;
+        ended.break_daily_chain_goal = Some(DailyChainGoalMiss {
+            date: "2026-01-29".into(),
+            achieved: 1,
+            quota: 3,
+        });
+        state.recent_ended_chains = vec![ended];
+        let mut app = App::new(Some(state), Theme::RanPaperDark);
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+
+        app.key('s');
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let shown = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(shown.contains("Daily Chain Goal"), "{shown}");
+        assert!(shown.contains("2/3"), "{shown}");
+        assert!(shown.contains("off from 2026-01-31"), "{shown}");
+
+        app.key('\u{1b}');
+        app.view = View::ChainArchive;
+        app.archive_detail_open = true;
+        app.language = Language::SimplifiedChinese;
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let shown = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(
+            shown
+                .split_whitespace()
+                .collect::<String>()
+                .contains("每日目标未达成"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("2026-01-29") && shown.contains("1/3"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn daily_chain_goal_defaults_to_open_ended_and_schedules_disabling() {
+        use pomotui_protocol::{Command, DailyChainGoalSettings};
+
+        let mut state = snapshot("pending", SessionKind::Focus);
+        let mut app = App::new(Some(state.clone()), Theme::RanPaperDark);
+        app.key('s');
+        app.key('d');
+        app.key('\u{8}');
+        app.key('0');
+        assert_eq!(app.key('\n'), None);
+        app.key('\u{1b}');
+        app.key('d');
+        assert_eq!(
+            app.key('\n'),
+            Some(Action::Command(Command::ConfigureDailyChainGoal {
+                settings: Some(DailyChainGoalSettings {
+                    quota: 1,
+                    start_date: None,
+                    end_date: None,
+                    time_zone: "Asia/Shanghai".into(),
+                })
+            }))
+        );
+
+        state.daily_chain_goal.active = Some(DailyChainGoalSettings {
+            quota: 3,
+            start_date: Some("2026-01-29".into()),
+            end_date: None,
+            time_zone: "Asia/Shanghai".into(),
+        });
+        app.replace_snapshot(Some(state));
+        app.key('d');
+        app.key('\t');
+        app.key('\t');
+        assert_eq!(
+            app.key('\n'),
+            Some(Action::Command(Command::ConfigureDailyChainGoal {
+                settings: None
+            }))
+        );
+    }
+
+    #[test]
     fn reservation_default_editor_uses_service_snapshot_and_emits_persistent_setting() {
         let mut state = snapshot("pending", SessionKind::Focus);
         state.reservation_minutes = 17;
@@ -5389,6 +5590,12 @@ mod tests {
 
     fn snapshot(state: &str, kind: SessionKind) -> Snapshot {
         Snapshot {
+            daily_chain_goal: pomotui_protocol::DailyChainGoalSnapshot {
+                device_time_zone: "Asia/Shanghai".into(),
+                device_local_date: "2026-01-30".into(),
+                date: "2026-01-30".into(),
+                ..Default::default()
+            },
             reservation: None,
             reservation_minutes: 10,
             state: state.into(),
@@ -5477,6 +5684,7 @@ mod tests {
             }],
             break_id,
             break_source: pomotui_protocol::ChainBreakSource::SessionReview,
+            break_daily_chain_goal: None,
             break_task_title: Some(title.into()),
             break_actual_seconds: Some(32),
             break_reflection: "Stopped on an unclear next step".into(),

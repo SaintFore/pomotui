@@ -427,6 +427,7 @@ mod tests {
 
     fn waybar_snapshot() -> Snapshot {
         Snapshot {
+            daily_chain_goal: pomotui_protocol::DailyChainGoalSnapshot::default(),
             reservation: None,
             reservation_minutes: 10,
             state: "paused".into(),
@@ -469,6 +470,7 @@ mod tests {
             links: Vec::new(),
             break_id: 3,
             break_source: pomotui_protocol::ChainBreakSource::FocusStopped,
+            break_daily_chain_goal: None,
             break_task_title: Some("Work".into()),
             break_actual_seconds: Some(13),
             break_reflection: String::new(),
@@ -627,6 +629,7 @@ mod tests {
     fn reminder_delivery_state_is_visible_in_human_and_json_status() {
         let response = Response::Snapshot {
             snapshot: Snapshot {
+                daily_chain_goal: pomotui_protocol::DailyChainGoalSnapshot::default(),
                 reservation: None,
                 reservation_minutes: 10,
                 state: "pending".into(),
@@ -674,6 +677,7 @@ mod tests {
     #[test]
     fn human_status_shows_chain_length_and_pending_review() {
         let mut snapshot = Snapshot {
+            daily_chain_goal: pomotui_protocol::DailyChainGoalSnapshot::default(),
             reservation: None,
             reservation_minutes: 10,
             state: "pending".into(),

@@ -44,6 +44,9 @@ pub enum Command {
     ConfigureReservation {
         minutes: u64,
     },
+    ConfigureDailyChainGoal {
+        settings: Option<DailyChainGoalSettings>,
+    },
     Start {
         kind: SessionKind,
         task_id: Option<u64>,
@@ -200,6 +203,8 @@ impl Request {
 pub struct Snapshot {
     #[serde(default)]
     pub reservation: Option<ReservationSummary>,
+    #[serde(default)]
+    pub daily_chain_goal: DailyChainGoalSnapshot,
     #[serde(default = "default_reservation_minutes")]
     pub reservation_minutes: u64,
     pub state: String,
@@ -226,6 +231,38 @@ pub struct Snapshot {
     #[serde(default)]
     pub reward_debt: Vec<RewardDebtSummary>,
     pub current_chain_rewards: Vec<RewardUnlockSummary>,
+}
+
+/// Civil dates use YYYY-MM-DD, and the time zone is an IANA name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalSettings {
+    pub quota: u64,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub time_zone: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalChange {
+    pub effective_date: String,
+    pub settings: Option<DailyChainGoalSettings>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalSnapshot {
+    pub device_time_zone: String,
+    pub device_local_date: String,
+    pub date: String,
+    pub achieved: u64,
+    pub active: Option<DailyChainGoalSettings>,
+    pub scheduled: Option<DailyChainGoalChange>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalMiss {
+    pub date: String,
+    pub achieved: u64,
+    pub quota: u64,
 }
 
 /// Default time window for a new Focus Reservation.
@@ -286,6 +323,7 @@ pub enum ChainBreakSource {
     SessionReview,
     ReservationReview,
     FocusStopped,
+    DailyChainGoal,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -297,6 +335,8 @@ pub struct EndedChainSummary {
     pub break_id: u64,
     #[serde(default)]
     pub break_source: ChainBreakSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_daily_chain_goal: Option<DailyChainGoalMiss>,
     pub break_task_title: Option<String>,
     pub break_actual_seconds: Option<u64>,
     pub break_reflection: String,
