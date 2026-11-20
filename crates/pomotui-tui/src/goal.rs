@@ -23,6 +23,7 @@ enum EditError {
     Quota,
     Dates,
     TimeZone,
+    Service(String),
 }
 
 pub(super) struct Editor {
@@ -105,6 +106,10 @@ impl Editor {
             },
         }
         None
+    }
+
+    pub(super) fn show_service_error(&mut self, message: String) {
+        self.error = Some(EditError::Service(message));
     }
 
     fn next_field(&mut self) {
@@ -288,22 +293,26 @@ pub(super) fn render(
         )));
     }
     if let Some(error) = &editor.error {
-        lines.push(Line::from(Span::styled(
-            match error {
-                EditError::Quota => text(
-                    language,
-                    "Enter a positive round count.",
-                    "请输入大于零的轮次。",
-                ),
-                EditError::Dates => text(
-                    language,
-                    "End date must be on or after start date.",
-                    "结束日期须在开始日期当天或之后。",
-                ),
-                EditError::TimeZone => text(language, "Enter a time zone.", "请输入时区。"),
-            },
-            Style::default().fg(colors.gold),
-        )));
+        lines.insert(
+            0,
+            Line::from(Span::styled(
+                match error {
+                    EditError::Quota => text(
+                        language,
+                        "Enter a positive round count.",
+                        "请输入大于零的轮次。",
+                    ),
+                    EditError::Dates => text(
+                        language,
+                        "End date must be on or after start date.",
+                        "结束日期须在开始日期当天或之后。",
+                    ),
+                    EditError::TimeZone => text(language, "Enter a time zone.", "请输入时区。"),
+                    EditError::Service(message) => message,
+                },
+                Style::default().fg(colors.gold),
+            )),
+        );
     }
     let controls = if editor.field == Field::Disable {
         text(

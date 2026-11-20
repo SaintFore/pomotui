@@ -262,6 +262,23 @@ impl App {
         app
     }
 
+    pub fn daily_chain_goal_save_result(&mut self, result: Result<(), String>) {
+        if self.overlay != Overlay::DailyChainGoal {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.goal_editor = None;
+                self.overlay = Overlay::Settings;
+            }
+            Err(error) => {
+                if let Some(editor) = &mut self.goal_editor {
+                    editor.show_service_error(error);
+                }
+            }
+        }
+    }
+
     pub fn replace_snapshot(&mut self, snapshot: Option<Snapshot>) {
         let pending_review_id = snapshot
             .as_ref()
@@ -859,12 +876,7 @@ impl App {
                 }
                 None
             }
-            Overlay::DailyChainGoal => {
-                let command = self.goal_editor.as_mut()?.key(key)?;
-                self.overlay = Overlay::Settings;
-                self.goal_editor = None;
-                Some(Action::Command(command))
-            }
+            Overlay::DailyChainGoal => self.goal_editor.as_mut()?.key(key).map(Action::Command),
             Overlay::Help => {
                 self.help_scroll = match key {
                     InputKey::Char('j') | InputKey::Down => self.help_scroll.saturating_add(1),
@@ -5244,6 +5256,47 @@ mod tests {
     }
 
     #[test]
+    fn saving_a_daily_chain_goal_keeps_the_editor_until_the_service_responds() {
+        let mut app = App::new(
+            Some(snapshot("pending", SessionKind::Focus)),
+            Theme::RanPaperDark,
+        );
+        app.key('s');
+        app.key('d');
+        app.key('\u{8}');
+        app.key('4');
+        assert!(matches!(
+            app.key('\n'),
+            Some(Action::Command(
+                pomotui_protocol::Command::ConfigureDailyChainGoal { .. }
+            ))
+        ));
+        assert_eq!(app.overlay, Overlay::DailyChainGoal);
+        app.daily_chain_goal_save_result(Err("Choose a future date".into()));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let shown = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(shown.contains("Choose a future date"), "{shown}");
+        let Some(Action::Command(pomotui_protocol::Command::ConfigureDailyChainGoal {
+            settings: Some(draft),
+        })) = app.key('\n')
+        else {
+            panic!("resubmit draft");
+        };
+        assert_eq!(draft.quota, 4);
+
+        app.daily_chain_goal_save_result(Ok(()));
+        assert_eq!(app.overlay, Overlay::Settings);
+    }
+
+    #[test]
     fn daily_chain_goal_defaults_to_open_ended_and_schedules_disabling() {
         use pomotui_protocol::{Command, DailyChainGoalSettings};
 
@@ -5268,6 +5321,7 @@ mod tests {
             }))
         );
 
+        app.daily_chain_goal_save_result(Ok(()));
         state.daily_chain_goal.active = Some(DailyChainGoalSettings {
             quota: 3,
             start_date: Some("2026-01-29".into()),

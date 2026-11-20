@@ -232,11 +232,31 @@ fn send_action(client: &mut Option<Client>, app: &mut App, action: Action) {
     let Action::Command(command) = action else {
         return;
     };
+    let saves_goal = matches!(command, Command::ConfigureDailyChainGoal { .. });
     let Some(connection) = client else {
-        app.message = Some("Timer Service unavailable; reconnecting".into());
+        let message = "Timer Service unavailable; reconnecting".to_owned();
+        if saves_goal {
+            app.daily_chain_goal_save_result(Err(message.clone()));
+        }
+        app.message = Some(message);
         return;
     };
-    match connection.request(&pomotui_cli_request(command)) {
+    let response = connection.request(&pomotui_cli_request(command));
+    if saves_goal {
+        let result = match &response {
+            Ok(pomotui_protocol::Response::Error { error }) => Err(match error {
+                pomotui_protocol::ProtocolError::Rejected { message }
+                | pomotui_protocol::ProtocolError::DurableWriteUnavailable { message } => {
+                    message.clone()
+                }
+                other => format!("Command rejected: {other:?}"),
+            }),
+            Err(error) => Err(format!("Timer Service unavailable: {error}")),
+            Ok(_) => Ok(()),
+        };
+        app.daily_chain_goal_save_result(result);
+    }
+    match response {
         Ok(pomotui_protocol::Response::Accepted) => {
             app.message = Some("Command accepted".into());
             app.replace_snapshot(read_snapshot(Some(connection)));

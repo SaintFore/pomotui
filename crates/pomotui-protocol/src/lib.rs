@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
@@ -660,6 +660,22 @@ mod tests {
             Err(ProtocolError::IncompatibleVersion { .. })
         ));
         assert!(serde_json::from_str::<Request>("{broken").is_err());
+    }
+
+    #[test]
+    fn v6_frontends_get_a_version_error_before_receiving_new_chain_break_kinds() {
+        let request = Request {
+            version: 6,
+            idempotency_key: None,
+            command: Command::Status,
+        };
+        assert_eq!(
+            request.validate(),
+            Err(ProtocolError::IncompatibleVersion {
+                received: 6,
+                supported: 7
+            })
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real package upgrades observed through protocol v6; run only in disposable Arch."""
+"""Real package upgrades observed through the service protocol; run only in disposable Arch."""
 import hashlib
 import json
 import os
@@ -30,14 +30,25 @@ def run(*args, check=True):
 def manager(*args, check=True):
     return run('runuser', '-u', user, '--', *env, 'systemctl', '--user', *args, check=check)
 
+wire_version = 6
+
 def request(command='status', **fields):
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(8)
-        connection.connect(f'/run/user/{uid}/pomotui/pomotui.sock')
-        connection.sendall((json.dumps({'version': 6, 'idempotency_key': str(uuid.uuid4()), 'command': {'command': command, **fields}}) + '\n').encode())
-        response = json.loads(connection.makefile().readline())
-    assert response['result'] != 'error', response
-    return response.get('snapshot', response.get('value'))
+    global wire_version
+    key = str(uuid.uuid4())
+    for _ in range(2):
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(8)
+            connection.connect(f'/run/user/{uid}/pomotui/pomotui.sock')
+            message = {'version': wire_version, 'idempotency_key': key, 'command': {'command': command, **fields}}
+            connection.sendall((json.dumps(message) + '\n').encode())
+            response = json.loads(connection.makefile().readline())
+        error = response.get('error', {})
+        if error.get('code') == 'incompatible_version':
+            wire_version = error['supported']
+            continue
+        assert response['result'] != 'error', response
+        return response.get('snapshot', response.get('value'))
+    raise AssertionError(response)
 
 def record(name, value):
     (out / f'{name}.json').write_text(json.dumps(value, indent=2) + '\n')
