@@ -241,6 +241,9 @@ show daily progress. A missed day ends the Action Chain at midnight in the
 selected time zone. The archive shows the date, completed count, and target.
 Changes to an active quota and disabling take effect the next day. A
 successful Session Review counts on the date the Focus Session finished.
+When synchronization is enabled, Devices share the goal and its time zone.
+A late review from an offline Device can restore the Action Chain if the
+combined count meets the goal for that day.
 
 ## Add Pomotui to Waybar
 
