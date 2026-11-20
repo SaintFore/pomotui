@@ -204,7 +204,11 @@ fn sync_now(service: &TimerService) {
     });
 }
 
-fn rebuild(service: &TimerService) {
+fn rebuild_missing_exchange(service: &TimerService, path: &Path) {
+    assert!(
+        !path.exists(),
+        "rebuild requires a missing exchange in this test"
+    );
     assert!(matches!(
         service.request(Command::SyncRebuild),
         Response::Data { .. }
@@ -213,9 +217,9 @@ fn rebuild(service: &TimerService) {
         let status = service.data(Command::SyncStatus);
         !status["in_progress"].as_bool().unwrap_or(false)
             && status["last_error"].is_null()
-            && status["warning"]
-                .as_str()
-                .is_some_and(|warning| warning.contains("unseen remote"))
+            && status["last_success"].is_number()
+            && std::fs::read_to_string(path)
+                .is_ok_and(|source| Document::from_json(&source).is_ok())
     });
 }
 
@@ -327,7 +331,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     assert_eq!(second.snapshot().completed_rounds, 1);
 
     enable(&first, &sync_path);
-    rebuild(&first);
+    rebuild_missing_exchange(&first, &sync_path);
     let old_file = std::fs::read(&sync_path).expect("first Device document");
     enable(&second, &sync_path);
     sync_now(&second);
@@ -401,7 +405,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     let retained_only_by_first = create_task(&first, "Restored by retained replica");
     assert!(retained_only_by_first > 0);
     std::fs::remove_file(&sync_path).expect("delete exchange file");
-    rebuild(&second);
+    rebuild_missing_exchange(&second, &sync_path);
     enable(&first, &sync_path);
     sync_now(&first);
     sync_now(&second);
@@ -458,9 +462,9 @@ fn separate_replica_directories_recover_conflict_records_and_replay() {
     let task = create_task(&second, "Offline second");
     completed_review(&second, task, "second review");
     enable(&first, &first_path);
-    rebuild(&first);
+    rebuild_missing_exchange(&first, &first_path);
     enable(&second, &second_path);
-    rebuild(&second);
+    rebuild_missing_exchange(&second, &second_path);
     let first_bytes = std::fs::read(&first_path).expect("first document");
     let second_bytes = std::fs::read(&second_path).expect("second document");
     let sibling = first_path.with_file_name("custom.sync-conflict-20261005-120000-ABCDEFG.sync");
