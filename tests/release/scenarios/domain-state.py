@@ -99,12 +99,13 @@ assert -1 <= before['remaining_seconds'] - after['remaining_seconds'] <= downtim
 remaining = after['remaining_seconds']
 time.sleep(2)
 assert request()['remaining_seconds'] < remaining
-# The public live snapshot has no Session ID. Ending the continued session must
-# yield one attributed History record, whose ID is retained by Pending Review.
-ended = request('stop_review')
+# Stopping the recovered Focus Session records its elapsed time and chain break.
+ended = request('stop')
 assert len(ended['recent_history']) == 1
-assert ended['pending_review']['session_id'] == ended['recent_history'][0]['id']
-assert ended['pending_review']['task_id'] == task
+assert ended['recent_history'][0]['task_title'] == 'Upgrade acceptance work'
+assert request('history')[0]['task_id'] == task
+assert ended['pending_review'] is None
+assert ended['recent_ended_chains'][0]['break_source'] == 'focus_stopped'
 record('running-ended', ended)
 
 fresh('paused')

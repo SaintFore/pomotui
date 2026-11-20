@@ -167,7 +167,7 @@ terminals. Its primary controls are:
 | `Enter`                            | Start Focus with the selected Task                                                              |
 | `Space`                            | Start, pause, or resume the Current Session                                                     |
 | `a` / `b`                          | Reserve Focus (or review/cancel an existing reservation) / begin reserved Focus now              |
-| `X` / `K`                          | Choose how to stop / skip the Current Session                                                   |
+| `X` / `K`                          | Stop / skip the Current Session                                                   |
 | `S` / `Enter` in Pending Review    | Review as successful, using the existing or selected Task (`Void` asks for a Chain Entry Title) |
 | `F` in Pending Review              | Review as failed                                                                                |
 | `p`                                | Reopen Session Review or Reservation Review                                                                |
@@ -200,7 +200,7 @@ pomotui task list
 pomotui start focus --task 1
 pomotui pause
 pomotui resume
-pomotui stop
+# Let the Focus Session run to its deadline.
 pomotui review success --reflection "Finished the vertical slice"
 pomotui chain
 ```
@@ -210,9 +210,11 @@ Other commands include `start short-break`, `start long-break`, `skip`,
 `create/rename/complete/reopen/delete`. Use `--json` with status, history, and
 other commands when integrating with scripts.
 
-Use `stop --review` to send an early Focus Session to Session Review, or
-`stop --no-review` to record it without affecting the Action Chain. A failed
-review requires a Reflection:
+A Focus Session creates a Chain Link after it reaches its planned duration and
+you review it as successful. Pause and resume to keep working toward that
+duration. Use `stop` to end the current timer. Stopping an unfinished Focus
+Session ends the Action Chain and keeps the elapsed time in Session History.
+A failed Session Review requires a Reflection.
 
 ```sh
 pomotui review failure "Interrupted and lost the intended thread"
