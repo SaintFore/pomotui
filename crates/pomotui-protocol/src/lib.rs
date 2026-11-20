@@ -82,6 +82,7 @@ pub enum Command {
     },
     History,
     Summary,
+    ReviewDismiss,
     ReviewSuccess {
         reflection: Option<String>,
     },
@@ -264,6 +265,8 @@ pub struct PendingReviewSummary {
     pub task_title: Option<String>,
     #[serde(default)]
     pub is_void: bool,
+    #[serde(default)]
+    pub dismiss_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,13 +278,14 @@ pub struct ChainLinkSummary {
     pub chain_entry_title: Option<String>,
 }
 
-/// The user judgment that ended an Action Chain; never an automatic timer event.
+/// The event that ended an Action Chain.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChainBreakSource {
     #[default]
     SessionReview,
     ReservationReview,
+    FocusStopped,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -165,7 +165,10 @@ impl ReminderEffects for DesktopReminder {
     }
 }
 
+type ServiceClock = std::sync::Arc<dyn Clock<Error = std::io::Error> + Send + Sync>;
+
 pub struct Service {
+    clock: ServiceClock,
     timer: Timer,
     tasks: TaskStore,
     history: History,
@@ -253,6 +256,15 @@ type ReservationMutationBackup = (
     u64,
     Option<ReservationState>,
     u64,
+);
+
+type ChainMutationBackup = (
+    u64,
+    u64,
+    Vec<ChainLinkState>,
+    u64,
+    Vec<EndedChainState>,
+    Vec<RewardUnlockState>,
 );
 
 fn validate_reservation_minutes(minutes: u64) -> Result<u64, String> {
@@ -466,7 +478,22 @@ impl Service {
     /// Only panics if compile-time default durations become invalid.
     #[must_use]
     pub fn new() -> Self {
-        let clock = PlatformClock::default();
+        Self::new_with_clock(PlatformClock::default())
+    }
+
+    /// Creates an in-memory Timer Service with the supplied clock.
+    ///
+    /// # Panics
+    ///
+    /// Only panics if compile-time default durations become invalid.
+    #[must_use]
+    pub fn new_with_clock(
+        clock: impl Clock<Error = std::io::Error> + Send + Sync + 'static,
+    ) -> Self {
+        Self::new_using_clock(std::sync::Arc::new(clock))
+    }
+
+    fn new_using_clock(clock: ServiceClock) -> Self {
         Self {
             timer: Timer::new(
                 SessionDurations::new(25 * 60, 5 * 60, 15 * 60)
@@ -490,6 +517,7 @@ impl Service {
             next_event_id: 1,
             now: clock.monotonic_seconds().unwrap_or(0),
             wall: clock.wall_seconds().unwrap_or(0),
+            clock,
             current_chain_id: 1,
             current_chain_length: 0,
             pending_review: None,
@@ -515,6 +543,18 @@ impl Service {
     /// Returns a diagnostic database or state-validation error.
     pub fn open(path: &Path) -> Result<Self, String> {
         Self::open_with_runtime(path, None, None, (true, false))
+    }
+
+    /// Opens durable state with the supplied clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic database or state-validation error.
+    pub fn open_with_clock(
+        path: &Path,
+        clock: impl Clock<Error = std::io::Error> + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        Self::open_using_clock(path, std::sync::Arc::new(clock), None, None, (true, false))
     }
 
     /// Opens durable state with reminder preferences in place before recovering deadlines.
@@ -546,6 +586,22 @@ impl Service {
         reminder: Option<Box<dyn ReminderEffects>>,
         (reminders_enabled, sound_enabled): (bool, bool),
     ) -> Result<Self, String> {
+        Self::open_using_clock(
+            path,
+            std::sync::Arc::new(PlatformClock::default()),
+            observation,
+            reminder,
+            (reminders_enabled, sound_enabled),
+        )
+    }
+
+    fn open_using_clock(
+        path: &Path,
+        clock: ServiceClock,
+        observation: Option<RecoveryObservation>,
+        reminder: Option<Box<dyn ReminderEffects>>,
+        (reminders_enabled, sound_enabled): (bool, bool),
+    ) -> Result<Self, String> {
         let repository = SqliteRepository::open(path).map_err(|error| error.to_string())?;
         let payload = repository
             .current_session_payload()
@@ -560,7 +616,7 @@ impl Service {
             .as_deref()
             .is_some_and(|payload| PersistedService::format_version(payload) == Ok(0));
         let schema_backup = if legacy {
-            let timestamp = PlatformClock::default().wall_seconds().unwrap_or(0);
+            let timestamp = clock.wall_seconds().unwrap_or(0);
             Some(
                 repository
                     .create_migration_backup("schema-migration", timestamp)
@@ -570,9 +626,9 @@ impl Service {
             None
         };
         let mut service = if let Some(payload) = payload.as_deref() {
-            PersistedService::decode_with_observation(payload, observation.clone())?
+            PersistedService::decode_with_observation(payload, observation.clone(), clock)?
         } else {
-            Self::new()
+            Self::new_using_clock(clock)
         };
         let created_void = service.ensure_void_task()?;
         let mut cancelled_reward = false;
@@ -673,7 +729,7 @@ impl Service {
         key: Option<&str>,
         remote: bool,
     ) -> Result<(), String> {
-        let mut replacement = Self::new();
+        let mut replacement = Self::new_using_clock(self.clock.clone());
         let state = self.timer.state();
         replacement.timer =
             Timer::new(state.durations, state.rounds_per_cycle).map_err(|e| e.to_string())?;
@@ -1132,14 +1188,7 @@ impl Service {
         key: Option<&str>,
     ) -> Response {
         let reservation_backup = self.reservation_backup();
-        let chain_backup = (
-            self.current_chain_id,
-            self.current_chain_length,
-            self.chain_links.clone(),
-            self.next_chain_entry_id,
-            self.ended_chains.clone(),
-            self.reward_unlocks.clone(),
-        );
+        let chain_backup = self.chain_backup();
         let result = self
             .fail_reservation(id, reflection, confirmed)
             .and_then(|()| self.persist(key));
@@ -1149,17 +1198,32 @@ impl Service {
             },
             Err(error) => {
                 self.restore_reservation_mutation(reservation_backup);
-                (
-                    self.current_chain_id,
-                    self.current_chain_length,
-                    self.chain_links,
-                    self.next_chain_entry_id,
-                    self.ended_chains,
-                    self.reward_unlocks,
-                ) = chain_backup;
+                self.restore_chain_mutation(chain_backup);
                 self.durable_rejected(error)
             }
         }
+    }
+
+    fn chain_backup(&self) -> ChainMutationBackup {
+        (
+            self.current_chain_id,
+            self.current_chain_length,
+            self.chain_links.clone(),
+            self.next_chain_entry_id,
+            self.ended_chains.clone(),
+            self.reward_unlocks.clone(),
+        )
+    }
+
+    fn restore_chain_mutation(&mut self, backup: ChainMutationBackup) {
+        (
+            self.current_chain_id,
+            self.current_chain_length,
+            self.chain_links,
+            self.next_chain_entry_id,
+            self.ended_chains,
+            self.reward_unlocks,
+        ) = backup;
     }
 
     fn reservation_backup(&self) -> ReservationMutationBackup {
@@ -1315,6 +1379,7 @@ impl Service {
                     task_id: review.task_id,
                     task_title: review.task_title.clone(),
                     is_void: review.task_id == self.void_task_id,
+                    dismiss_only: !self.review_qualifies_for_chain(review),
                 }),
             recent_chain_links: self
                 .chain_links
@@ -1447,9 +1512,8 @@ impl Service {
         if self.durable_health == DurableHealthState::Degraded {
             return;
         }
-        let clock = PlatformClock::default();
-        let now = clock.monotonic_seconds().unwrap_or(self.now);
-        let wall = clock.wall_seconds().unwrap_or(self.wall);
+        let now = self.clock.monotonic_seconds().unwrap_or(self.now);
+        let wall = self.clock.wall_seconds().unwrap_or(self.wall);
         self.apply_observation(now, wall);
     }
 
@@ -1534,9 +1598,68 @@ impl Service {
                     task_title: record.task_title.clone(),
                 });
             }
+            let stopped_focus =
+                record.kind == DomainKind::Focus && record.outcome == SessionOutcome::Stopped;
+            let chain_break = stopped_focus.then(|| ChainBreakState {
+                id: self.next_chain_entry_id,
+                source: ChainBreakSource::FocusStopped,
+                reservation_entity_id: None,
+                session_id: Some(record.id),
+                task_id: record.task_id.map(TaskId::get),
+                task_title: record.task_title.clone(),
+                actual_seconds: Some(record.actual_seconds),
+                reflection: String::new(),
+                chain_entry_title: None,
+            });
             self.history.push(record);
             self.record_ended_session(self.next_event_id);
+            if let Some(chain_break) = chain_break {
+                let review_entity_id = EntityId::random();
+                self.sync
+                    .session_review_entries
+                    .insert(review_entity_id.clone(), chain_break.id);
+                self.sync.records.push(SyncRecord::in_beginning(
+                    self.sync.beginning.clone(),
+                    RecordId::random(),
+                    review_entity_id,
+                    self.next_sync_mutation_time(),
+                    RecordPayload::FocusStopped {
+                        session_entity_id: self.sync.session_entities[&self.next_event_id].clone(),
+                        void_task: chain_break.task_id.is_some()
+                            && chain_break.task_id == self.void_task_id,
+                    },
+                ));
+                self.sync.records.sort();
+                self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+                self.end_current_chain(chain_break);
+            }
             self.next_event_id = self.next_event_id.saturating_add(1);
+        }
+    }
+
+    fn commit_timer_stop(&mut self, next_task: Option<TaskId>, key: Option<&str>) -> Response {
+        let timer_backup = self.reservation_backup();
+        let chain_backup = self.chain_backup();
+        let planned = self.timer.planned_seconds();
+        let transition = self.timer.stop(self.now);
+        let result = self.apply_transition(transition, planned).and_then(|()| {
+            if let Some(task_id) = next_task {
+                self.timer
+                    .select_pending_task(task_id)
+                    .map_err(|error| error.to_string())?;
+                self.apply_deferred_task_deletions()?;
+            }
+            self.persist(key)
+        });
+        match result {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(error) => {
+                self.restore_reservation_mutation(timer_backup);
+                self.restore_chain_mutation(chain_backup);
+                self.durable_rejected(error)
+            }
         }
     }
 
@@ -1550,6 +1673,34 @@ impl Service {
         Ok(())
     }
 
+    fn review_qualifies_for_chain(&self, review: &PendingReviewState) -> bool {
+        self.history.records().iter().any(|record| {
+            record.id == review.session_id
+                && record.kind == DomainKind::Focus
+                && record.outcome == SessionOutcome::Completed
+                && record.actual_seconds >= record.planned_seconds
+        })
+    }
+
+    fn dismiss_legacy_review(&mut self, key: Option<&str>) -> Response {
+        let Some(review) = self.pending_review.as_ref() else {
+            return Self::rejected("No Pending Review is available");
+        };
+        if self.review_qualifies_for_chain(review) {
+            return Self::rejected("A Completed Round requires a Session Review");
+        }
+        let review = self.pending_review.take();
+        match self.persist(key) {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(error) => {
+                self.pending_review = review;
+                self.durable_rejected(error)
+            }
+        }
+    }
+
     fn review_success(
         &mut self,
         task_id: Option<u64>,
@@ -1557,6 +1708,15 @@ impl Service {
         chain_entry_title: Option<String>,
         reflection: Option<String>,
     ) -> Result<(), String> {
+        let Some(review) = self.pending_review.as_ref() else {
+            return Err("No Pending Review is available".into());
+        };
+        if !self.review_qualifies_for_chain(review) {
+            return Err(
+                "Only Completed Rounds can earn Chain Links. Dismiss the stopped Focus Session's Pending Review."
+                    .into(),
+            );
+        }
         let chain_entry_title = chain_entry_title
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
@@ -1566,9 +1726,7 @@ impl Service {
         if !use_void && chain_entry_title.is_some() {
             return Err("Only Void entries can have a Chain Entry Title".into());
         }
-        let Some(mut review) = self.pending_review.take() else {
-            return Err("No Pending Review is available".into());
-        };
+        let mut review = self.pending_review.take().expect("review checked above");
         if review.task_id.is_none() {
             let assigned_id = if use_void {
                 if let Some(id) = self.void_task_id {
@@ -2078,7 +2236,8 @@ impl Service {
                         .or_else(|| {
                             (chain.chain_break.id == entry_id).then(|| {
                                 (
-                                    Some(chain.chain_break.reflection.clone()),
+                                    (!chain.chain_break.reflection.is_empty())
+                                        .then(|| chain.chain_break.reflection.clone()),
                                     chain.chain_break.chain_entry_title.clone(),
                                 )
                             })
@@ -2285,6 +2444,19 @@ impl Service {
         let is_void = record
             .task_id
             .is_some_and(|id| self.void_task_id == Some(id.get()));
+        if let (Some(task_id), Some(title)) = (record.task_id, record.task_title.as_deref())
+            && !is_void
+            && !self.sync.task_entities.contains_key(&task_id.get())
+        {
+            self.record_task_creation(task_id.get(), title);
+            if self
+                .tasks
+                .get(task_id)
+                .is_ok_and(|task| task.status() == TaskStatus::Completed)
+            {
+                let _ = self.record_task_version(task_id.get());
+            }
+        }
         let task_entity_id = record
             .task_id
             .filter(|_| !is_void)
@@ -2954,8 +3126,16 @@ impl Service {
                 .as_ref()
                 .ok_or_else(|| "ended projected chain has no Chain Break".to_owned())?;
             let (source, session_id, reservation_entity_id) = match &break_review.source {
-                ProjectedChainBreakSource::SessionReview { session_entity_id } => (
-                    ChainBreakSource::SessionReview,
+                ProjectedChainBreakSource::SessionReview { session_entity_id }
+                | ProjectedChainBreakSource::FocusStopped { session_entity_id } => (
+                    if matches!(
+                        &break_review.source,
+                        ProjectedChainBreakSource::FocusStopped { .. }
+                    ) {
+                        ChainBreakSource::FocusStopped
+                    } else {
+                        ChainBreakSource::SessionReview
+                    },
                     Some(
                         self.sync
                             .session_entities
@@ -3482,29 +3662,8 @@ impl Handler for Service {
                 let transition = self.timer.resume(self.now);
                 self.apply_transition(transition, planned)
             }
-            Command::Stop => {
-                let planned = self.timer.planned_seconds();
-                let transition = self.timer.stop(self.now);
-                self.apply_transition(transition, planned)
-            }
-            Command::StopReview => {
-                let planned = self.timer.planned_seconds();
-                let transition = self.timer.stop(self.now);
-                self.apply_transition(transition, planned).and_then(|()| {
-                    let Some(record) = self.history.records().last() else {
-                        return Err("Stopped Session was not recorded".into());
-                    };
-                    if record.kind != DomainKind::Focus {
-                        return Err("Only a stopped Focus Session can enter Session Review".into());
-                    }
-                    self.pending_review = Some(PendingReviewState {
-                        session_id: record.id,
-                        actual_seconds: record.actual_seconds,
-                        task_id: record.task_id.map(TaskId::get),
-                        task_title: record.task_title.clone(),
-                    });
-                    Ok(())
-                })
+            Command::Stop | Command::StopReview => {
+                return self.commit_timer_stop(None, mutation_key.as_deref());
             }
             Command::Skip => {
                 let planned = self.timer.planned_seconds();
@@ -3685,15 +3844,7 @@ impl Handler for Service {
                         .map_err(|error| error.to_string())
                         .and_then(|()| self.apply_deferred_task_deletions())
                 } else if stop_current {
-                    let planned = self.timer.planned_seconds();
-                    let transition = self.timer.stop(self.now);
-                    self.apply_transition(transition, planned)
-                        .and_then(|()| {
-                            self.timer
-                                .select_pending_task(id)
-                                .map_err(|error| error.to_string())
-                        })
-                        .and_then(|()| self.apply_deferred_task_deletions())
+                    return self.commit_timer_stop(Some(id), mutation_key.as_deref());
                 } else {
                     Err("Current Session must be stopped before switching Task".into())
                 }
@@ -3760,6 +3911,9 @@ impl Handler for Service {
                         "average_focus_seconds": summary.average_focus_seconds(),
                     }),
                 };
+            }
+            Command::ReviewDismiss => {
+                return self.dismiss_legacy_review(mutation_key.as_deref());
             }
             Command::ReviewSuccess { reflection } => {
                 self.review_success(None, false, None, reflection)
@@ -4252,7 +4406,6 @@ impl PersistedService {
                 task_id: task_id.map(TaskId::get),
             },
         };
-        let clock = PlatformClock::default();
         let persisted = Self {
             data_format_version: 6,
             timer: PersistedTimer {
@@ -4295,7 +4448,7 @@ impl PersistedService {
                 })
                 .collect(),
             next_event_id: service.next_event_id,
-            boot_id: clock.boot_id().unwrap_or_else(|_| "unknown".into()),
+            boot_id: service.clock.boot_id().unwrap_or_else(|_| "unknown".into()),
             observed_monotonic: service.now,
             observed_wall: service.wall,
             current_chain_id: service.current_chain_id,
@@ -4321,13 +4474,14 @@ impl PersistedService {
 
     #[cfg(test)]
     fn decode(payload: &str) -> Result<Service, String> {
-        Self::decode_with_observation(payload, None)
+        Self::decode_with_observation(payload, None, std::sync::Arc::new(PlatformClock::default()))
     }
 
     #[allow(clippy::too_many_lines)]
     fn decode_with_observation(
         payload: &str,
         observation: Option<RecoveryObservation>,
+        clock: ServiceClock,
     ) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
@@ -4347,7 +4501,6 @@ impl PersistedService {
             persisted.timer.long_break_seconds,
         )
         .map_err(|error| error.to_string())?;
-        let clock = PlatformClock::default();
         let current_observation = observation.unwrap_or_else(|| RecoveryObservation {
             boot_id: clock
                 .boot_id()
@@ -4469,6 +4622,7 @@ impl PersistedService {
                 .collect::<Result<_, String>>()?,
         );
         Ok(Service {
+            clock,
             timer,
             tasks,
             history,
@@ -5783,52 +5937,40 @@ mod tests {
         assert_eq!(snapshot.action_chain.length, 1);
     }
 
-    #[test]
-    fn early_stop_enters_review_only_when_explicitly_requested() {
-        let mut service = Service::new();
-        service.handle(request(
-            Some("start-reviewed"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
+    fn complete_focus_round(service: &mut Service, key: Option<&str>, task_id: Option<u64>) {
+        if service.snapshot().kind != SessionKind::Focus {
+            assert!(matches!(
+                service.handle(request(None, Command::Skip)),
+                Response::Snapshot { .. }
+            ));
+        }
+        assert!(matches!(
+            service.handle(request(
+                key,
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id
+                },
+            )),
+            Response::Snapshot { .. }
         ));
-        service.handle(request(Some("stop-reviewed"), Command::StopReview));
-        let review = service.snapshot().pending_review.expect("pending review");
-        assert_eq!(review.actual_seconds, 0);
-
-        service.pending_review = None;
-        service.handle(request(
-            Some("start-unreviewed"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
-        ));
-        service.handle(request(Some("stop-unreviewed"), Command::Stop));
-        assert!(service.snapshot().pending_review.is_none());
-        assert_eq!(
-            service
-                .history
-                .records()
-                .last()
-                .expect("history")
-                .actual_seconds,
-            0
-        );
+        let planned = service.timer.planned_seconds();
+        let previous_end = service
+            .history
+            .records()
+            .iter()
+            .map(|record| record.ended_at)
+            .max();
+        let wall = previous_end.map_or(service.wall, |last| last.max(service.wall)) + 1;
+        service.reminders_enabled = false;
+        service.apply_observation(service.now + planned, wall);
+        assert!(service.snapshot().pending_review.is_some());
     }
 
     #[test]
     fn unattributed_review_can_use_the_protected_void_task() {
         let mut service = Service::new();
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), None);
 
         let response = service.handle(request(
             Some("void-review"),
@@ -5878,14 +6020,7 @@ mod tests {
     #[test]
     fn pending_review_identifies_an_existing_void_attribution() {
         let mut service = Service::new();
-        service.handle(request(
-            Some("first-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
-        ));
-        service.handle(request(Some("first-stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("first-start"), None);
         service.handle(request(
             Some("first-review"),
             Command::ReviewSuccessAssign {
@@ -5897,14 +6032,7 @@ mod tests {
         ));
         let void_id = service.void_task_id.expect("Void identity");
 
-        service.handle(request(
-            Some("second-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(void_id),
-            },
-        ));
-        service.handle(request(Some("second-stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("second-start"), Some(void_id));
 
         let review = service.snapshot().pending_review.expect("Pending Review");
         assert_eq!(review.task_id, Some(void_id));
@@ -5942,14 +6070,7 @@ mod tests {
                 title: "Hard slice".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
 
         assert!(matches!(
             service.handle(request(
@@ -6001,14 +6122,7 @@ mod tests {
                 title: "Stable identity".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
         let pending_id = service.pending_review.as_ref().expect("pending").session_id;
         assert!(matches!(
             service.handle(request(
@@ -6054,14 +6168,7 @@ mod tests {
                 title: "Stable task name".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
         service.handle(request(
             Some("review"),
             Command::ReviewSuccess {
@@ -6114,14 +6221,7 @@ mod tests {
                 title: "Earn reward".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
         let response = service.handle(request(
             Some("review"),
             Command::ReviewSuccess { reflection: None },
@@ -6196,14 +6296,7 @@ mod tests {
                 title: "Build chain".into(),
             },
         ));
-        service.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-success"), Some(1));
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess { reflection: None },
@@ -6218,14 +6311,7 @@ mod tests {
         ));
         assert_eq!(service.snapshot().current_chain_rewards.len(), 2);
 
-        service.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-failure"), Some(1));
         service.handle(request(
             Some("failure"),
             Command::ReviewFailure {
@@ -6262,28 +6348,14 @@ mod tests {
                 title: "Build archive details".into(),
             },
         ));
-        service.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-success"), Some(1));
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess {
                 reflection: Some("Completed the data projection".into()),
             },
         ));
-        service.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-failure"), Some(1));
         service.handle(request(
             Some("failure"),
             Command::ReviewFailure {
@@ -6326,26 +6398,12 @@ mod tests {
                 title: "Retained work".into(),
             },
         ));
-        service.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-success"), Some(1));
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess { reflection: None },
         ));
-        service.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-failure"), Some(1));
         service.handle(request(
             Some("failure"),
             Command::ReviewFailure {
@@ -6357,7 +6415,7 @@ mod tests {
         ));
         let before = service.snapshot();
         let ended_id = before.recent_ended_chains[0].id;
-        assert_eq!(before.recent_history.len(), 2);
+        assert_eq!(before.recent_history.len(), 3);
         assert_eq!(before.recent_ended_chains[0].rewards.len(), 1);
 
         let response = service.handle(request(
@@ -6368,7 +6426,7 @@ mod tests {
             panic!("delete should return the authoritative snapshot");
         };
         assert!(snapshot.recent_ended_chains.is_empty());
-        assert_eq!(snapshot.recent_history.len(), 2);
+        assert_eq!(snapshot.recent_history, before.recent_history);
         assert_eq!(
             snapshot.tasks[0].focus_seconds,
             before.tasks[0].focus_seconds
@@ -6380,7 +6438,7 @@ mod tests {
             panic!("idempotent retry should replay the authoritative snapshot");
         };
         assert!(replay.recent_ended_chains.is_empty());
-        assert_eq!(replay.recent_history.len(), 2);
+        assert_eq!(replay.recent_history, before.recent_history);
 
         assert!(matches!(
             service.handle(request(
@@ -6405,14 +6463,7 @@ mod tests {
                     title: "Durable archive".into(),
                 },
             ));
-            service.handle(request(
-                Some("start"),
-                Command::Start {
-                    kind: SessionKind::Focus,
-                    task_id: Some(1),
-                },
-            ));
-            service.handle(request(Some("stop"), Command::StopReview));
+            complete_focus_round(&mut service, Some("start"), Some(1));
             service.handle(request(
                 Some("failure"),
                 Command::ReviewFailure {
@@ -6612,14 +6663,7 @@ mod tests {
                     title: "Restart Review".into(),
                 },
             ));
-            service.handle(request(
-                Some("start-reviewed-session"),
-                Command::Start {
-                    kind: SessionKind::Focus,
-                    task_id: Some(1),
-                },
-            ));
-            service.handle(request(Some("stop-for-review"), Command::StopReview));
+            complete_focus_round(&mut service, Some("start-reviewed-session"), Some(1));
             assert!(matches!(
                 service.handle(request(
                     Some("submit-session-review"),
@@ -6784,14 +6828,7 @@ mod tests {
                 title: "Shared chain".into(),
             },
         ));
-        first.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        first.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut first, Some("start-success"), Some(1));
         first.handle(request(
             Some("review-success"),
             Command::ReviewSuccess {
@@ -6865,14 +6902,7 @@ mod tests {
             assert_eq!(entry.chain_entry_title.as_deref(), Some("corrected title"));
         }
 
-        first.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        first.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut first, Some("start-failure"), Some(1));
         first.handle(request(
             Some("review-failure"),
             Command::ReviewFailure {
@@ -6892,14 +6922,7 @@ mod tests {
             .iter()
             .map(|record| record.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        second.handle(request(
-            Some("late-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        second.handle(request(Some("late-stop"), Command::StopReview));
+        complete_focus_round(&mut second, Some("late-start"), Some(1));
         let latest_known_end = second
             .sync
             .records
@@ -6952,8 +6975,8 @@ mod tests {
             first.snapshot().recent_chain_links,
             second.snapshot().recent_chain_links
         );
-        assert_eq!(first.snapshot().recent_history.len(), 3);
-        assert_eq!(second.snapshot().recent_history.len(), 3);
+        assert_eq!(first.snapshot().recent_history.len(), 4);
+        assert_eq!(second.snapshot().recent_history.len(), 4);
         assert_eq!(first.snapshot().current_chain_rewards.len(), 1);
         assert_eq!(second.snapshot().current_chain_rewards.len(), 1);
         assert_eq!(first.snapshot().current_chain_rewards[0].state, "unlocked");
@@ -7067,14 +7090,7 @@ mod tests {
             },
         ));
         for (service, prefix) in [(&mut first, "first"), (&mut second, "second")] {
-            service.handle(request(
-                Some(prefix),
-                Command::Start {
-                    kind: SessionKind::Focus,
-                    task_id: Some(1),
-                },
-            ));
-            service.handle(request(None, Command::StopReview));
+            complete_focus_round(service, Some(prefix), Some(1));
             service.handle(request(None, Command::ReviewSuccess { reflection: None }));
         }
         let unlock_id = first
@@ -7116,14 +7132,7 @@ mod tests {
             .iter()
             .map(|record| record.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        second.handle(request(
-            Some("late-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        second.handle(request(Some("late-stop"), Command::StopReview));
+        complete_focus_round(&mut second, Some("late-start"), Some(1));
         second.handle(request(
             Some("late-failure"),
             Command::ReviewFailure {

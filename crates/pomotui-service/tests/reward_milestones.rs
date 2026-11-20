@@ -1,3 +1,5 @@
+mod support;
+
 use pomotui_protocol::{
     Command, Handler, PROTOCOL_VERSION, Request, Response, SessionKind, Snapshot,
 };
@@ -30,7 +32,13 @@ fn create(service: &mut Service, threshold: u64) -> Response {
     )
 }
 
-fn success(service: &mut Service) {
+fn success(service: &mut Service, clock: &support::ManualClock) {
+    if snapshot(service).kind != SessionKind::Focus {
+        assert!(matches!(
+            command(service, Command::Skip),
+            Response::Snapshot { .. }
+        ));
+    }
     command(
         service,
         Command::TaskCreate {
@@ -44,7 +52,7 @@ fn success(service: &mut Service) {
             task_id: Some(1),
         },
     );
-    command(service, Command::StopReview);
+    clock.advance(1);
     assert!(matches!(
         command(service, Command::ReviewSuccess { reflection: None }),
         Response::Snapshot { .. }
@@ -53,9 +61,14 @@ fn success(service: &mut Service) {
 
 #[test]
 fn creating_rewards_requires_a_threshold_above_current_chain_length() {
-    let mut service = Service::new();
-    success(&mut service);
-    success(&mut service);
+    let clock = support::ManualClock::new(1_700_000_000);
+    let mut service = Service::new_with_clock(clock.clone());
+    service.configure_reminder(false, None, 100);
+    service
+        .configure_durations(pomotui_domain::SessionDurations::new(1, 1, 1).unwrap())
+        .unwrap();
+    success(&mut service, &clock);
+    success(&mut service, &clock);
     for threshold in [0, 1, 2] {
         assert!(
             matches!(create(&mut service, threshold), Response::Error { .. }),
@@ -65,7 +78,7 @@ fn creating_rewards_requires_a_threshold_above_current_chain_length() {
     assert!(snapshot(&mut service).reward_milestones.is_empty());
     assert!(snapshot(&mut service).current_chain_rewards.is_empty());
     assert!(matches!(create(&mut service, 3), Response::Snapshot { .. }));
-    success(&mut service);
+    success(&mut service, &clock);
     assert_eq!(
         snapshot(&mut service).current_chain_rewards[0].state,
         "unlocked"
@@ -74,10 +87,15 @@ fn creating_rewards_requires_a_threshold_above_current_chain_length() {
 
 #[test]
 fn changing_threshold_cannot_unlock_a_reward_retroactively() {
-    let mut service = Service::new();
+    let clock = support::ManualClock::new(1_700_000_000);
+    let mut service = Service::new_with_clock(clock.clone());
+    service.configure_reminder(false, None, 100);
+    service
+        .configure_durations(pomotui_domain::SessionDurations::new(1, 1, 1).unwrap())
+        .unwrap();
     create(&mut service, 3);
-    success(&mut service);
-    success(&mut service);
+    success(&mut service, &clock);
+    success(&mut service, &clock);
     let id = snapshot(&mut service).reward_milestones[0].id;
     for threshold in [1, 2] {
         assert!(matches!(
@@ -109,7 +127,7 @@ fn changing_threshold_cannot_unlock_a_reward_retroactively() {
             Response::Snapshot { .. }
         ));
     }
-    success(&mut service);
+    success(&mut service, &clock);
     // Metadata edits remain possible after a reward has been earned.
     assert!(matches!(
         command(
@@ -137,12 +155,17 @@ fn deleting_a_milestone_cancels_unclaimed_rewards_across_sync_and_restart() {
     std::fs::create_dir_all(&root).unwrap();
     let db = root.join("first.db");
     let path = root.join("activity.sync");
-    let mut first = Service::open(&db).unwrap();
+    let clock = support::ManualClock::new(1_700_000_000);
+    let mut first = Service::open_with_clock(&db, clock.clone()).unwrap();
+    first.configure_reminder(false, None, 100);
+    first
+        .configure_durations(pomotui_domain::SessionDurations::new(1, 1, 1).unwrap())
+        .unwrap();
     first.enable_background_sync();
     command(&mut first, Command::SyncEnable { path: path.clone() });
     create(&mut first, 1);
     create(&mut first, 1);
-    success(&mut first);
+    success(&mut first, &clock);
     let before = snapshot(&mut first);
     let claimed_id = before.current_chain_rewards[0].id;
     let cancelled_id = before.current_chain_rewards[1].id;
@@ -173,7 +196,7 @@ fn deleting_a_milestone_cancels_unclaimed_rewards_across_sync_and_restart() {
     let records = first.sync_records_for(&path).unwrap();
     second.apply_sync_records(&path, &records).unwrap();
     drop(first);
-    let mut restarted = Service::open(&db).unwrap();
+    let mut restarted = Service::open_with_clock(&db, clock).unwrap();
     for service in [&mut restarted, &mut second] {
         let state = snapshot(service);
         assert!(state.reward_milestones.is_empty());

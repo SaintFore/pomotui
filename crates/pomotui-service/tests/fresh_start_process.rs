@@ -1,3 +1,6 @@
+#[path = "support/process.rs"]
+mod process;
+
 use pomotui_protocol::{
     Client, Command, PROTOCOL_VERSION, Request, Response, SessionKind, Snapshot,
 };
@@ -162,7 +165,7 @@ fn create_task(service: &TimerService, title: &str) -> u64 {
     task_id(service, title)
 }
 
-fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
+fn completed_review(service: &TimerService, task: u64, reflection: &str) {
     assert!(matches!(
         service.request(Command::Start {
             kind: SessionKind::Focus,
@@ -170,11 +173,7 @@ fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
         }),
         Response::Snapshot { .. }
     ));
-    std::thread::sleep(Duration::from_millis(1_100));
-    assert!(matches!(
-        service.request(Command::StopReview),
-        Response::Snapshot { .. }
-    ));
+    process::wait_for_focus_review(|| service.snapshot().pending_review.is_some());
     assert!(matches!(
         service.request(Command::ReviewSuccess {
             reflection: Some(reflection.into()),
@@ -253,7 +252,7 @@ fn fresh_start_clears_live_business_state_and_rejects_delayed_offline_work() {
     let mut first = TimerService::start(root.join("a"), 4);
     let mut second = TimerService::start(root.join("b"), 7);
     let old = create_task(&first, "old completed Task");
-    stopped_review(&first, old, "old reflection");
+    completed_review(&first, old, "old reflection");
     enable(&first, &path);
     sync_now(&first);
     let stale = std::fs::read(&path).unwrap();
@@ -266,12 +265,15 @@ fn fresh_start_clears_live_business_state_and_rejects_delayed_offline_work() {
         task_id: Some(offline),
     });
     second.request(Command::Pause);
+    assert!(matches!(
+        first.request(Command::Skip),
+        Response::Snapshot { .. }
+    ));
     first.request(Command::Start {
         kind: SessionKind::Focus,
         task_id: Some(old),
     });
-    first.request(Command::StopReview);
-    assert!(first.snapshot().pending_review.is_some());
+    process::wait_for_focus_review(|| first.snapshot().pending_review.is_some());
     assert!(matches!(
         first.request(Command::FreshStart { confirmed: false }),
         Response::Error { .. }

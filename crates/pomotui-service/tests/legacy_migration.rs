@@ -341,3 +341,73 @@ fn released_first_export_rolls_back_and_restarts_safely() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn legacy_stopped_pending_review_can_be_closed_without_earning_a_link() {
+    let root = test_root("stopped-pending-review");
+    std::fs::create_dir_all(&root).unwrap();
+    let database = root.join("pomotui.sqlite3");
+    std::fs::write(&database, RELEASED_FIXTURES[0].1).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let raw: String = connection
+        .query_row("SELECT payload FROM current_session", [], |row| row.get(0))
+        .unwrap();
+    let mut fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    // Adapt the released fixture to the stopped Pending Review shape emitted by the old command.
+    fixture["history"][5]["outcome"] = "stopped".into();
+    fixture["history"][5]["actual_seconds"] = 0.into();
+    fixture["pending_review"]["actual_seconds"] = 0.into();
+    connection
+        .execute(
+            "UPDATE current_session SET payload = ?1",
+            [fixture.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut service = Service::open(&database).unwrap();
+    let path = root.join("shared.sync");
+    std::fs::write(&path, SyncDocument::new(&[]).unwrap().to_json().unwrap()).unwrap();
+    let sync = service.handle(request(Some("enable"), Command::SyncEnable { path }));
+    assert!(matches!(sync, Response::Data { .. }), "{sync:?}");
+    let successful = service.handle(request(
+        Some("old-success"),
+        Command::ReviewSuccessAssign {
+            task_id: Some(1),
+            use_void: false,
+            chain_entry_title: None,
+            reflection: None,
+        },
+    ));
+    assert!(
+        matches!(successful, Response::Error { .. }),
+        "{successful:?}"
+    );
+    let Response::Snapshot { snapshot } = service.handle(request(None, Command::Status)) else {
+        panic!("legacy status");
+    };
+    assert!(snapshot.pending_review.unwrap().dismiss_only);
+    assert_eq!(snapshot.action_chain.length, 1);
+    let Response::Snapshot { snapshot } =
+        service.handle(request(Some("dismiss"), Command::ReviewDismiss))
+    else {
+        panic!("dismiss stopped Pending Review");
+    };
+    assert!(snapshot.pending_review.is_none());
+    assert_eq!(snapshot.action_chain.length, 1);
+    assert_eq!(snapshot.recent_history[0].outcome, "Stopped");
+    drop(service);
+
+    let mut restarted = Service::open(&database).unwrap();
+    let Response::Snapshot { snapshot } = restarted.handle(request(None, Command::Status)) else {
+        panic!("restarted status");
+    };
+    assert!(snapshot.pending_review.is_none());
+    assert_eq!(snapshot.action_chain.length, 1);
+    assert_eq!(
+        snapshot.recent_chain_links[0].chain_entry_title.as_deref(),
+        Some("Released Void work")
+    );
+    drop(restarted);
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -98,7 +98,7 @@ pub enum Overlay {
     ConfirmTaskSwitch,
     ConfirmHistoryDelete,
     ConfirmEndedChainDelete,
-    StopChoice,
+    ConfirmStop,
     ReviewVoidTitle,
     ReviewFailureReflection,
     ConfirmReviewFailure,
@@ -631,7 +631,7 @@ impl App {
                 return Some(self.emit(pomotui_protocol::Command::Skip));
             }
             InputKey::Char('X') => {
-                self.overlay = Overlay::StopChoice;
+                self.overlay = Overlay::ConfirmStop;
             }
             InputKey::Char(' ') | InputKey::AltSpace if self.view == View::History => {
                 self.toggle_history_mark();
@@ -690,6 +690,12 @@ impl App {
                 InputKey::Char('?') => {
                     self.overlay = Overlay::Help;
                     None
+                }
+                _ => None,
+            },
+            Overlay::PendingReview if self.legacy_review_pending() => match key {
+                InputKey::Char('d' | 'D') | InputKey::Enter => {
+                    Some(self.emit(pomotui_protocol::Command::ReviewDismiss))
                 }
                 _ => None,
             },
@@ -1020,9 +1026,14 @@ impl App {
                 }
                 _ => None,
             },
-            Overlay::StopChoice => match key {
-                InputKey::Char('r' | 'R') => Some(self.emit(pomotui_protocol::Command::StopReview)),
-                InputKey::Char('n' | 'N') => Some(self.emit(pomotui_protocol::Command::Stop)),
+            Overlay::ConfirmStop => match key {
+                InputKey::Char('y' | 'Y') | InputKey::Enter => {
+                    Some(self.emit(pomotui_protocol::Command::Stop))
+                }
+                InputKey::Char('n' | 'N') => {
+                    self.overlay = Overlay::None;
+                    None
+                }
                 _ => None,
             },
             Overlay::ConfirmReviewFailure => match key {
@@ -1148,11 +1159,29 @@ impl App {
             .and_then(|snapshot| snapshot.tasks.get(self.selected_task))
     }
 
+    fn legacy_review_pending(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.pending_review.as_ref())
+            .is_some_and(|review| review.dismiss_only)
+    }
+
+    fn active_focus(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.kind == SessionKind::Focus
+                && matches!(snapshot.state.as_str(), "running" | "paused")
+        })
+    }
+
     fn submit_successful_review(&mut self) -> Option<Action> {
         let review = self
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.pending_review.as_ref())?;
+        if review.dismiss_only {
+            self.overlay = Overlay::PendingReview;
+            return None;
+        }
         let already_attributed = review.task_id.is_some();
         let use_void = review.is_void
             || (!already_attributed
@@ -1523,7 +1552,7 @@ impl App {
             }
             PaletteCommand::Toggle => self.toggle_session(),
             PaletteCommand::Stop => {
-                self.overlay = Overlay::StopChoice;
+                self.overlay = Overlay::ConfirmStop;
                 None
             }
             PaletteCommand::Skip => Some(self.emit(pomotui_protocol::Command::Skip)),
@@ -2182,7 +2211,7 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                     .break_chain_entry_title
                     .as_deref()
                     .or(chain.break_task_title.as_deref())
-                    .unwrap_or(text(language, "Reservation", "预约"));
+                    .unwrap_or_else(|| chain_break_fallback(chain.break_source, language));
                 let style = if index == app.archive_cursor {
                     Style::default()
                         .fg(colors.background)
@@ -2196,14 +2225,20 @@ fn chain_archive_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colo
                         "{marker} {} {} · {title} · {}",
                         text(language, "Length", "长度"),
                         chain.length,
-                        if chain.break_source
-                            == pomotui_protocol::ChainBreakSource::ReservationReview
-                        {
-                            text(language, "Reservation failure", "预约失败").into()
-                        } else {
-                            chain
+                        match chain.break_source {
+                            pomotui_protocol::ChainBreakSource::ReservationReview => {
+                                text(language, "Reservation failure", "预约失败").into()
+                            }
+                            pomotui_protocol::ChainBreakSource::FocusStopped => format!(
+                                "{} · {}",
+                                text(language, "Focus stopped early", "专注提前停止"),
+                                chain
+                                    .break_actual_seconds
+                                    .map_or_else(|| "—".into(), chain_duration)
+                            ),
+                            pomotui_protocol::ChainBreakSource::SessionReview => chain
                                 .break_actual_seconds
-                                .map_or_else(|| "—".into(), chain_duration)
+                                .map_or_else(|| "—".into(), chain_duration),
                         }
                     ),
                     style,
@@ -2297,16 +2332,22 @@ fn chain_archive_detail_view(frame: &mut Frame<'_>, area: Rect, app: &App, color
                 .break_chain_entry_title
                 .as_deref()
                 .or(chain.break_task_title.as_deref())
-                .unwrap_or(text(language, "Reservation", "预约"));
+                .unwrap_or_else(|| chain_break_fallback(chain.break_source, language));
             lines.push(Line::from(Span::styled(
                 format!(
                     "{} └─ {}. {} · {break_title} · {}",
                     if selected { "›" } else { " " },
                     index + 1,
-                    if chain.break_source == pomotui_protocol::ChainBreakSource::ReservationReview {
-                        text(language, "RESERVATION FAILURE", "预约失败")
-                    } else {
-                        text(language, "CHAIN BREAK", "行动链中断")
+                    match chain.break_source {
+                        pomotui_protocol::ChainBreakSource::ReservationReview => {
+                            text(language, "RESERVATION FAILURE", "预约失败")
+                        }
+                        pomotui_protocol::ChainBreakSource::FocusStopped => {
+                            text(language, "FOCUS STOPPED EARLY", "专注提前停止")
+                        }
+                        pomotui_protocol::ChainBreakSource::SessionReview => {
+                            text(language, "CHAIN BREAK", "行动链中断")
+                        }
                     },
                     chain
                         .break_actual_seconds
@@ -3306,6 +3347,17 @@ fn human_duration_precise(seconds: u64) -> String {
     }
 }
 
+fn chain_break_fallback(
+    source: pomotui_protocol::ChainBreakSource,
+    language: Language,
+) -> &'static str {
+    if source == pomotui_protocol::ChainBreakSource::ReservationReview {
+        text(language, "Reservation", "预约")
+    } else {
+        text(language, "No Task", "无任务")
+    }
+}
+
 fn chain_duration(seconds: u64) -> String {
     let minutes = seconds / 60;
     let remainder = seconds % 60;
@@ -3678,7 +3730,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colo
         | Overlay::ConfirmTaskSwitch
         | Overlay::ConfirmHistoryDelete
         | Overlay::ConfirmEndedChainDelete
-        | Overlay::StopChoice
+        | Overlay::ConfirmStop
         | Overlay::ReviewVoidTitle
         | Overlay::ReviewFailureReflection
         | Overlay::EditReflection
@@ -3725,7 +3777,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, colors: Colo
         Overlay::ConfirmEndedChainDelete => {
             confirm_ended_chain_delete_overlay(frame, modal, app, colors);
         }
-        Overlay::StopChoice => stop_choice_overlay(frame, modal, app, colors),
+        Overlay::ConfirmStop => confirm_stop_overlay(frame, modal, app, colors),
         Overlay::ConfirmReviewFailure => confirm_review_failure_overlay(frame, modal, app, colors),
         Overlay::ConfirmRewardDelete => {
             confirm_reward_delete_overlay(frame, modal, app, colors);
@@ -3848,8 +3900,16 @@ fn pending_review_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: 
     };
     let task = review.task_title.as_deref().unwrap_or(text(
         app.language,
-        "No Task — choose with ↑/↓ or use Void",
-        "无任务 — 用 ↑/↓ 选择或使用 Void",
+        if review.dismiss_only {
+            "No Task"
+        } else {
+            "No Task — choose with ↑/↓ or use Void"
+        },
+        if review.dismiss_only {
+            "无任务"
+        } else {
+            "无任务 — 用 ↑/↓ 选择或使用 Void"
+        },
     ));
     let mut lines = vec![
         Line::from(Span::styled(
@@ -3865,27 +3925,40 @@ fn pending_review_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: 
         )),
         Line::from(""),
     ];
-    if review.task_id.is_none()
-        && let Some(selected) = app.selected_task()
-    {
-        lines.push(Line::from(format!(
-            "{}: {}",
-            text(app.language, "Selected Task", "所选任务"),
-            selected.title
+    if review.dismiss_only {
+        lines.push(Line::from(text(
+            app.language,
+            "Only Completed Rounds earn Chain Links.",
+            "只有完成的专注轮次才能增加行动链环节。",
         )));
+        lines.push(Line::from(text(
+            app.language,
+            "D / Enter clear review · Esc later",
+            "D / Enter 清除待复盘 · Esc 稍后",
+        )));
+    } else {
+        if review.task_id.is_none()
+            && let Some(selected) = app.selected_task()
+        {
+            lines.push(Line::from(format!(
+                "{}: {}",
+                text(app.language, "Selected Task", "所选任务"),
+                selected.title
+            )));
+        }
+        lines.extend([
+            Line::from(text(
+                app.language,
+                "S success (uses selected Task)    F failure",
+                "S 成功（使用所选任务）    F 失败",
+            )),
+            Line::from(text(
+                app.language,
+                "Esc dismiss    p reopen",
+                "Esc 暂时关闭    p 重新打开",
+            )),
+        ]);
     }
-    lines.extend([
-        Line::from(text(
-            app.language,
-            "S success (uses selected Task)    F failure",
-            "S 成功（使用所选任务）    F 失败",
-        )),
-        Line::from(text(
-            app.language,
-            "Esc dismiss    p reopen",
-            "Esc 暂时关闭    p 重新打开",
-        )),
-    ]);
     frame.render_widget(
         Paragraph::new(lines)
             .block(
@@ -3961,19 +4034,23 @@ fn confirm_review_failure_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, 
     );
 }
 
-fn stop_choice_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+fn confirm_stop_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
+    let question = if app.active_focus() {
+        text(
+            app.language,
+            "Stop now and end the Action Chain? Focus time stays in Session History.",
+            "现在停止专注并结束行动链？专注时间将保留在时段历史中。",
+        )
+    } else {
+        text(app.language, "Stop the Current Session?", "停止当前时段？")
+    };
     frame.render_widget(
         Paragraph::new(vec![
+            Line::from(question),
             Line::from(text(
                 app.language,
-                "How should this stopped Focus Session be recorded?",
-                "这次提前停止的专注时段应如何记录？",
-            )),
-            Line::from(""),
-            Line::from(text(
-                app.language,
-                "R  Stop and review    N  Stop without review    Esc  Cancel",
-                "R  停止并复盘    N  停止但不复盘    Esc  取消",
+                "Y / Enter stop · N / Esc cancel",
+                "Y / Enter 停止 · N / Esc 取消",
             )),
         ])
         .block(panel(
@@ -4591,11 +4668,15 @@ fn confirm_task_switch_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, col
                     "停止当前时段并切换到"
                 )
             )),
-            Line::from(text(
-                app.language,
-                "Elapsed focus time will remain in Session History.",
-                "已经专注的时间会保留在时段历史中。",
-            )),
+            Line::from(if app.active_focus() {
+                text(
+                    app.language,
+                    "Stopping ends the Action Chain. Focus time stays in Session History.",
+                    "停止专注将结束行动链。专注时间将保留在时段历史中。",
+                )
+            } else {
+                ""
+            }),
             Line::from(Span::styled(
                 text(
                     app.language,
@@ -5137,6 +5218,64 @@ mod tests {
     }
 
     #[test]
+    fn focus_stop_archive_shows_its_distinct_reason_in_both_languages() {
+        for language in [Language::English, Language::SimplifiedChinese] {
+            let mut state = snapshot("pending", SessionKind::Focus);
+            let mut ended = ended_chain(5, "Abandoned task", 0);
+            ended.break_source = pomotui_protocol::ChainBreakSource::FocusStopped;
+            ended.break_actual_seconds = Some(123);
+            state.recent_ended_chains = vec![ended];
+            let mut app = App::new(Some(state), Theme::RanPaperDark);
+            app.language = language;
+            app.view = View::ChainArchive;
+            app.archive_detail_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            assert!(
+                rendered.contains(text(language, "FOCUS STOPPED EARLY", "专注提前停止")),
+                "{rendered}"
+            );
+            assert!(rendered.contains("2m 3s"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn legacy_stopped_focus_review_offers_dismissal() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
+            session_id: 1,
+            actual_seconds: 13,
+            task_id: Some(1),
+            task_title: Some("Legacy work".into()),
+            is_void: false,
+            dismiss_only: true,
+        });
+        let mut app = App::new(Some(state), Theme::RanPaperDark);
+        let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("D / Enter clear review"), "{rendered}");
+        assert_eq!(app.key('s'), None);
+        assert_eq!(
+            app.key('d'),
+            Some(Action::Command(pomotui_protocol::Command::ReviewDismiss))
+        );
+    }
+
+    #[test]
     fn reservation_creation_is_unavailable_during_running_paused_or_pending_session_review() {
         for state in ["running", "paused"] {
             let mut app = App::new(
@@ -5153,6 +5292,7 @@ mod tests {
             task_id: Some(1),
             task_title: Some("Work".into()),
             is_void: false,
+            dismiss_only: false,
         });
         let mut app = App::new(Some(state), Theme::RanPaperDark);
         app.key('\u{1b}');
@@ -5555,7 +5695,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_workflows_emit_review_stop_and_reward_commands() {
+    fn chain_workflows_emit_review_and_reward_commands() {
         let mut state = snapshot("pending", SessionKind::Focus);
         state.pending_review = Some(pomotui_protocol::PendingReviewSummary {
             session_id: 9,
@@ -5563,6 +5703,7 @@ mod tests {
             task_id: Some(1),
             task_title: Some("Ship Pomotui".into()),
             is_void: false,
+            dismiss_only: false,
         });
         state.current_chain_rewards = vec![pomotui_protocol::RewardUnlockSummary {
             id: 4,
@@ -5600,11 +5741,28 @@ mod tests {
                 budget: None,
             }))
         );
-        app.handle_key(InputKey::Char('X'));
-        assert_eq!(app.overlay, Overlay::StopChoice);
+    }
+
+    #[test]
+    fn stopping_an_active_focus_session_warns_that_it_ends_the_chain() {
+        let mut app = App::new(
+            Some(snapshot("running", SessionKind::Focus)),
+            Theme::VermilionPaperDark,
+        );
+        assert_eq!(app.handle_key(InputKey::Char('X')), None);
+        let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("end the Action Chain"), "{rendered}");
         assert_eq!(
-            app.handle_key(InputKey::Char('R')),
-            Some(Action::Command(pomotui_protocol::Command::StopReview))
+            app.handle_key(InputKey::Enter),
+            Some(Action::Command(pomotui_protocol::Command::Stop))
         );
     }
 
@@ -5799,6 +5957,7 @@ mod tests {
             task_id: Some(1),
             task_title: Some("Investigate review UX".into()),
             is_void: false,
+            dismiss_only: false,
         });
         let mut app = App::new(Some(state), Theme::VermilionPaperDark);
         let mut terminal = Terminal::new(TestBackend::new(72, 20)).expect("terminal");
@@ -5831,6 +5990,7 @@ mod tests {
             task_id: None,
             task_title: None,
             is_void: false,
+            dismiss_only: false,
         });
         state.tasks.push(pomotui_protocol::TaskSummary {
             id: u64::MAX,
@@ -5869,6 +6029,7 @@ mod tests {
             task_id: Some(u64::MAX),
             task_title: Some("Void".into()),
             is_void: true,
+            dismiss_only: false,
         });
         state.tasks.push(pomotui_protocol::TaskSummary {
             id: u64::MAX,
@@ -5905,6 +6066,7 @@ mod tests {
             task_id: Some(u64::MAX),
             task_title: Some("Void".into()),
             is_void: true,
+            dismiss_only: false,
         });
         let mut app = App::new(Some(state), Theme::VermilionPaperDark);
         app.overlay = Overlay::None;
@@ -5960,6 +6122,7 @@ mod tests {
             task_id: None,
             task_title: None,
             is_void: false,
+            dismiss_only: false,
         });
         let mut app = App::new(Some(state.clone()), Theme::VermilionPaperDark);
 
@@ -5981,6 +6144,7 @@ mod tests {
             task_id: None,
             task_title: None,
             is_void: false,
+            dismiss_only: false,
         });
         app.replace_snapshot(Some(state));
         assert_eq!(app.overlay, Overlay::PendingReview);

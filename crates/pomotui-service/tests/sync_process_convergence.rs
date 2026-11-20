@@ -1,3 +1,6 @@
+#[path = "support/process.rs"]
+mod process;
+
 use pomotui_protocol::{
     Client, Command, PROTOCOL_VERSION, Request, Response, SessionKind, Snapshot,
 };
@@ -163,7 +166,7 @@ fn create_task(service: &TimerService, title: &str) -> u64 {
     task_id(service, title)
 }
 
-fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
+fn completed_review(service: &TimerService, task: u64, reflection: &str) {
     assert!(matches!(
         service.request(Command::Start {
             kind: SessionKind::Focus,
@@ -171,11 +174,7 @@ fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
         }),
         Response::Snapshot { .. }
     ));
-    std::thread::sleep(Duration::from_millis(1_100));
-    assert!(matches!(
-        service.request(Command::StopReview),
-        Response::Snapshot { .. }
-    ));
+    process::wait_for_focus_review(|| service.snapshot().pending_review.is_some());
     assert!(matches!(
         service.request(Command::ReviewSuccess {
             reflection: Some(reflection.into()),
@@ -308,7 +307,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         budget: Some(12),
     });
     let first_task = create_task(&first, "Written on first");
-    stopped_review(&first, first_task, "first reflection");
+    completed_review(&first, first_task, "first reflection");
     let first_link = first.data(Command::ActionChainCurrent)["links"][0]["id"]
         .as_u64()
         .expect("first chain link");
@@ -323,9 +322,9 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     first.request(Command::RewardClaim { unlock_id: unlock });
 
     let second_task = create_task(&second, "Written on second");
-    stopped_review(&second, second_task, "second reflection");
-    assert_eq!(first.snapshot().completed_rounds, 0);
-    assert_eq!(second.snapshot().completed_rounds, 0);
+    completed_review(&second, second_task, "second reflection");
+    assert_eq!(first.snapshot().completed_rounds, 1);
+    assert_eq!(second.snapshot().completed_rounds, 1);
 
     enable(&first, &sync_path);
     rebuild(&first);
@@ -340,8 +339,8 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         normalized_shared_state(&second)
     );
     assert!(first.snapshot().today.focus_seconds >= 2);
-    assert_eq!(first.snapshot().completed_rounds, 0);
-    assert_eq!(second.snapshot().completed_rounds, 0);
+    assert_eq!(first.snapshot().completed_rounds, 1);
+    assert_eq!(second.snapshot().completed_rounds, 1);
     assert_eq!(first.snapshot().rounds_per_cycle, 4);
     assert_eq!(second.snapshot().rounds_per_cycle, 7);
 
@@ -358,15 +357,15 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         Response::Error { .. }
     ));
     let pending_task = create_task(&second, "Pending only on second");
+    assert!(matches!(
+        second.request(Command::Skip),
+        Response::Snapshot { .. }
+    ));
     second.request(Command::Start {
         kind: SessionKind::Focus,
         task_id: Some(pending_task),
     });
-    std::thread::sleep(Duration::from_millis(20));
-    second.request(Command::StopReview);
-    wait_until("second Pending Review", || {
-        second.snapshot().pending_review.is_some()
-    });
+    process::wait_for_focus_review(|| second.snapshot().pending_review.is_some());
     assert_eq!(first.snapshot().state, "paused");
     assert!(first.snapshot().pending_review.is_none());
     assert!(second.snapshot().pending_review.is_some());
@@ -452,9 +451,9 @@ fn separate_replica_directories_recover_conflict_records_and_replay() {
     let first_path = root.join("first/transport/custom.sync");
     let second_path = root.join("second/transport/custom.sync");
     let task = create_task(&first, "Offline first");
-    stopped_review(&first, task, "first review");
+    completed_review(&first, task, "first review");
     let task = create_task(&second, "Offline second");
-    stopped_review(&second, task, "second review");
+    completed_review(&second, task, "second review");
     enable(&first, &first_path);
     rebuild(&first);
     enable(&second, &second_path);

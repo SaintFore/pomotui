@@ -58,6 +58,7 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["task", "delete", id] => Command::TaskDelete { id: parse_id(id)? },
         ["history"] => Command::History,
         ["summary"] => Command::Summary,
+        ["review", "dismiss"] => Command::ReviewDismiss,
         ["review", "success"] => Command::ReviewSuccess { reflection: None },
         ["review", "success", "--reflection", reflection] => Command::ReviewSuccess {
             reflection: Some((*reflection).into()),
@@ -145,7 +146,7 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["sync", "now"] => Command::SyncNow,
         ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
-        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|reserve [--minutes MINUTES] [--task ID|--no-task]|reservation <status|success ID|failure ID [REFLECTION] [--confirm]|cancel <success ID|failure ID [REFLECTION] [--confirm]>|minutes MINUTES>|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop|skip|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
+        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|reserve [--minutes MINUTES] [--task ID|--no-task]|reservation <status|success ID|failure ID [REFLECTION] [--confirm]|cancel <success ID|failure ID [REFLECTION] [--confirm]>|minutes MINUTES>|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop (ends the Action Chain during Focus)|skip|review <success|failure|dismiss>|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
     };
     Ok((command, json, words == ["waybar"]))
 }
@@ -240,7 +241,7 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
             "percentage": percentage(snapshot.remaining_seconds, snapshot.planned_seconds),
         })).map_err(|error| error.to_string()),
         Response::Snapshot { snapshot } => Ok(format!(
-            "{:?} {} · {} · round {}/{} · chain {}{}{}{}{}",
+            "{:?} {} · {} · round {}/{} · chain {}{}{}{}{}{}",
             snapshot.kind,
             clock(snapshot.remaining_seconds),
             snapshot.state,
@@ -254,8 +255,17 @@ pub fn render(response: &Response, json: bool, waybar: bool) -> Result<String, S
                 reservation.task_title.as_deref().unwrap_or("no task"),
                 snapshot.reservation_minutes,
             )),
-            if snapshot.pending_review.is_some() {
-                " · pending review"
+            snapshot.pending_review.as_ref().map_or("", |review| {
+                if review.dismiss_only {
+                    " · stopped Focus review pending (pomotui review dismiss)"
+                } else {
+                    " · pending review"
+                }
+            }),
+            if snapshot.recent_ended_chains.first().is_some_and(|chain| {
+                chain.break_source == pomotui_protocol::ChainBreakSource::FocusStopped
+            }) {
+                " · last Action Chain ended when Focus was stopped early"
             } else {
                 ""
             },
@@ -446,6 +456,36 @@ mod tests {
             reward_debt: vec![],
             current_chain_rewards: vec![],
         }
+    }
+
+    #[test]
+    fn cli_shows_the_focus_stop_reason_and_exposes_legacy_review_dismissal() {
+        let (command, _, _) = parse(&["review".into(), "dismiss".into()]).unwrap();
+        assert_eq!(command, Command::ReviewDismiss);
+        let mut snapshot = waybar_snapshot();
+        snapshot.recent_ended_chains = vec![pomotui_protocol::EndedChainSummary {
+            id: 2,
+            length: 1,
+            links: Vec::new(),
+            break_id: 3,
+            break_source: pomotui_protocol::ChainBreakSource::FocusStopped,
+            break_task_title: Some("Work".into()),
+            break_actual_seconds: Some(13),
+            break_reflection: String::new(),
+            break_chain_entry_title: None,
+            rewards: Vec::new(),
+        }];
+        let response = Response::Snapshot { snapshot };
+        assert!(
+            render(&response, false, false)
+                .unwrap()
+                .contains("Action Chain ended when Focus was stopped early")
+        );
+        assert!(
+            render(&response, true, false)
+                .unwrap()
+                .contains("focus_stopped")
+        );
     }
 
     #[test]
@@ -669,6 +709,7 @@ mod tests {
             task_id: Some(1),
             task_title: Some("Write tests".into()),
             is_void: false,
+            dismiss_only: false,
         });
 
         let rendered = render(&Response::Snapshot { snapshot }, false, false).expect("status");
