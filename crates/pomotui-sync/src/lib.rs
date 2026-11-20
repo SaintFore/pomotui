@@ -263,6 +263,9 @@ pub struct Record {
     pub id: RecordId,
     pub entity_id: EntityId,
     pub mutation_time: MutationInstant,
+    /// New reviews use mutation order within the same source second.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_mutation_order: bool,
     pub payload: RecordPayload,
 }
 
@@ -280,6 +283,7 @@ impl Record {
             id,
             entity_id,
             mutation_time,
+            review_mutation_order: false,
             payload,
         }
     }
@@ -295,6 +299,7 @@ impl Record {
             id,
             entity_id,
             mutation_time,
+            review_mutation_order: false,
             payload,
         }
     }
@@ -381,6 +386,7 @@ impl Document {
                     RecordPayload::FocusStopped { .. } => "stopped Focus Session break",
                     RecordPayload::DailyGoalConfigured { .. }
                     | RecordPayload::DailyGoalBoundary { .. } => "Daily Chain Goal",
+                    _ if record.review_mutation_order => "explicit Review Order",
                     _ => continue,
                 };
                 return Err(format!("{feature} requires sync document version 9"));
@@ -858,21 +864,20 @@ impl ChainEntryOrder {
 
     #[must_use]
     pub fn key(&self, record: &Record) -> Option<(i64, u8, Option<MutationInstant>, EntityId)> {
+        // Older reviews keep the identity tie-break that their tombstones use.
+        let review_time = record.review_mutation_order.then_some(record.mutation_time);
         match &record.payload {
             RecordPayload::SessionReviewed {
                 session_entity_id, ..
             } => Some((
                 *self.session_ends.get(session_entity_id)?,
                 1,
-                None,
+                review_time,
                 record.entity_id.clone(),
             )),
             RecordPayload::ReservationFailed { decided_at, .. } => {
-                Some((*decided_at, 1, None, record.entity_id.clone()))
+                Some((*decided_at, 1, review_time, record.entity_id.clone()))
             }
-            // A stop can follow a completed round in the same clock second.
-            // Keep the established identity tie-break for reviews, then replay stops
-            // in mutation order within that second.
             RecordPayload::FocusStopped {
                 session_entity_id, ..
             } => Some((
@@ -1237,6 +1242,14 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
         return Err("duplicate synchronization record identity".into());
     }
     for record in records {
+        if record.review_mutation_order
+            && !matches!(
+                record.payload,
+                RecordPayload::SessionReviewed { .. } | RecordPayload::ReservationFailed { .. }
+            )
+        {
+            return Err("explicit Review Order requires a synchronized Review".into());
+        }
         match &record.payload {
             RecordPayload::TaskVersion { title, .. } => {
                 pomotui_domain::TaskTitle::parse(title)
@@ -1566,6 +1579,8 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                     "synchronized Session Review references unknown Session identity".into(),
                 );
             };
+            // A Stopped Session Review may originate on an older Device even when
+            // its immutable record is later exchanged in a current document.
             if *kind != SessionKind::Focus || *outcome == SessionOutcome::Skipped {
                 return Err("only an ended reviewable Focus Session can be reviewed".into());
             }

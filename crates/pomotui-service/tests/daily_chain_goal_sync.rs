@@ -464,3 +464,178 @@ fn fresh_start_retires_the_goal_and_work_of_an_offline_device() {
         assert_eq!(cleared.action_chain.length, 0);
     }
 }
+
+#[test]
+fn repairing_a_cutoff_keeps_an_unclaimed_reward_in_the_later_archive() {
+    let exchange = Exchange::new();
+    let mut a = exchange.device("a", "2026-11-20T15:59:00Z");
+    let mut b = exchange.device("b", "2026-11-20T15:59:00Z");
+    a.snapshot(Command::RewardCreate {
+        name: "Two links".into(),
+        threshold: 2,
+        budget: None,
+    });
+    a.goal(2);
+    a.sync();
+    b.receive(&a.file());
+
+    a.clock.advance(61);
+    b.clock.advance(90);
+    assert_eq!(a.round().daily_chain_goal.achieved, 1);
+    b.round();
+
+    a.clock.advance(86_400 - 12);
+    assert_eq!(a.snapshot(Command::Status).recent_ended_chains.len(), 1);
+    a.round();
+    assert_eq!(a.round().current_chain_rewards[0].state, "unlocked");
+    a.snapshot(Command::StartTitle {
+        title: "End the chain".into(),
+    });
+    let stopped = a.snapshot(Command::Stop);
+    assert_eq!(
+        stopped.recent_ended_chains[0].rewards[0].state,
+        "unavailable"
+    );
+
+    b.clock.advance(86_400);
+    b.sync();
+    a.receive(&b.file());
+    b.receive(&a.file());
+    for device in [a, b] {
+        let repaired = device.restart().snapshot(Command::Status);
+        let [archive] = repaired.recent_ended_chains.as_slice() else {
+            panic!("expected the explicit stop archive");
+        };
+        assert_eq!(archive.break_source, ChainBreakSource::FocusStopped);
+        assert_eq!(archive.length, 4);
+        let [reward] = archive.rewards.as_slice() else {
+            panic!("expected the unclaimed reward in the repaired archive");
+        };
+        assert_eq!(reward.name, "Two links");
+        assert_eq!(reward.state, "unavailable");
+    }
+}
+
+#[test]
+fn a_claim_for_a_deleted_milestone_preserves_other_deleted_milestones_awards() {
+    let exchange = Exchange::new();
+    let mut a = exchange.device("a", "2026-11-20T15:59:00Z");
+    let mut b = exchange.device("b", "2026-11-20T15:59:00Z");
+    for name in ["Claimed", "Unclaimed"] {
+        a.snapshot(Command::RewardCreate {
+            name: name.into(),
+            threshold: 1,
+            budget: None,
+        });
+    }
+    let reviewed = a.round();
+    let claim_id = reviewed
+        .current_chain_rewards
+        .iter()
+        .find(|reward| reward.name == "Claimed")
+        .unwrap()
+        .id;
+    a.snapshot(Command::RewardClaim {
+        unlock_id: claim_id,
+    });
+    for milestone in reviewed.reward_milestones {
+        a.snapshot(Command::RewardDelete { id: milestone.id });
+    }
+    a.sync();
+
+    b.receive(&a.file());
+    let received = b.restart().snapshot(Command::Status);
+    assert!(received.reward_milestones.is_empty());
+    assert_eq!(received.current_chain_rewards.len(), 2);
+    for (name, state) in [("Claimed", "claimed"), ("Unclaimed", "unavailable")] {
+        assert!(
+            received
+                .current_chain_rewards
+                .iter()
+                .any(|reward| reward.name == name && reward.state == state)
+        );
+    }
+}
+
+#[test]
+fn a_new_offline_schedule_keeps_the_merged_commitment_for_the_current_day() {
+    let exchange = Exchange::new();
+    let mut a = exchange.device("a", "2026-11-20T15:59:00Z");
+    let mut b = exchange.device("b", "2026-11-21T00:00:00Z");
+    a.goal(2);
+    a.clock.advance(61);
+    a.round();
+    a.sync();
+
+    let offline = b.goal(3).daily_chain_goal;
+    assert!(offline.active.is_none());
+    assert_eq!(offline.scheduled.unwrap().effective_date, "2026-11-22");
+    b.sync();
+    a.clock.advance(28_788);
+    b.receive(&a.file());
+    a.receive(&b.file());
+
+    for device in [a, b] {
+        let mut device = device.restart();
+        let merged = device.snapshot(Command::Status).daily_chain_goal;
+        assert_eq!(merged.date, "2026-11-21");
+        assert_eq!(merged.active.unwrap().quota, 2);
+        assert_eq!(merged.achieved, 1);
+        let change = merged.scheduled.unwrap();
+        assert_eq!(change.effective_date, "2026-11-22");
+        assert_eq!(change.settings.unwrap().quota, 3);
+
+        device.clock.advance(57_601);
+        let tomorrow = device.snapshot(Command::Status);
+        let cutoff = tomorrow.recent_ended_chains[0]
+            .break_daily_chain_goal
+            .as_ref()
+            .unwrap();
+        assert_eq!((cutoff.achieved, cutoff.quota), (1, 2));
+        assert_eq!(tomorrow.daily_chain_goal.active.unwrap().quota, 3);
+    }
+}
+
+#[test]
+fn deleting_a_reservation_failure_after_a_same_second_stop_survives_sync() {
+    let exchange = Exchange::new();
+    let mut a = exchange.device("a", "2026-11-20T15:59:00Z");
+    let mut b = exchange.device("b", "2026-11-20T15:59:00Z");
+    a.round();
+    a.snapshot(Command::StartTitle {
+        title: "End the chain".into(),
+    });
+    let stopped = a.snapshot(Command::Stop);
+    let stop_id = stopped.recent_ended_chains[0].id;
+    let reservation = a
+        .snapshot(Command::Reserve {
+            minutes: None,
+            task_id: None,
+            use_current_task: false,
+        })
+        .reservation
+        .unwrap();
+    let failed = a.snapshot(Command::ReservationFailure {
+        id: reservation.id,
+        reflection: String::new(),
+        confirmed: true,
+    });
+    let [failure, stop] = failed.recent_ended_chains.as_slice() else {
+        panic!("expected both chain breaks");
+    };
+    assert_eq!(failure.break_source, ChainBreakSource::ReservationReview);
+    assert_eq!(stop.id, stop_id);
+    a.snapshot(Command::EndedChainDelete { id: failure.id });
+
+    a.sync();
+    b.receive(&a.file());
+    for device in [a, b] {
+        let observed = device.restart().snapshot(Command::Status);
+        let [archive] = observed.recent_ended_chains.as_slice() else {
+            panic!("expected the stop archive to survive");
+        };
+        assert_eq!(archive.break_source, ChainBreakSource::FocusStopped);
+        assert_eq!(archive.length, 1);
+        assert_eq!(observed.action_chain.length, 0);
+    }
+}

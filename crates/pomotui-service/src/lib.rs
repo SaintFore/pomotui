@@ -1163,7 +1163,7 @@ impl Service {
         self.sync
             .session_review_entries
             .insert(review_entity_id.clone(), entry_id);
-        self.sync.records.push(SyncRecord::in_beginning(
+        let mut record = SyncRecord::in_beginning(
             self.sync.beginning.clone(),
             RecordId::random(),
             review_entity_id,
@@ -1175,7 +1175,9 @@ impl Service {
                 task_title: reservation.task_title.clone(),
                 reflection: reflection.into(),
             },
-        ));
+        );
+        record.review_mutation_order = true;
+        self.sync.records.push(record);
         self.sync.records.sort();
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.end_current_chain(ChainBreakState {
@@ -1719,6 +1721,7 @@ impl Service {
             record.id == review.session_id
                 && record.kind == DomainKind::Focus
                 && record.outcome == SessionOutcome::Completed
+                && record.planned_seconds > 0
                 && record.actual_seconds >= record.planned_seconds
         })
     }
@@ -2008,26 +2011,30 @@ impl Service {
     fn apply_reward_projection(&mut self, projection: &RewardProjection) {
         let mut milestones = Vec::new();
         for projected in &projection.milestones {
+            let entity_id = match projected {
+                RewardMilestoneProjection::Version { entity_id, .. }
+                | RewardMilestoneProjection::Deleted { entity_id } => entity_id,
+            };
+            let id = self
+                .sync
+                .reward_milestone_entities
+                .iter()
+                .find_map(|(local, global)| (global == entity_id).then_some(*local))
+                .unwrap_or_else(|| {
+                    let id = self.next_reward_milestone_id;
+                    self.next_reward_milestone_id = id.saturating_add(1);
+                    self.sync
+                        .reward_milestone_entities
+                        .insert(id, entity_id.clone());
+                    id
+                });
             if let RewardMilestoneProjection::Version {
-                entity_id,
                 name,
                 threshold,
                 budget,
+                ..
             } = projected
             {
-                let id = self
-                    .sync
-                    .reward_milestone_entities
-                    .iter()
-                    .find_map(|(local, global)| (global == entity_id).then_some(*local))
-                    .unwrap_or_else(|| {
-                        let id = self.next_reward_milestone_id;
-                        self.next_reward_milestone_id = id.saturating_add(1);
-                        self.sync
-                            .reward_milestone_entities
-                            .insert(id, entity_id.clone());
-                        id
-                    });
                 milestones.push(RewardMilestoneState {
                     id,
                     name: name.clone(),
@@ -2060,63 +2067,76 @@ impl Service {
                 ))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        self.reward_unlocks = projection
+        let mut unlocks = projection
             .unlocks
             .iter()
             .filter_map(|projected| {
-                let chain_id = self.reward_chain(projected)?;
-                let milestone_id = self
-                    .sync
+                let (chain_id, repaired_anchor) = self.reward_chain(projected)?;
+                Some((projected, chain_id, repaired_anchor))
+            })
+            .collect::<Vec<_>>();
+        // Prefer an award that was already attached to the surviving chain.
+        unlocks.sort_by_key(|(_, _, repaired_anchor)| *repaired_anchor);
+        let mut unclaimed = std::collections::BTreeSet::new();
+        let mut reward_unlocks = Vec::new();
+        for (projected, chain_id, _) in unlocks {
+            let Some(milestone_id) =
+                self.sync
                     .reward_milestone_entities
                     .iter()
                     .find_map(|(local, global)| {
                         (global == &projected.milestone_entity_id).then_some(*local)
                     })
-                    .unwrap_or(0);
-                let reward_key = (
-                    projected.milestone_entity_id.clone(),
-                    projected.previous_chain_break_review_entity_id.clone(),
-                );
-                let id = self
-                    .sync
-                    .reward_unlock_entities
-                    .iter()
-                    .find_map(|(id, entity)| {
-                        (unlock_keys.get(entity) == Some(&reward_key)).then_some(*id)
-                    })
-                    .unwrap_or_else(|| {
-                        let id = self.next_reward_unlock_id;
-                        self.next_reward_unlock_id = id.saturating_add(1);
-                        id
-                    });
-                self.sync
-                    .reward_unlock_entities
-                    .insert(id, projected.entity_id.clone());
-                let state = if projected.claimed_at.is_some() {
-                    "claimed"
-                } else if self
-                    .reward_milestones
-                    .iter()
-                    .any(|milestone| milestone.id == milestone_id)
-                    && chain_id == self.current_chain_id
-                    && self.reward_progress(milestone_id, &reward_debt) >= projected.threshold
-                {
-                    "unlocked"
-                } else {
-                    "unavailable"
-                };
-                Some(RewardUnlockState {
-                    id,
-                    milestone_id,
-                    chain_id,
-                    name: projected.name.clone(),
-                    threshold: projected.threshold,
-                    budget: projected.budget,
-                    state: state.into(),
-                    claimed_at: projected.claimed_at,
+            else {
+                continue;
+            };
+            if projected.claimed_at.is_none() && !unclaimed.insert((milestone_id, chain_id)) {
+                continue;
+            }
+            let reward_key = (
+                projected.milestone_entity_id.clone(),
+                projected.previous_chain_break_review_entity_id.clone(),
+            );
+            let id = self
+                .sync
+                .reward_unlock_entities
+                .iter()
+                .find_map(|(id, entity)| {
+                    (unlock_keys.get(entity) == Some(&reward_key)).then_some(*id)
                 })
-            })
-            .collect();
+                .unwrap_or_else(|| {
+                    let id = self.next_reward_unlock_id;
+                    self.next_reward_unlock_id = id.saturating_add(1);
+                    id
+                });
+            self.sync
+                .reward_unlock_entities
+                .insert(id, projected.entity_id.clone());
+            let state = if projected.claimed_at.is_some() {
+                "claimed"
+            } else if self
+                .reward_milestones
+                .iter()
+                .any(|milestone| milestone.id == milestone_id)
+                && chain_id == self.current_chain_id
+                && self.reward_progress(milestone_id, &reward_debt) >= projected.threshold
+            {
+                "unlocked"
+            } else {
+                "unavailable"
+            };
+            reward_unlocks.push(RewardUnlockState {
+                id,
+                milestone_id,
+                chain_id,
+                name: projected.name.clone(),
+                threshold: projected.threshold,
+                budget: projected.budget,
+                state: state.into(),
+                claimed_at: projected.claimed_at,
+            });
+        }
+        self.reward_unlocks = reward_unlocks;
         let claimed = self
             .reward_unlocks
             .iter()
@@ -2130,7 +2150,7 @@ impl Service {
         self.unlock_eligible_rewards(&reward_debt);
     }
 
-    fn reward_chain(&self, reward: &ProjectedRewardUnlock) -> Option<u64> {
+    fn reward_chain(&self, reward: &ProjectedRewardUnlock) -> Option<(u64, bool)> {
         let anchor = reward.previous_chain_break_review_entity_id.as_ref();
         if let Some(entry) = anchor.and_then(|entity| self.sync.session_review_entries.get(entity))
             && let Some(index) = self
@@ -2138,11 +2158,12 @@ impl Service {
                 .iter()
                 .position(|chain| chain.chain_break.id == *entry)
         {
-            return Some(
+            return Some((
                 self.ended_chains
                     .get(index + 1)
                     .map_or(self.current_chain_id, |chain| chain.id),
-            );
+                false,
+            ));
         }
         let boundary = anchor.and_then(|anchor| {
             self.sync.records.iter().find(|record| {
@@ -2151,16 +2172,15 @@ impl Service {
             })
         });
         let Some(boundary) = boundary else {
-            return Some(
+            return Some((
                 self.ended_chains
                     .first()
                     .map_or(self.current_chain_id, |chain| chain.id),
-            );
+                false,
+            ));
         };
 
-        // Once the boundary is gone, requalify unclaimed rewards under the current chain's
-        // anchor. A claim stays attached to the archived or current chain containing its frontier.
-        reward.claimed_at?;
+        // A claim stays on the chain containing its frontier after the repair.
         if let Some(frontier) = &reward.claim_frontier_entity_id {
             let entry = self.sync.session_review_entries.get(frontier)?;
             return self
@@ -2173,28 +2193,32 @@ impl Service {
                         .iter()
                         .any(|link| link.id == *entry)
                         .then_some(self.current_chain_id)
-                });
+                })
+                .map(|chain_id| (chain_id, true));
         }
 
         let order = ChainEntryOrder::new(&self.sync.records);
         let boundary_key = order.key(boundary)?;
-        self.ended_chains
-            .iter()
-            .find(|chain| {
-                self.sync
-                    .session_review_entries
-                    .iter()
-                    .find(|(_, entry)| **entry == chain.chain_break.id)
-                    .and_then(|(entity, _)| {
-                        self.sync
-                            .records
-                            .iter()
-                            .filter(|record| &record.entity_id == entity)
-                            .find_map(|record| order.key(record))
-                    })
-                    .is_some_and(|key| key > boundary_key)
-            })
-            .map_or(Some(self.current_chain_id), |chain| Some(chain.id))
+        let archive = self.ended_chains.iter().find(|chain| {
+            self.sync
+                .session_review_entries
+                .iter()
+                .find(|(_, entry)| **entry == chain.chain_break.id)
+                .and_then(|(entity, _)| {
+                    self.sync
+                        .records
+                        .iter()
+                        .filter(|record| &record.entity_id == entity)
+                        .find_map(|record| order.key(record))
+                })
+                .is_some_and(|key| key > boundary_key)
+        });
+        // Keep awards on a subsequent archive. On the current chain an old, unclaimed
+        // award requalifies under the surviving anchor.
+        archive
+            .map(|chain| chain.id)
+            .or_else(|| reward.claimed_at.map(|_| self.current_chain_id))
+            .map(|chain_id| (chain_id, true))
     }
 
     fn review_failure(
@@ -2624,13 +2648,14 @@ impl Service {
         &mut self,
         review: SubmittedSessionReviewSync,
     ) -> Result<(), String> {
-        self.record_submitted_session_review_with_entity(review, EntityId::random())
+        self.record_submitted_session_review_with_entity(review, EntityId::random(), true)
     }
 
     fn record_submitted_session_review_with_entity(
         &mut self,
         review: SubmittedSessionReviewSync,
         review_entity_id: EntityId,
+        review_mutation_order: bool,
     ) -> Result<(), String> {
         let session_entity_id = self
             .sync
@@ -2653,7 +2678,7 @@ impl Service {
         self.sync
             .session_review_entries
             .insert(review_entity_id.clone(), review.entry_id);
-        self.sync.records.push(SyncRecord::in_beginning(
+        let mut record = SyncRecord::in_beginning(
             self.sync.beginning.clone(),
             RecordId::random(),
             review_entity_id,
@@ -2672,7 +2697,9 @@ impl Service {
                 reflection: review.reflection,
                 chain_entry_title: review.chain_entry_title,
             },
-        ));
+        );
+        record.review_mutation_order = review_mutation_order;
+        self.sync.records.push(record);
         self.sync.records.sort();
         Ok(())
     }
@@ -2782,7 +2809,7 @@ impl Service {
         missing_reviews.sort_by_key(|review| review.entry_id);
         let ordered_review_entities = migration_ordered_entities(missing_reviews.len())?;
         for (review, entity) in missing_reviews.into_iter().zip(ordered_review_entities) {
-            self.record_submitted_session_review_with_entity(review, entity)?;
+            self.record_submitted_session_review_with_entity(review, entity, false)?;
         }
         let missing_milestones = self
             .reward_milestones

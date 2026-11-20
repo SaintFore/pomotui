@@ -100,18 +100,35 @@ impl<'a> DailyGoalSchedule<'a> {
             .copied()
     }
 
+    fn revision_for_day(&self, zone: Tz, date: NaiveDate, start: i64) -> Option<Revision<'a>> {
+        self.revision_at(start).filter(|revision| {
+            revision
+                .settings
+                .is_some_and(|settings| settings.time_zone == zone && settings.contains(date))
+        })
+    }
+
     #[must_use]
     pub fn active_at(&self, timestamp: i64) -> Option<&'a DailyGoalPolicy> {
-        let settings = self.revision_at(timestamp)?.settings?;
-        settings
-            .contains(local_date(settings.time_zone, timestamp)?)
-            .then_some(settings)
+        self.revisions
+            .iter()
+            .filter_map(|revision| {
+                let zone = revision.settings?.time_zone;
+                let date = local_date(zone, timestamp)?;
+                self.revision_for_day(zone, date, day_start(zone, date)?)
+            })
+            .max_by_key(|revision| (revision.record.mutation_time, &revision.record.id))
+            .and_then(|revision| revision.settings)
     }
 
     /// Finds a future commitment or explicit disabling that can actually take effect.
     #[must_use]
     pub fn next_change(&self, timestamp: i64) -> Option<(i64, Tz, Option<&'a DailyGoalPolicy>)> {
         let current = self.active_at(timestamp);
+        let current_cutoff = current.and_then(|settings| {
+            let tomorrow = local_date(settings.time_zone, timestamp)?.succ_opt()?;
+            day_start(settings.time_zone, tomorrow)
+        });
         let candidates = self
             .revisions
             .iter()
@@ -125,6 +142,7 @@ impl<'a> DailyGoalSchedule<'a> {
                 };
                 (start > timestamp).then_some(start)
             })
+            .chain(current_cutoff)
             .collect::<std::collections::BTreeSet<_>>();
         for start in candidates {
             let Some(winner) = self.revision_at(start) else {
@@ -134,7 +152,8 @@ impl<'a> DailyGoalSchedule<'a> {
                 if Some(next) != current {
                     return Some((start, next.time_zone, Some(next)));
                 }
-            } else if winner.effective_at == start
+            } else if winner.settings.is_none()
+                && (winner.effective_at == start || current_cutoff == Some(start))
                 && let Some(current) = current
             {
                 return Some((start, current.time_zone, None));
@@ -311,7 +330,7 @@ impl DailyGoalSchedule<'_> {
                     let next = date.succ_opt()?;
                     let cutoff = day_start(zone, next)?;
                     if start >= revision.effective_at && start < cutoff && cutoff > through {
-                        let winner = self.revision_at(start)?;
+                        let winner = self.revision_for_day(zone, date, start)?;
                         return (winner.record.id == revision.record.id).then_some(cutoff);
                     }
                     date = next;
@@ -383,10 +402,7 @@ impl DailyGoalSchedule<'_> {
         if start >= cutoff_at || cutoff_at > through {
             return None;
         }
-        let policy = self.revision_at(start)?.settings?;
-        if policy.time_zone != zone || !policy.contains(date) {
-            return None;
-        }
+        let policy = self.revision_for_day(zone, date, start)?.settings?;
         (achieved < policy.quota).then_some(DailyGoalMiss {
             date,
             cutoff_at,
