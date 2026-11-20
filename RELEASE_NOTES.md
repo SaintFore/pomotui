@@ -1,24 +1,24 @@
-# Pomotui v0.3.1
+# Pomotui v0.4.0
 
-## Upgrade reliability
+## Daily Chain Goal
 
-- Recover configured Timer Services automatically after AUR upgrades, including
-  failed or start-limited services and switching between `pomotui` and
-  `pomotui-git`. Supported packaged installations no longer need a manual
-  `systemctl --user restart pomotui.service` after upgrading.
-- Preserve deliberately disabled services, user configuration, Current Session
-  timing, Pending Reviews, Focus Reservations, and durable history during
-  upgrades. Diagnose conflicting custom service units instead of replacing them
-  or resetting user data.
+- Set a daily Focus target in the TUI with `s` then `d`. Choose a start
+  date, an optional inclusive end date, and a time zone. The goal is off by
+  default.
+- Each Focus Session counts after it reaches the duration set when it started
+  and you review it as successful. The current Action Chain ends at midnight
+  when the goal is missed. The archive shows the date, count, and target.
+- Devices share the goal and count sessions in its time zone. A late successful
+  review can restore the Action Chain if the combined activity met the goal.
 
-## Verified Linux delivery
+## Focus Review and upgrades
 
-- Verify real Arch clean installations and upgrades, data migrations, and Ubuntu
-  24.04 archive compatibility before publishing Linux x86_64 packages.
-- Coordinate GitHub Release and both AUR channels from one release PR. Verify
-  published contents and user discovery, retain diagnostics, and resume partial
-  publications with the original verified artifacts.
-- Fix GitHub Actions artifact restoration so interrupted publications can resume
-  without rebuilding their accepted packages.
-
-macOS artifacts continue to be delivered independently of Linux verification.
+- New Chain Links require a successfully reviewed Completed Round. Pausing
+  preserves progress toward the planned duration. Stopping an unfinished Focus
+  Session ends the Action Chain and records the elapsed time.
+- Existing Chain Links and claimed rewards remain in history. If an upgrade
+  leaves a Pending Review for a previously stopped Focus Session, use the TUI
+  dismissal action or `pomotui review dismiss`.
+- Upgrade the Timer Service and frontends together to protocol v7. The new
+  Timer Service reads older sync documents and writes exchange format v9.
+  Upgrade all Devices that share an exchange file before they resume syncing.
