@@ -57,6 +57,17 @@ def fresh(name):
     manager('enable', '--now', 'pomotui.socket')
     request()
 
+def preserved_field(snapshot, field):
+    value = snapshot[field]
+    if field == 'pending_review' and value is not None:
+        return {key: item for key, item in value.items() if key != 'dismiss_only'}
+    if field == 'recent_ended_chains':
+        return [
+            {key: item for key, item in chain.items() if key != 'break_daily_chain_goal'}
+            for chain in value
+        ]
+    return value
+
 def upgrade(name):
     before = request()
     record(name + '-before', before)
@@ -76,7 +87,7 @@ def upgrade(name):
     assert after['reservation_minutes'] == 7 and after['rounds_per_cycle'] == 3
     record(name + '-identity', {'old_pid': int(pid), 'candidate_pid': int(new_pid), 'candidate_service_sha256': hashlib.sha256(Path('/usr/bin/pomotui-service').read_bytes()).hexdigest(), 'upgrade_elapsed_seconds': time.monotonic() - began})
     for field in ['action_chain', 'pending_review', 'recent_chain_links', 'recent_ended_chains', 'reward_milestones', 'current_chain_rewards', 'reward_debt']:
-        assert after[field] == before[field], (name, field, before[field], after[field])
+        assert preserved_field(after, field) == preserved_field(before, field), (name, field, before[field], after[field])
     return before, after, time.monotonic() - began
 
 def start(task):
@@ -135,11 +146,16 @@ request('stop_review')
 before, after, _ = upgrade('pending-review-and-durable-state')
 for field in ['tasks', 'recent_history']:
     assert after[field] == before[field], field
-assert after['pending_review'] is not None
+assert after['pending_review']['dismiss_only'] is True
 assert after['action_chain']['length'] == 1
 assert after['current_chain_rewards'][0]['state'] == 'claimed'
 assert after['recent_chain_links'][0]['reflection'] == 'Preserved successful work'
 assert len(after['recent_history']) == 2
+dismissed = request('review_dismiss')
+assert dismissed['pending_review'] is None
+assert dismissed['action_chain'] == after['action_chain']
+assert dismissed['current_chain_rewards'] == after['current_chain_rewards']
+record('legacy-review-dismissed', dismissed)
 
 fresh('reservation')
 task = create_task()
@@ -183,7 +199,7 @@ for version in ['v0.1.0', 'v0.2.0']:
     backup_bytes = backups[0].read_bytes()
     before, after, _ = upgrade('migration-' + version)
     for field in ['tasks', 'recent_history', 'pending_review']:
-        assert after[field] == before[field], (version, field)
+        assert preserved_field(after, field) == preserved_field(before, field), (version, field)
     assert backups[0].read_bytes() == backup_bytes
 print('PASS: released v0.1.0/v0.2.0 migrations and original backup preserved', flush=True)
 
