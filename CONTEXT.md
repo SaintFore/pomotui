@@ -13,7 +13,7 @@ An interface that displays or controls the Timer Service without owning timer pr
 _Avoid_: Timer, timer process
 
 **Current Session**:
-The single shared Running, Paused, or Pending Session on one Device. Every Timer Frontend on that Device observes and controls the same Current Session; different Devices may have independent Current Sessions, and only ended Session facts, submitted Session Reviews, and failed Reservation Reviews enter Shared Activity.
+The single shared Running, Paused, or Pending Session on one Device. Every Timer Frontend on that Device observes and controls the same Current Session; different Devices may have independent Current Sessions.
 _Avoid_: Window timer, task timer
 
 **Device**:
@@ -21,7 +21,7 @@ One Pomotui installation with its own Timer Service, Current Session, and Focus 
 _Avoid_: Account, client, computer name
 
 **Shared Activity**:
-The converged collection of ended Session facts, submitted Session Reviews, and failed Reservation Reviews from all of the user's Devices. It is the source for cross-device Session History, statistics, Action Chains, and Reward Milestones; live Current Sessions, Focus Reservations, unresolved Reservation Reviews, Focus Cycle progress, and unsubmitted Pending Reviews are not part of it.
+The converged collection of ended Session facts, submitted Session Reviews, failed Reservation Reviews, and explicit early Focus stops from all of the user's Devices. The shared Daily Chain Goal determines how that activity is evaluated for each goal day. It is the source for cross-device Session History, statistics, Action Chains, and Reward Milestones; live Current Sessions, Focus Reservations, unresolved Reservation Reviews, Focus Cycle progress, and unsubmitted Pending Reviews are not part of it.
 _Avoid_: Synced database, cloud state, backup
 
 **Synchronization Record**:
@@ -29,7 +29,7 @@ A globally identified immutable fact exchanged between Devices and retained by e
 _Avoid_: Database row, mutable event, service snapshot
 
 **Review Order**:
-The deterministic cross-device order of submitted Session Reviews and failed Reservation Reviews in Shared Activity. It decides Action Chain membership and reward progress and may be revised when an older offline review arrives, without changing the immutable content of any review.
+The deterministic cross-device order of Chain Links and Chain Breaks, including breaks projected at a Daily Chain Goal deadline. It decides Action Chain membership and reward progress and may be revised when an older offline review arrives, without changing the immutable content of any review.
 _Avoid_: File order, sync order, device order
 
 **Focus Session**:
@@ -57,20 +57,23 @@ The single system-owned Task used when a reviewed Focus Session had no Current T
 _Avoid_: Missing Task, a newly created `Void` Task, empty Task
 
 **Action Chain**:
-The user's single current sequence of successful, explicitly reviewed Focus Sessions across Shared Activity. Pomotui always maintains exactly one current Action Chain, including when its length is zero; in Review Order, each successful review appends one Chain Link while a failed Session Review or Reservation Review ends the old chain and creates a new empty current chain. A Focus Session that reaches its deadline or is stopped after starting requires Session Review. An Action Chain never expires or breaks because of midnight, elapsed days, shutdown, inactivity, Break Sessions, synchronization, or claimed rewards.
+The user's single current sequence of successful, explicitly reviewed Focus Sessions across Shared Activity, including when its length is zero. A successful Session Review appends one Chain Link in Review Order. A failed Session Review, failed Reservation Review, an explicit early Focus stop, or a missed Daily Chain Goal ends it and starts an empty Action Chain. Calendar boundaries affect the Action Chain only through a Daily Chain Goal.
 _Avoid_: Task tree, mind map, Focus Cycle
 
+**Daily Chain Goal**:
+The optional shared daily quota of successfully reviewed Completed Rounds for keeping the Action Chain across the user's Devices. It applies from its first date through its optional last date, inclusive, in a fixed shared time zone. Changes to an active quota and disabling the goal take effect from the next calendar day. Successful reviews count on the date the Completed Round ended.
+
 **Chain Link**:
-One durable successful step in an Action Chain, created only after the user reviews a Focus Session as successful. It retains a stable identity, the reviewed Focus Session's Current Task identity and title snapshot, its exact actual duration in seconds, and an optional reflection describing the work in more detail. When the Current Task is the Void Task, it also requires a Chain Entry Title. Duration is presented as one value regardless of whether the Session reached its deadline or was stopped early: whole minutes use `50m`, while a remainder uses `17m 32s`.
+One durable successful step in an Action Chain. A new Chain Link requires a Completed Round and a successful Session Review. Existing Chain Links from successfully reviewed Stopped Sessions remain valid under the rule that originally admitted them. A Chain Link retains a stable identity, the reviewed Focus Session's Current Task identity and title snapshot, its exact actual duration in seconds, and an optional Reflection. When the Current Task is the Void Task, it also requires a Chain Entry Title. Whole-minute durations use `50m`, while a remainder uses `17m 32s`.
 _Avoid_: Task, Action Node, Completed Round
 
 **Ended Chain**:
-An Action Chain that is no longer current because the user submitted a failed Session Review or Reservation Review. It retains its Chain Links, terminal Chain Break, and reward history until the user explicitly deletes the whole Ended Chain; its individual entries cannot be deleted, extended, reactivated, or merged, while any Chain Entry Title or Reflection may be revised. An Ended Chain may have zero Chain Links when a Session Review or Reservation Review fails before its first success.
+An Action Chain archived after a Chain Break. It retains its Chain Links, terminal Chain Break, and reward history until the user explicitly deletes the whole Ended Chain. Its individual entries cannot be deleted, extended, reactivated, or merged, while any Chain Entry Title or Reflection may be revised. An Ended Chain may have zero Chain Links when a Session Review or Reservation Review fails before its first success.
 _Avoid_: Deleted chain, failed Task
 
 **Chain Break**:
-The non-counting terminal record appended after a failed Session Review or Reservation Review. A Session Review break retains its Focus Session's Current Task identity, title snapshot and exact actual duration; reviewing the Void Task also requires a Chain Entry Title. A Reservation Review break identifies its reservation and has no Session or actual focus duration. Session Review breaks require a Reflection; Reservation Review breaks permit an optional Reflection. Both support a Chain Entry Title and never increase chain length.
-_Avoid_: Failed Chain Link, deleted Session, automatic failure
+The non-counting terminal record for a failed Session Review, failed Reservation Review, explicit early Focus stop, or missed Daily Chain Goal. A Session Review break retains its Focus Session's Current Task identity, title snapshot and exact actual duration. A Reservation Review break identifies its reservation. An early-stop break identifies its Stopped Session. A Daily Chain Goal break identifies the date, quota, and achieved count. Session Review breaks require a Reflection, and Reservation Review breaks permit an optional Reflection. Both support a Chain Entry Title, which is required when reviewing the Void Task.
+_Avoid_: Failed Chain Link, deleted Session
 
 **Chain Entry Title**:
 The user-controlled display title of a Chain Link or Chain Break. It initially falls back to the Task title snapshot for a regular Task, while an entry using the Void Task requires an explicit title during Session Review. Any entry's title may later be created or corrected independently without renaming its Task or changing the Session, chain membership, or review judgment.
@@ -89,15 +92,15 @@ The outstanding successful Focus Sessions needed to compensate for a claimed rew
 _Avoid_: Negative chain length, money owed, revoked reward
 
 **Fresh Start**:
-An explicit user-requested reset of all Pomotui database data, including reward debt, that establishes a new beginning for the user's Devices. Synchronization must not restore pre-reset Shared Activity from a Device retaining old data. Session duration, reservation default, sound, language, and synchronization settings are preserved, while Tasks, Session History, Action Chains, Reward Milestones, claims, debt, local reservations, and local current work start over. A Device that receives the reset discards all work belonging to its previous beginning, including work created offline before it learned about the reset, and informs the user.
+An explicit user-requested reset of all Pomotui database data, including reward debt, that establishes a new beginning for the user's Devices. Synchronization must not restore pre-reset Shared Activity from a Device retaining old data. Session duration, reservation default, sound, language, and synchronization settings are preserved, while Tasks, Session History, Action Chains, the Daily Chain Goal, Reward Milestones, claims, debt, local reservations, and local current work start over. A Device that receives the reset discards all work belonging to its previous beginning, including work created offline before it learned about the reset, and informs the user.
 _Avoid_: Sync rebuild, Ended Chain deletion, local database repair
 
 **Session Review**:
-The user's explicit judgment after a Focus Session reaches its deadline or is deliberately stopped for later review: successful or failed. A successful review appends a Chain Link; a failed review requires a Reflection and explicit confirmation that shows the ending chain length and any unlocked rewards that will become unavailable, then ends the current Action Chain. When the Session had no Current Task, Session Review must assign either a regular Task or the Void Task, and that assignment atomically updates Session History, Task focus time, statistics, and the chain entry; an already attributed Session cannot be reassigned. Once submitted, the judgment and its Session and chain identities are immutable. The Timer Service records the judgment rather than inferring success from duration, Task status, or Session Outcome. A skipped Focus Session and a Focus Session stopped without review are never reviewed.
+The user's explicit judgment after a Focus Session reaches its deadline: successful or failed. A successful review appends a Chain Link; a failed review requires a Reflection and explicit confirmation that shows the ending chain length and any unlocked rewards that will become unavailable, then ends the current Action Chain. When the Session had no Current Task, Session Review must assign either a regular Task or the Void Task, and that assignment atomically updates Session History, Task focus time, statistics, and the chain entry; an already attributed Session cannot be reassigned. Once submitted, the judgment and its Session and chain identities are immutable. The Timer Service records the judgment rather than inferring success from duration, Task status, or Session Outcome.
 _Avoid_: Automatic success, Session Outcome, Task completion
 
 **Pending Review**:
-One Focus Session that reached its deadline or was deliberately stopped for later review and whose Session Review has not yet been recorded. It remains durable when Timer Frontends close or the Timer Service restarts. A Pending Review permits Break Sessions but prevents another Focus Session from starting, so reviewed Focus Sessions cannot be reordered or skipped.
+A Completed Round awaiting Session Review. Older histories may also contain a Pending Review for a Stopped Session. It remains durable when Timer Frontends close or the Timer Service restarts. A Pending Review permits Break Sessions but prevents another Focus Session from starting, so reviewed Focus Sessions cannot be reordered or skipped.
 _Avoid_: Pending Session, Paused Session, unfinished Focus Session
 
 **Running Session**:
@@ -109,7 +112,7 @@ A Session explicitly frozen by the user with its remaining duration preserved. O
 _Avoid_: Pending Session, suspended session
 
 **Completed Round**:
-A Focus Session that reached its planned deadline. A stopped or skipped Focus Session contributes its actual focus time to history and its Current Task but does not count as a Completed Round.
+A Focus Session that ran for the full duration set when it started. A stopped or skipped Focus Session contributes its actual focus time to history and its Current Task but does not count as a Completed Round.
 _Avoid_: Completed task, elapsed session
 
 **Focus Cycle**:
@@ -129,7 +132,7 @@ The reason a Session entered Session History: it reached its planned deadline, w
 _Avoid_: Task status, timer state
 
 **Stopped Session**:
-A Session ended early without advancing the Focus Cycle or changing the next recommended session type. Its actual elapsed time remains in Session History. When stopping a Focus Session, the user explicitly chooses whether it creates a Pending Review; stopping without review has no effect on the Action Chain.
+A Session ended early without advancing the Focus Cycle or changing the next recommended session type. Its actual elapsed time remains in Session History. Actively stopping an unfinished Focus Session ends the Action Chain immediately.
 _Avoid_: Skipped Session, completed session
 
 **Skipped Session**:
