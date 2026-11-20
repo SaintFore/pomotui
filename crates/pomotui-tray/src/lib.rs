@@ -84,6 +84,7 @@ mod tests {
 
     fn make_snapshot(state: &str, kind: SessionKind, remaining: u64) -> Snapshot {
         Snapshot {
+            daily_chain_goal: pomotui_protocol::DailyChainGoalSnapshot::default(),
             reservation: None,
             reservation_minutes: 10,
             state: state.to_owned(),

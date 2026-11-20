@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real package upgrades observed through protocol v6; run only in disposable Arch."""
+"""Real package upgrades observed through the service protocol; run only in disposable Arch."""
 import hashlib
 import json
 import os
@@ -30,14 +30,25 @@ def run(*args, check=True):
 def manager(*args, check=True):
     return run('runuser', '-u', user, '--', *env, 'systemctl', '--user', *args, check=check)
 
+wire_version = 6
+
 def request(command='status', **fields):
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(8)
-        connection.connect(f'/run/user/{uid}/pomotui/pomotui.sock')
-        connection.sendall((json.dumps({'version': 6, 'idempotency_key': str(uuid.uuid4()), 'command': {'command': command, **fields}}) + '\n').encode())
-        response = json.loads(connection.makefile().readline())
-    assert response['result'] != 'error', response
-    return response.get('snapshot', response.get('value'))
+    global wire_version
+    key = str(uuid.uuid4())
+    for _ in range(2):
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(8)
+            connection.connect(f'/run/user/{uid}/pomotui/pomotui.sock')
+            message = {'version': wire_version, 'idempotency_key': key, 'command': {'command': command, **fields}}
+            connection.sendall((json.dumps(message) + '\n').encode())
+            response = json.loads(connection.makefile().readline())
+        error = response.get('error', {})
+        if error.get('code') == 'incompatible_version':
+            wire_version = error['supported']
+            continue
+        assert response['result'] != 'error', response
+        return response.get('snapshot', response.get('value'))
+    raise AssertionError(response)
 
 def record(name, value):
     (out / f'{name}.json').write_text(json.dumps(value, indent=2) + '\n')
@@ -56,6 +67,17 @@ def fresh(name):
     manager('reset-failed', 'pomotui.service', check=False)
     manager('enable', '--now', 'pomotui.socket')
     request()
+
+def preserved_field(snapshot, field):
+    value = snapshot[field]
+    if field == 'pending_review' and value is not None:
+        return {key: item for key, item in value.items() if key != 'dismiss_only'}
+    if field == 'recent_ended_chains':
+        return [
+            {key: item for key, item in chain.items() if key != 'break_daily_chain_goal'}
+            for chain in value
+        ]
+    return value
 
 def upgrade(name):
     before = request()
@@ -76,7 +98,7 @@ def upgrade(name):
     assert after['reservation_minutes'] == 7 and after['rounds_per_cycle'] == 3
     record(name + '-identity', {'old_pid': int(pid), 'candidate_pid': int(new_pid), 'candidate_service_sha256': hashlib.sha256(Path('/usr/bin/pomotui-service').read_bytes()).hexdigest(), 'upgrade_elapsed_seconds': time.monotonic() - began})
     for field in ['action_chain', 'pending_review', 'recent_chain_links', 'recent_ended_chains', 'reward_milestones', 'current_chain_rewards', 'reward_debt']:
-        assert after[field] == before[field], (name, field, before[field], after[field])
+        assert preserved_field(after, field) == preserved_field(before, field), (name, field, before[field], after[field])
     return before, after, time.monotonic() - began
 
 def start(task):
@@ -99,12 +121,13 @@ assert -1 <= before['remaining_seconds'] - after['remaining_seconds'] <= downtim
 remaining = after['remaining_seconds']
 time.sleep(2)
 assert request()['remaining_seconds'] < remaining
-# The public live snapshot has no Session ID. Ending the continued session must
-# yield one attributed History record, whose ID is retained by Pending Review.
-ended = request('stop_review')
+# Stopping the recovered Focus Session records its elapsed time and chain break.
+ended = request('stop')
 assert len(ended['recent_history']) == 1
-assert ended['pending_review']['session_id'] == ended['recent_history'][0]['id']
-assert ended['pending_review']['task_id'] == task
+assert ended['recent_history'][0]['task_title'] == 'Upgrade acceptance work'
+assert request('history')[0]['task_id'] == task
+assert ended['pending_review'] is None
+assert ended['recent_ended_chains'][0]['break_source'] == 'focus_stopped'
 record('running-ended', ended)
 
 fresh('paused')
@@ -134,11 +157,16 @@ request('stop_review')
 before, after, _ = upgrade('pending-review-and-durable-state')
 for field in ['tasks', 'recent_history']:
     assert after[field] == before[field], field
-assert after['pending_review'] is not None
+assert after['pending_review']['dismiss_only'] is True
 assert after['action_chain']['length'] == 1
 assert after['current_chain_rewards'][0]['state'] == 'claimed'
 assert after['recent_chain_links'][0]['reflection'] == 'Preserved successful work'
 assert len(after['recent_history']) == 2
+dismissed = request('review_dismiss')
+assert dismissed['pending_review'] is None
+assert dismissed['action_chain'] == after['action_chain']
+assert dismissed['current_chain_rewards'] == after['current_chain_rewards']
+record('legacy-review-dismissed', dismissed)
 
 fresh('reservation')
 task = create_task()
@@ -182,7 +210,7 @@ for version in ['v0.1.0', 'v0.2.0']:
     backup_bytes = backups[0].read_bytes()
     before, after, _ = upgrade('migration-' + version)
     for field in ['tasks', 'recent_history', 'pending_review']:
-        assert after[field] == before[field], (version, field)
+        assert preserved_field(after, field) == preserved_field(before, field), (version, field)
     assert backups[0].read_bytes() == backup_bytes
 print('PASS: released v0.1.0/v0.2.0 migrations and original backup preserved', flush=True)
 

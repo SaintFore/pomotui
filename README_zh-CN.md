@@ -175,7 +175,7 @@ pomotui task list
 pomotui start focus --task 1
 pomotui pause
 pomotui resume
-pomotui stop
+# 等专注会话跑满设定时长。
 pomotui review success --reflection "完成了垂直切片"
 pomotui chain
 ```
@@ -184,8 +184,9 @@ pomotui chain
 `summary` 以及完整的任务生命周期：`create/rename/complete/reopen/delete`。
 与脚本集成时对 status、history 等命令使用 `--json`。
 
-使用 `stop --review` 将提前结束的专注会话送去复盘，或 `stop --no-review`
-记录但不影响行动链条。失败的复盘需要复盘内容：
+专注会话跑满设定时长并复盘成功后，行动链条才增加一环。暂停后可以恢复计时，
+继续完成这一场。用 `stop` 停止当前计时。提前停止专注会结束行动链条，已经
+专注的时间仍会记入会话历史。复盘失败时需要填写复盘内容。
 
 ```sh
 pomotui review failure "被打断，丢失了思路"
@@ -197,6 +198,18 @@ pomotui reward claim 1
 
 当复盘的会话没有任务时，用 `--task ID` 分配，或用 `--void "链条条目标题"`。
 使用 `--json` 获取稳定的内部标识符，用于编辑条目或领取奖励。
+
+## 设置每日保链
+
+在 TUI 中按 `s` 再按 `d`。输入每天要完成并复盘成功的轮次数。按 `Tab`
+切换字段，用方向键选择日期，按 `[` 或 `]` 翻月。默认从所选时区的明天开始。
+结束日期当天也要达标，留空则持续启用。
+
+每日保链默认关闭。开启后，链条和今日页面会显示目标进度。当天未达标时，
+系统会在所选时区的午夜结束行动链条，归档会显示日期、完成次数和目标。
+修改生效中的目标或关闭模式都从次日开始。复盘成功后，次数计入专注跑满的那一天。
+开启同步时，各设备共用目标和时区。如果离线设备补传的成功复盘让当日合计达标，
+行动链条会恢复。
 
 ## 预约专注
 

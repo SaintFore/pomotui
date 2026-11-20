@@ -6,7 +6,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
-pub const FORMAT_VERSION: u16 = 8;
+mod daily_chain_goal;
+pub use daily_chain_goal::{
+    DailyGoalCredit, DailyGoalMiss, DailyGoalPolicy, DailyGoalSchedule, Tz, daily_goal_entity,
+    day_start, local_date,
+};
+
+pub const FORMAT_VERSION: u16 = 9;
 const FORMAT_NAME: &str = "pomotui.sync";
 
 macro_rules! identity {
@@ -197,6 +203,11 @@ pub enum RecordPayload {
         reflection: Option<String>,
         chain_entry_title: Option<String>,
     },
+    FocusStopped {
+        session_entity_id: EntityId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        void_task: bool,
+    },
     ReservationFailed {
         reservation_entity_id: EntityId,
         decided_at: i64,
@@ -204,6 +215,15 @@ pub enum RecordPayload {
         task_title: Option<String>,
         /// Optional user explanation; empty means none in document version 8.
         reflection: String,
+    },
+    DailyGoalConfigured {
+        effective_at: i64,
+        settings: Option<DailyGoalPolicy>,
+    },
+    DailyGoalBoundary {
+        date: chrono::NaiveDate,
+        cutoff_at: i64,
+        time_zone: String,
     },
     ChainEntryVersion {
         reflection: Option<String>,
@@ -243,6 +263,9 @@ pub struct Record {
     pub id: RecordId,
     pub entity_id: EntityId,
     pub mutation_time: MutationInstant,
+    /// New reviews use mutation order within the same source second.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_mutation_order: bool,
     pub payload: RecordPayload,
 }
 
@@ -260,6 +283,7 @@ impl Record {
             id,
             entity_id,
             mutation_time,
+            review_mutation_order: false,
             payload,
         }
     }
@@ -275,6 +299,7 @@ impl Record {
             id,
             entity_id,
             mutation_time,
+            review_mutation_order: false,
             payload,
         }
     }
@@ -332,7 +357,7 @@ impl Document {
         if document.format != FORMAT_NAME {
             return Err("unsupported sync document format".into());
         }
-        if !matches!(document.version, 4 | 5 | 6 | 7 | FORMAT_VERSION) {
+        if !matches!(document.version, 4 | 5 | 6 | 7 | 8 | FORMAT_VERSION) {
             return Err(format!(
                 "unsupported sync document version {}; upgrade this device’s Timer Service to read this exchange file",
                 document.version
@@ -354,6 +379,18 @@ impl Document {
                 .any(|record| matches!(record.payload, RecordPayload::ReservationFailed { .. }))
         {
             return Err("reservation failure requires sync document version 8".into());
+        }
+        if document.version < 9 {
+            for record in &document.records {
+                let feature = match record.payload {
+                    RecordPayload::FocusStopped { .. } => "stopped Focus Session break",
+                    RecordPayload::DailyGoalConfigured { .. }
+                    | RecordPayload::DailyGoalBoundary { .. } => "Daily Chain Goal",
+                    _ if record.review_mutation_order => "explicit Review Order",
+                    _ => continue,
+                };
+                return Err(format!("{feature} requires sync document version 9"));
+            }
         }
         validate_records(&document.records)?;
         if document.integrity.record_count != document.records.len() {
@@ -538,12 +575,14 @@ pub enum RewardMilestoneProjection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectedRewardUnlock {
+    pub entity_id: EntityId,
     pub milestone_entity_id: EntityId,
     pub previous_chain_break_review_entity_id: Option<EntityId>,
     pub name: String,
     pub threshold: u64,
     pub budget: Option<u64>,
     pub claimed_at: Option<i64>,
+    pub claim_frontier_entity_id: Option<EntityId>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -573,7 +612,9 @@ pub struct ProjectedSessionReview {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProjectedChainBreakSource {
     SessionReview { session_entity_id: EntityId },
+    FocusStopped { session_entity_id: EntityId },
     ReservationReview { reservation_entity_id: EntityId },
+    DailyChainGoal(DailyGoalMiss),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -710,7 +751,7 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
         })
         .collect();
     let mut unlocks = BTreeMap::<RewardUnlockKey<'_>, ProjectedRewardUnlock>::new();
-    let mut claims = BTreeMap::<RewardUnlockKey<'_>, i64>::new();
+    let mut claims = BTreeMap::new();
     for record in records {
         match &record.payload {
             RecordPayload::RewardUnlocked {
@@ -728,6 +769,7 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
                     continue;
                 }
                 unlocks.entry(key).or_insert_with(|| ProjectedRewardUnlock {
+                    entity_id: record.entity_id.clone(),
                     milestone_entity_id: milestone_entity_id.clone(),
                     previous_chain_break_review_entity_id: previous_chain_break_review_entity_id
                         .clone(),
@@ -735,31 +777,40 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
                     threshold: *threshold,
                     budget: *budget,
                     claimed_at: None,
+                    claim_frontier_entity_id: None,
                 });
             }
             RecordPayload::RewardClaimed {
                 milestone_entity_id,
                 previous_chain_break_review_entity_id,
                 claimed_at,
-                ..
+                evidence,
             } => {
                 if deleted_chain_anchors.contains(&previous_chain_break_review_entity_id.as_ref()) {
                     continue;
                 }
+                let claim = (
+                    *claimed_at,
+                    &record.id,
+                    evidence
+                        .as_ref()
+                        .map(|evidence| &evidence.frontier_review_entity_id),
+                );
                 claims
                     .entry((
                         milestone_entity_id,
                         previous_chain_break_review_entity_id.as_ref(),
                     ))
-                    .and_modify(|current| *current = (*current).min(*claimed_at))
-                    .or_insert(*claimed_at);
+                    .and_modify(|current| *current = claim.min(*current))
+                    .or_insert(claim);
             }
             _ => {}
         }
     }
-    for (key, claimed_at) in claims {
+    for (key, (claimed_at, _, frontier)) in claims {
         if let Some(unlock) = unlocks.get_mut(&key) {
             unlock.claimed_at = Some(claimed_at);
+            unlock.claim_frontier_entity_id = frontier.cloned();
         }
     }
     RewardProjection {
@@ -775,9 +826,18 @@ impl RecordPayload {
     pub const fn chain_judgment(&self) -> Option<SessionReviewJudgment> {
         match self {
             Self::SessionReviewed { judgment, .. } => Some(*judgment),
-            Self::ReservationFailed { .. } => Some(SessionReviewJudgment::Failed),
+            Self::ReservationFailed { .. } | Self::FocusStopped { .. } => {
+                Some(SessionReviewJudgment::Failed)
+            }
             _ => None,
         }
+    }
+}
+
+fn orderable_chain_judgment(payload: &RecordPayload) -> Option<SessionReviewJudgment> {
+    match payload {
+        RecordPayload::DailyGoalBoundary { .. } => Some(SessionReviewJudgment::Failed),
+        _ => payload.chain_judgment(),
     }
 }
 
@@ -803,27 +863,50 @@ impl ChainEntryOrder {
     }
 
     #[must_use]
-    pub fn key(&self, record: &Record) -> Option<(i64, EntityId)> {
+    pub fn key(&self, record: &Record) -> Option<(i64, u8, Option<MutationInstant>, EntityId)> {
+        // Older reviews keep the identity tie-break that their tombstones use.
+        let review_time = record.review_mutation_order.then_some(record.mutation_time);
         match &record.payload {
             RecordPayload::SessionReviewed {
                 session_entity_id, ..
             } => Some((
                 *self.session_ends.get(session_entity_id)?,
+                1,
+                review_time,
                 record.entity_id.clone(),
             )),
             RecordPayload::ReservationFailed { decided_at, .. } => {
-                Some((*decided_at, record.entity_id.clone()))
+                Some((*decided_at, 1, review_time, record.entity_id.clone()))
+            }
+            RecordPayload::FocusStopped {
+                session_entity_id, ..
+            } => Some((
+                *self.session_ends.get(session_entity_id)?,
+                1,
+                Some(record.mutation_time),
+                record.entity_id.clone(),
+            )),
+            RecordPayload::DailyGoalBoundary { cutoff_at, .. } => {
+                Some((*cutoff_at, 0, None, record.entity_id.clone()))
             }
             _ => None,
         }
     }
 }
 
-/// Projects immutable Session Reviews in source-Session end order. Session Review identity is
-/// the stable tie-breaker, so arrival order can never affect chain boundaries.
+/// Projects immutable Chain Entries in source-Session end or Reservation Review order.
+#[must_use]
+pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
+    project_session_reviews_with_daily_goal(records, &[])
+}
+
+/// Projects Chain Entries together with the current interpretation of goal misses.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
+pub fn project_session_reviews_with_daily_goal(
+    records: &[Record],
+    misses: &[DailyGoalMiss],
+) -> SessionReviewProjection {
     let order = ChainEntryOrder::new(records);
     let mut entry_versions = BTreeMap::<&EntityId, &Record>::new();
     let mut deleted_intervals = Vec::new();
@@ -848,30 +931,39 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
             _ => {}
         }
     }
+    let sessions = records
+        .iter()
+        .filter(|record| matches!(record.payload, RecordPayload::SessionEnded { .. }))
+        .map(|record| (&record.entity_id, &record.payload))
+        .collect::<BTreeMap<_, _>>();
+    let edited_text = |entity_id: &EntityId| {
+        entry_versions
+            .get(entity_id)
+            .and_then(|version| match &version.payload {
+                RecordPayload::ChainEntryVersion {
+                    reflection,
+                    chain_entry_title,
+                } => Some((reflection.clone(), chain_entry_title.clone())),
+                _ => None,
+            })
+    };
     let mut reviews = records
         .iter()
-        .filter_map(|record| match &record.payload {
-            RecordPayload::SessionReviewed {
-                session_entity_id,
-                judgment,
-                task_entity_id,
-                task_kind,
-                task_title,
-                actual_seconds,
-                reflection,
-                chain_entry_title,
-            } => {
-                let (reflection, chain_entry_title) = entry_versions
-                    .get(&record.entity_id)
-                    .and_then(|version| match &version.payload {
-                        RecordPayload::ChainEntryVersion {
-                            reflection,
-                            chain_entry_title,
-                        } => Some((reflection.clone(), chain_entry_title.clone())),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| (reflection.clone(), chain_entry_title.clone()));
-                Some((order.key(record)?.0, record.entity_id.clone(), {
+        .filter_map(|record| {
+            let key = order.key(record)?;
+            let entry = match &record.payload {
+                RecordPayload::SessionReviewed {
+                    session_entity_id,
+                    judgment,
+                    task_entity_id,
+                    task_kind,
+                    task_title,
+                    actual_seconds,
+                    reflection,
+                    chain_entry_title,
+                } => {
+                    let (reflection, chain_entry_title) = edited_text(&record.entity_id)
+                        .unwrap_or_else(|| (reflection.clone(), chain_entry_title.clone()));
                     let review = ProjectedSessionReview {
                         review_entity_id: record.entity_id.clone(),
                         record_id: record.id.clone(),
@@ -889,30 +981,18 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                     } else {
                         Err(review.into())
                     }
-                }))
-            }
-            RecordPayload::ReservationFailed {
-                reservation_entity_id,
-                decided_at,
-                task_entity_id,
-                task_title,
-                reflection,
-            } => {
-                let (reflection, chain_entry_title) = entry_versions
-                    .get(&record.entity_id)
-                    .and_then(|version| match &version.payload {
-                        RecordPayload::ChainEntryVersion {
-                            reflection,
-                            chain_entry_title,
-                        } => Some((reflection.clone(), chain_entry_title.clone())),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| {
-                        ((!reflection.is_empty()).then(|| reflection.clone()), None)
-                    });
-                Some((
-                    *decided_at,
-                    record.entity_id.clone(),
+                }
+                RecordPayload::ReservationFailed {
+                    reservation_entity_id,
+                    task_entity_id,
+                    task_title,
+                    reflection,
+                    ..
+                } => {
+                    let (reflection, chain_entry_title) = edited_text(&record.entity_id)
+                        .unwrap_or_else(|| {
+                            ((!reflection.is_empty()).then(|| reflection.clone()), None)
+                        });
                     Err(ProjectedChainBreak {
                         review_entity_id: record.entity_id.clone(),
                         source: ProjectedChainBreakSource::ReservationReview {
@@ -924,38 +1004,105 @@ pub fn project_session_reviews(records: &[Record]) -> SessionReviewProjection {
                         actual_seconds: None,
                         reflection,
                         chain_entry_title,
-                    }),
-                ))
-            }
-            _ => None,
+                    })
+                }
+                RecordPayload::FocusStopped {
+                    session_entity_id,
+                    void_task,
+                } => {
+                    let RecordPayload::SessionEnded {
+                        task_entity_id,
+                        task_title,
+                        actual_seconds,
+                        ..
+                    } = sessions.get(session_entity_id)?
+                    else {
+                        return None;
+                    };
+                    let (reflection, chain_entry_title) =
+                        edited_text(&record.entity_id).unwrap_or_default();
+                    Err(ProjectedChainBreak {
+                        review_entity_id: record.entity_id.clone(),
+                        source: ProjectedChainBreakSource::FocusStopped {
+                            session_entity_id: session_entity_id.clone(),
+                        },
+                        task_entity_id: task_entity_id.clone(),
+                        task_kind: void_task.then_some(ReviewedTaskKind::SystemVoid),
+                        task_title: if *void_task {
+                            Some("Void".into())
+                        } else {
+                            task_title.clone()
+                        },
+                        actual_seconds: Some(*actual_seconds),
+                        reflection,
+                        chain_entry_title,
+                    })
+                }
+                _ => return None,
+            };
+            Some((key, entry))
         })
         .collect::<Vec<_>>();
-    reviews.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    let review_positions = reviews
-        .iter()
-        .enumerate()
-        .map(|(index, (_, entity_id, _))| (entity_id, index))
-        .collect::<BTreeMap<_, _>>();
-    let mut deleted_positions = std::collections::BTreeSet::new();
-    for (previous_break, deleted_break) in deleted_intervals {
-        let start = previous_break
-            .and_then(|identity| review_positions.get(identity).copied())
-            .map_or(0, |index| index.saturating_add(1));
-        if let Some(end) = review_positions.get(deleted_break).copied() {
-            deleted_positions.extend(start..=end);
+    let beginning = records.first().map(|record| &record.beginning);
+    if let Some(beginning) = beginning {
+        for miss in misses {
+            let boundary = miss.boundary(beginning);
+            let (reflection, chain_entry_title) =
+                edited_text(&boundary.entity_id).unwrap_or_default();
+            if let Some(key) = order.key(&boundary) {
+                reviews.push((
+                    key,
+                    Err(ProjectedChainBreak {
+                        review_entity_id: boundary.entity_id,
+                        source: ProjectedChainBreakSource::DailyChainGoal(miss.clone()),
+                        task_entity_id: None,
+                        task_kind: None,
+                        task_title: None,
+                        actual_seconds: None,
+                        reflection,
+                        chain_entry_title,
+                    }),
+                ));
+            }
         }
     }
+    reviews.sort_by(|left, right| left.0.cmp(&right.0));
+    let ordering_by_entity = records
+        .iter()
+        .filter_map(|record| order.key(record).map(|key| (&record.entity_id, key)))
+        .collect::<BTreeMap<_, _>>();
+    let deleted_ranges = deleted_intervals
+        .into_iter()
+        .filter_map(|(previous, deleted)| {
+            Some((
+                previous.and_then(|id| ordering_by_entity.get(id)),
+                ordering_by_entity.get(deleted)?,
+            ))
+        })
+        .collect::<Vec<_>>();
     let mut projection = SessionReviewProjection::default();
-    for (index, (_, _, review)) in reviews.into_iter().enumerate() {
-        if deleted_positions.contains(&index) {
+    for (key, review) in reviews {
+        if deleted_ranges
+            .iter()
+            .any(|(start, end)| start.is_none_or(|start| start < &key) && &key <= *end)
+        {
             continue;
         }
-        if let Ok(review) = review {
-            projection.current_chain.links.push(review);
-        } else if let Err(chain_break) = review {
-            projection.current_chain.chain_break = Some(chain_break);
-            let ended = std::mem::take(&mut projection.current_chain);
-            projection.ended_chains.push(ended);
+        match review {
+            Ok(review) => projection.current_chain.links.push(review),
+            Err(chain_break) => {
+                if matches!(
+                    chain_break.source,
+                    ProjectedChainBreakSource::DailyChainGoal(_)
+                ) && projection.current_chain.links.is_empty()
+                {
+                    continue;
+                }
+                projection.current_chain.chain_break = Some(chain_break);
+                projection
+                    .ended_chains
+                    .push(std::mem::take(&mut projection.current_chain));
+            }
         }
     }
     projection
@@ -1017,11 +1164,14 @@ pub fn project_tasks(records: &[Record]) -> Vec<TaskProjection> {
                     | RecordPayload::SessionDeleted
                     | RecordPayload::SessionReviewed { .. }
                     | RecordPayload::ReservationFailed { .. }
+                    | RecordPayload::FocusStopped { .. }
                     | RecordPayload::ChainEntryVersion { .. }
                     | RecordPayload::EndedChainDeleted { .. }
                     | RecordPayload::RewardMilestoneVersion { .. }
                     | RecordPayload::RewardMilestoneDeleted
                     | RecordPayload::RewardUnlocked { .. }
+                    | RecordPayload::DailyGoalBoundary { .. }
+                    | RecordPayload::DailyGoalConfigured { .. }
                     | RecordPayload::RewardClaimed { .. } => None,
                 })
                 .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
@@ -1092,6 +1242,14 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
         return Err("duplicate synchronization record identity".into());
     }
     for record in records {
+        if record.review_mutation_order
+            && !matches!(
+                record.payload,
+                RecordPayload::SessionReviewed { .. } | RecordPayload::ReservationFailed { .. }
+            )
+        {
+            return Err("explicit Review Order requires a synchronized Review".into());
+        }
         match &record.payload {
             RecordPayload::TaskVersion { title, .. } => {
                 pomotui_domain::TaskTitle::parse(title)
@@ -1128,8 +1286,45 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
                     );
                 }
             }
+            RecordPayload::DailyGoalBoundary {
+                date,
+                cutoff_at,
+                time_zone,
+            } => {
+                let zone = time_zone
+                    .parse()
+                    .map_err(|_| "invalid Daily Chain Goal boundary time zone")?;
+                let start = day_start(zone, *date);
+                let next = date.succ_opt().and_then(|date| day_start(zone, date));
+                if start.is_none_or(|start| start >= *cutoff_at)
+                    || next != Some(*cutoff_at)
+                    || record
+                        != &daily_chain_goal::boundary_record(
+                            &record.beginning,
+                            *date,
+                            zone,
+                            *cutoff_at,
+                        )
+                {
+                    return Err("invalid synchronized Daily Chain Goal boundary".into());
+                }
+            }
+            RecordPayload::DailyGoalConfigured {
+                effective_at,
+                settings,
+            } => {
+                chrono::DateTime::from_timestamp(*effective_at, 0)
+                    .ok_or("invalid Daily Chain Goal effective time")?;
+                if record.entity_id != daily_goal_entity(&record.beginning) {
+                    return Err("invalid synchronized Daily Chain Goal identity".into());
+                }
+                if let Some(settings) = settings {
+                    settings.validate()?;
+                }
+            }
             RecordPayload::TaskDeleted
             | RecordPayload::SessionDeleted
+            | RecordPayload::FocusStopped { .. }
             | RecordPayload::EndedChainDeleted { .. }
             | RecordPayload::RewardMilestoneDeleted => {}
             RecordPayload::RewardClaimed { evidence, .. } => {
@@ -1227,12 +1422,14 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     let mut entity_kinds = BTreeMap::<&EntityId, (&'static str, usize)>::new();
     for record in records {
         let (kind, immutable_fact) = match record.payload {
+            RecordPayload::DailyGoalConfigured { .. } => ("Daily Chain Goal", false),
             RecordPayload::TaskVersion { .. } | RecordPayload::TaskDeleted => ("Task", false),
             RecordPayload::SessionEnded { .. } => ("Session", true),
             RecordPayload::SessionDeleted => ("Session", false),
-            RecordPayload::SessionReviewed { .. } | RecordPayload::ReservationFailed { .. } => {
-                ("Review", true)
-            }
+            RecordPayload::SessionReviewed { .. }
+            | RecordPayload::ReservationFailed { .. }
+            | RecordPayload::FocusStopped { .. }
+            | RecordPayload::DailyGoalBoundary { .. } => ("Review", true),
             RecordPayload::ChainEntryVersion { .. } | RecordPayload::EndedChainDeleted { .. } => {
                 ("Review", false)
             }
@@ -1269,7 +1466,7 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     let failed_reviews = records
         .iter()
         .filter_map(|record| {
-            (record.payload.chain_judgment() == Some(SessionReviewJudgment::Failed))
+            (orderable_chain_judgment(&record.payload) == Some(SessionReviewJudgment::Failed))
                 .then_some(&record.entity_id)
         })
         .collect::<std::collections::BTreeSet<_>>();
@@ -1305,9 +1502,22 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     let sessions = records
         .iter()
         .filter_map(|record| match &record.payload {
-            RecordPayload::SessionEnded { kind, outcome, .. } => {
-                Some((&record.entity_id, (*kind, *outcome)))
-            }
+            RecordPayload::SessionEnded {
+                kind,
+                outcome,
+                task_entity_id,
+                actual_seconds,
+                planned_seconds,
+                ..
+            } => Some((
+                &record.entity_id,
+                (
+                    *kind,
+                    *outcome,
+                    task_entity_id.is_some(),
+                    *actual_seconds < *planned_seconds,
+                ),
+            )),
             _ => None,
         })
         .collect::<BTreeMap<_, _>>();
@@ -1332,6 +1542,28 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             }
         }
     }
+    let mut interrupted_sessions = std::collections::BTreeSet::new();
+    for record in records {
+        if let RecordPayload::FocusStopped {
+            session_entity_id,
+            void_task,
+        } = &record.payload
+        {
+            let Some((SessionKind::Focus, SessionOutcome::Stopped, has_task, true)) =
+                sessions.get(session_entity_id)
+            else {
+                return Err(
+                    "synchronized Focus stop requires an unfinished Stopped Focus Session".into(),
+                );
+            };
+            if *has_task && *void_task {
+                return Err("synchronized Focus stop already has a regular Task".into());
+            }
+            if !interrupted_sessions.insert(session_entity_id) {
+                return Err("synchronized Focus Session has more than one stop break".into());
+            }
+        }
+    }
     let mut reviewed_sessions = std::collections::BTreeSet::new();
     for record in records {
         if let RecordPayload::SessionReviewed {
@@ -1342,13 +1574,20 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
             ..
         } = &record.payload
         {
-            let Some((kind, outcome)) = sessions.get(session_entity_id) else {
+            let Some((kind, outcome, ..)) = sessions.get(session_entity_id) else {
                 return Err(
                     "synchronized Session Review references unknown Session identity".into(),
                 );
             };
+            // A Stopped Session Review may originate on an older Device even when
+            // its immutable record is later exchanged in a current document.
             if *kind != SessionKind::Focus || *outcome == SessionOutcome::Skipped {
                 return Err("only an ended reviewable Focus Session can be reviewed".into());
+            }
+            if interrupted_sessions.contains(session_entity_id) {
+                return Err(
+                    "synchronized Focus stop break cannot also have a Session Review".into(),
+                );
             }
             if !reviewed_sessions.insert(session_entity_id) {
                 return Err("synchronized Session has more than one Review".into());
@@ -1374,10 +1613,7 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
     let reviews = records
         .iter()
         .filter_map(|record| {
-            record
-                .payload
-                .chain_judgment()
-                .map(|judgment| (&record.entity_id, judgment))
+            orderable_chain_judgment(&record.payload).map(|judgment| (&record.entity_id, judgment))
         })
         .collect::<BTreeMap<_, _>>();
     for record in records {
@@ -1411,7 +1647,7 @@ fn validate_records(records: &[Record]) -> Result<(), String> {
         records
             .iter()
             .find(|record| {
-                &record.entity_id == identity && record.payload.chain_judgment().is_some()
+                &record.entity_id == identity && orderable_chain_judgment(&record.payload).is_some()
             })
             .and_then(|record| order.key(record))
     };
@@ -1547,20 +1783,35 @@ pub struct RewardDebt {
 }
 /// Replays accounting in source-session Review Order, independently of delivery time.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
+    project_reward_debt_with_daily_goal(records, &[])
+}
+
+/// Goal cutoffs can revise claim support while the original claims remain immutable.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn project_reward_debt_with_daily_goal(
+    records: &[Record],
+    misses: &[DailyGoalMiss],
+) -> Vec<RewardDebt> {
     let order = ChainEntryOrder::new(records);
     let mut reviews = records
         .iter()
         .filter_map(|record| Some((order.key(record)?, record.payload.chain_judgment()?)))
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    reviews.sort_by(|a, b| a.0.cmp(&b.0));
+        .collect::<BTreeMap<_, _>>();
+    if let Some(record) = records.first() {
+        for miss in misses {
+            let boundary = miss.boundary(&record.beginning);
+            if let Some(key) = order.key(&boundary) {
+                reviews.insert(key, SessionReviewJudgment::Failed);
+            }
+        }
+    }
+    let reviews = reviews.into_iter().collect::<Vec<_>>();
     let positions = reviews
         .iter()
         .enumerate()
-        .map(|(i, (key, _))| (&key.1, i))
+        .map(|(i, (key, _))| (&key.3, i))
         .collect::<BTreeMap<_, _>>();
     let mut claims = BTreeMap::new();
     for r in records {
@@ -1626,7 +1877,7 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
                 .iter()
                 .enumerate()
                 .take(end + 1)
-                .filter(|(i, ((_, id), judgment))| {
+                .filter(|(i, ((_, _, _, id), judgment))| {
                     Some(*i) > last_break
                         && *judgment == SessionReviewJudgment::Successful
                         && !e.observed_review_entity_ids.contains(id)
@@ -1664,7 +1915,7 @@ pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
             .threshold
             .saturating_sub(snapshot_support + carried_support);
         if let Some(frontier) = frontier {
-            for (_, ((_, id), judgment)) in reviews.iter().enumerate().skip(frontier + 1) {
+            for (_, ((_, _, _, id), judgment)) in reviews.iter().enumerate().skip(frontier + 1) {
                 if capacity == 0 {
                     break;
                 }
