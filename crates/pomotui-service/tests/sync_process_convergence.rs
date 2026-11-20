@@ -344,7 +344,7 @@ fn connected_timer_services_keep_one_goal_calendar_in_different_local_time_zones
     assert_eq!(scheduled.settings, Some(goal));
 
     enable(&first, &exchange);
-    rebuild(&first);
+    rebuild_missing_exchange(&first, &exchange);
     enable(&second, &exchange);
     sync_now(&second);
     wait_until("shared goal", || {
