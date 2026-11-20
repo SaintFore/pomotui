@@ -5221,7 +5221,7 @@ mod tests {
     fn focus_stop_archive_shows_its_distinct_reason_in_both_languages() {
         for language in [Language::English, Language::SimplifiedChinese] {
             let mut state = snapshot("pending", SessionKind::Focus);
-            let mut ended = ended_chain(5, "Abandoned task", 0);
+            let mut ended = ended_chain(5, "Abandoned task", 7);
             ended.break_source = pomotui_protocol::ChainBreakSource::FocusStopped;
             ended.break_actual_seconds = Some(123);
             state.recent_ended_chains = vec![ended];
@@ -5238,10 +5238,11 @@ mod tests {
                 .iter()
                 .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>();
-            assert!(
-                rendered.contains(text(language, "FOCUS STOPPED EARLY", "专注提前停止")),
-                "{rendered}"
-            );
+            let compact = rendered.split_whitespace().collect::<String>();
+            let reason = text(language, "FOCUS STOPPED EARLY", "专注提前停止")
+                .split_whitespace()
+                .collect::<String>();
+            assert!(compact.contains(&reason), "{rendered}");
             assert!(rendered.contains("2m 3s"), "{rendered}");
         }
     }

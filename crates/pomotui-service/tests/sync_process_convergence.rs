@@ -356,6 +356,8 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         first.request(Command::Pause),
         Response::Error { .. }
     ));
+    // Keep the pending-review Session offline until the stale-file replay begins.
+    second.request(Command::SyncDisable);
     let pending_task = create_task(&second, "Pending only on second");
     assert!(matches!(
         second.request(Command::Skip),
@@ -373,6 +375,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     let before_replay = normalized_shared_state(&first);
     std::fs::write(&sync_path, &old_file).expect("overwrite with old document");
     sync_now(&first);
+    enable(&second, &sync_path);
     sync_now(&second);
     sync_now(&first);
     let after_old_file_recovery = normalized_shared_state(&first);
