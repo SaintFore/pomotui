@@ -4,8 +4,8 @@ use pomotui_protocol::{
 };
 use pomotui_sync::{
     DailyGoalCredit, DailyGoalPolicy, DailyGoalSchedule, ProjectedChainBreakSource, Record,
-    RecordId, RecordPayload, Tz, daily_goal_entity, day_start, local_date, project_rewards,
-    project_session_reviews_with_daily_goal,
+    RecordId, RecordPayload, RewardDebt, Tz, daily_goal_entity, day_start, local_date,
+    project_reward_debt_with_daily_goal, project_rewards, project_session_reviews_with_daily_goal,
 };
 
 use crate::Service;
@@ -154,6 +154,26 @@ impl Service {
         self.sync
             .daily_goal_observed_through
             .map_or(self.wall, |at| at.max(self.wall))
+    }
+
+    pub(super) fn reward_debt(&self) -> Vec<RewardDebt> {
+        if !self.sync.records.iter().any(|record| {
+            matches!(
+                record.payload,
+                RecordPayload::RewardClaimed {
+                    evidence: Some(_),
+                    ..
+                }
+            )
+        }) {
+            return Vec::new();
+        }
+        let schedule = DailyGoalSchedule::new(&self.sync.records);
+        let misses = schedule.misses(
+            &DailyGoalCredit::new(&self.sync.records),
+            self.daily_goal_observed_through(),
+        );
+        project_reward_debt_with_daily_goal(&self.sync.records, &misses)
     }
 
     pub(super) fn reconcile_daily_goal(&mut self) -> Result<bool, String> {

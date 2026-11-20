@@ -2,7 +2,8 @@
 mod process;
 
 use pomotui_protocol::{
-    Client, Command, PROTOCOL_VERSION, Request, Response, SessionKind, Snapshot,
+    Client, Command, DailyChainGoalSettings, PROTOCOL_VERSION, Request, Response, SessionKind,
+    Snapshot,
 };
 use pomotui_sync::Document;
 use std::path::{Path, PathBuf};
@@ -15,11 +16,16 @@ static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 struct TimerService {
     root: PathBuf,
     socket: PathBuf,
+    time_zone: Option<&'static str>,
     child: Option<Child>,
 }
 
 impl TimerService {
     fn start(root: PathBuf, rounds_per_cycle: u8) -> Self {
+        Self::start_in_zone(root, rounds_per_cycle, None)
+    }
+
+    fn start_in_zone(root: PathBuf, rounds_per_cycle: u8, time_zone: Option<&'static str>) -> Self {
         std::fs::create_dir_all(root.join("runtime")).expect("runtime directory");
         std::fs::create_dir_all(root.join("data")).expect("data directory");
         std::fs::create_dir_all(root.join("config/pomotui")).expect("config directory");
@@ -32,7 +38,11 @@ impl TimerService {
         .expect("service configuration");
         let socket = root.join("runtime/pomotui.sock");
         let log = std::fs::File::create(root.join("service.log")).expect("service log");
-        let child = ProcessCommand::new(env!("CARGO_BIN_EXE_pomotui-service"))
+        let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_pomotui-service"));
+        if let Some(time_zone) = time_zone {
+            command.env("TZ", time_zone);
+        }
+        let child = command
             .env("POMOTUI_SOCKET", &socket)
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_CONFIG_HOME", root.join("config"))
@@ -43,6 +53,7 @@ impl TimerService {
         let mut service = Self {
             root,
             socket,
+            time_zone,
             child: Some(child),
         };
         service.wait_until_ready();
@@ -122,7 +133,8 @@ impl TimerService {
 
     fn restart(&mut self, rounds_per_cycle: u8) {
         self.stop();
-        let mut replacement = Self::start(self.root.clone(), rounds_per_cycle);
+        let mut replacement =
+            Self::start_in_zone(self.root.clone(), rounds_per_cycle, self.time_zone);
         self.socket.clone_from(&replacement.socket);
         self.child = replacement.child.take();
     }
@@ -289,6 +301,60 @@ fn assert_timer_commands_still_work(service: &TimerService) {
         service.request(Command::Pause),
         Response::Error { .. }
     ));
+}
+
+#[test]
+fn connected_timer_services_keep_one_goal_calendar_in_different_local_time_zones() {
+    let root = test_root();
+    let exchange = root.join("pomotui.sync");
+    let first = TimerService::start_in_zone(root.join("first"), 4, Some("Etc/GMT+12"));
+    let mut second =
+        TimerService::start_in_zone(root.join("second"), 4, Some("Pacific/Kiritimati"));
+    let first_before = first.snapshot().daily_chain_goal;
+    let second_before = second.snapshot().daily_chain_goal;
+    assert_ne!(
+        first_before.device_local_date,
+        second_before.device_local_date
+    );
+
+    let future = chrono::NaiveDate::parse_from_str(&second_before.device_local_date, "%Y-%m-%d")
+        .expect("local date")
+        .checked_add_days(chrono::Days::new(5))
+        .expect("future date")
+        .to_string();
+    let goal = DailyChainGoalSettings {
+        quota: 4,
+        start_date: Some(future.clone()),
+        end_date: None,
+        time_zone: second_before.device_time_zone,
+    };
+    let Response::Snapshot { snapshot } = first.request(Command::ConfigureDailyChainGoal {
+        settings: Some(goal.clone()),
+    }) else {
+        panic!("configure shared goal");
+    };
+    let configured = snapshot.daily_chain_goal;
+    assert_ne!(configured.date, configured.device_local_date);
+    let scheduled = configured.scheduled.expect("scheduled goal");
+    assert_eq!(scheduled.effective_date, future);
+    assert_eq!(scheduled.settings, Some(goal));
+
+    enable(&first, &exchange);
+    rebuild(&first);
+    enable(&second, &exchange);
+    sync_now(&second);
+    wait_until("shared goal", || {
+        second.snapshot().daily_chain_goal.scheduled.as_ref() == Some(&scheduled)
+    });
+
+    second.restart(4);
+    let after = second.snapshot().daily_chain_goal;
+    assert_eq!(after.scheduled, Some(scheduled));
+    assert_eq!(after.date, after.device_local_date);
+    assert_eq!(after.device_time_zone, "Pacific/Kiritimati");
+    drop(second);
+    drop(first);
+    std::fs::remove_dir_all(root).expect("remove test state");
 }
 
 #[test]

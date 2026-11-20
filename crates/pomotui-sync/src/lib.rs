@@ -576,6 +576,7 @@ pub struct ProjectedRewardUnlock {
     pub threshold: u64,
     pub budget: Option<u64>,
     pub claimed_at: Option<i64>,
+    pub claim_frontier_entity_id: Option<EntityId>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -744,7 +745,7 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
         })
         .collect();
     let mut unlocks = BTreeMap::<RewardUnlockKey<'_>, ProjectedRewardUnlock>::new();
-    let mut claims = BTreeMap::<RewardUnlockKey<'_>, i64>::new();
+    let mut claims = BTreeMap::new();
     for record in records {
         match &record.payload {
             RecordPayload::RewardUnlocked {
@@ -770,31 +771,40 @@ pub fn project_rewards(records: &[Record]) -> RewardProjection {
                     threshold: *threshold,
                     budget: *budget,
                     claimed_at: None,
+                    claim_frontier_entity_id: None,
                 });
             }
             RecordPayload::RewardClaimed {
                 milestone_entity_id,
                 previous_chain_break_review_entity_id,
                 claimed_at,
-                ..
+                evidence,
             } => {
                 if deleted_chain_anchors.contains(&previous_chain_break_review_entity_id.as_ref()) {
                     continue;
                 }
+                let claim = (
+                    *claimed_at,
+                    &record.id,
+                    evidence
+                        .as_ref()
+                        .map(|evidence| &evidence.frontier_review_entity_id),
+                );
                 claims
                     .entry((
                         milestone_entity_id,
                         previous_chain_break_review_entity_id.as_ref(),
                     ))
-                    .and_modify(|current| *current = (*current).min(*claimed_at))
-                    .or_insert(*claimed_at);
+                    .and_modify(|current| *current = claim.min(*current))
+                    .or_insert(claim);
             }
             _ => {}
         }
     }
-    for (key, claimed_at) in claims {
+    for (key, (claimed_at, _, frontier)) in claims {
         if let Some(unlock) = unlocks.get_mut(&key) {
             unlock.claimed_at = Some(claimed_at);
+            unlock.claim_frontier_entity_id = frontier.cloned();
         }
     }
     RewardProjection {
@@ -1758,16 +1768,31 @@ pub struct RewardDebt {
 }
 /// Replays accounting in source-session Review Order, independently of delivery time.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn project_reward_debt(records: &[Record]) -> Vec<RewardDebt> {
+    project_reward_debt_with_daily_goal(records, &[])
+}
+
+/// Goal cutoffs can revise claim support while the original claims remain immutable.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn project_reward_debt_with_daily_goal(
+    records: &[Record],
+    misses: &[DailyGoalMiss],
+) -> Vec<RewardDebt> {
     let order = ChainEntryOrder::new(records);
     let mut reviews = records
         .iter()
         .filter_map(|record| Some((order.key(record)?, record.payload.chain_judgment()?)))
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    reviews.sort_by(|a, b| a.0.cmp(&b.0));
+        .collect::<BTreeMap<_, _>>();
+    if let Some(record) = records.first() {
+        for miss in misses {
+            let boundary = miss.boundary(&record.beginning);
+            if let Some(key) = order.key(&boundary) {
+                reviews.insert(key, SessionReviewJudgment::Failed);
+            }
+        }
+    }
+    let reviews = reviews.into_iter().collect::<Vec<_>>();
     let positions = reviews
         .iter()
         .enumerate()

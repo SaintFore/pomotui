@@ -16,12 +16,12 @@ use pomotui_protocol::{
     TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use pomotui_sync::{
-    ActivityProjection, ClaimEvidence, Document as SyncDocument, EntityId,
+    ActivityProjection, ChainEntryOrder, ClaimEvidence, Document as SyncDocument, EntityId,
     FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant, ProjectedChainBreakSource,
-    Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind, RewardMilestoneProjection,
-    RewardProjection, SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome,
-    SessionReviewJudgment, SessionReviewProjection, SyncPlan, TaskProjection,
-    TaskStatus as SyncTaskStatus, plan_sync, project_reward_debt, project_session_reviews,
+    ProjectedRewardUnlock, Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind,
+    RewardDebt, RewardMilestoneProjection, RewardProjection, SessionKind as SyncSessionKind,
+    SessionOutcome as SyncSessionOutcome, SessionReviewJudgment, SessionReviewProjection, SyncPlan,
+    TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
@@ -1287,6 +1287,7 @@ impl Service {
 
     #[allow(clippy::too_many_lines)]
     fn snapshot(&self) -> Snapshot {
+        let reward_debt = self.reward_debt();
         let (state, kind, next_kind) = match self.timer.current_session() {
             CurrentSession::Pending(session) => {
                 ("pending", session.kind(), Some(map_kind(session.kind())))
@@ -1450,7 +1451,9 @@ impl Service {
             next_reward: self
                 .reward_milestones
                 .iter()
-                .filter(|milestone| milestone.threshold > self.reward_progress(milestone.id, None))
+                .filter(|milestone| {
+                    milestone.threshold > self.reward_progress(milestone.id, &reward_debt)
+                })
                 .min_by_key(|milestone| milestone.threshold)
                 .map(|milestone| RewardMilestoneSummary {
                     id: milestone.id,
@@ -1472,7 +1475,7 @@ impl Service {
                 milestones.sort_by_key(|milestone| (milestone.threshold, milestone.id));
                 milestones
             },
-            reward_debt: project_reward_debt(&self.sync.records)
+            reward_debt: reward_debt
                 .into_iter()
                 .map(|d| pomotui_protocol::RewardDebtSummary {
                     milestone_identity: d.milestone_entity_id.as_str().to_owned(),
@@ -1820,18 +1823,18 @@ impl Service {
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.current_chain_length = self.current_chain_length.saturating_add(1);
         if !self.reconcile_daily_goal()? {
-            self.unlock_eligible_rewards();
+            self.unlock_eligible_rewards(&self.reward_debt());
         }
         Ok(())
     }
 
-    fn unlock_eligible_rewards(&mut self) {
+    fn unlock_eligible_rewards(&mut self, reward_debt: &[RewardDebt]) {
         let eligible = self.reward_milestones.clone();
         for milestone in &eligible {
             let exists = self.reward_unlocks.iter().any(|unlock| {
                 unlock.chain_id == self.current_chain_id && unlock.milestone_id == milestone.id
             });
-            if milestone.threshold <= self.reward_progress(milestone.id, None) && !exists {
+            if milestone.threshold <= self.reward_progress(milestone.id, reward_debt) && !exists {
                 self.reward_unlocks.push(RewardUnlockState {
                     id: self.next_reward_unlock_id,
                     milestone_id: milestone.id,
@@ -1873,22 +1876,12 @@ impl Service {
         }
     }
 
-    fn reward_progress(&self, milestone_id: u64, chain_id: Option<u64>) -> u64 {
-        let chain_id = chain_id.unwrap_or(self.current_chain_id);
-        let links = if chain_id == self.current_chain_id {
-            &self.chain_links
-        } else {
-            self.ended_chains
-                .iter()
-                .find(|c| c.id == chain_id)
-                .map_or(&self.chain_links, |c| &c.links)
-        };
-        let debt = project_reward_debt(&self.sync.records)
-            .into_iter()
-            .find(|d| {
-                self.sync.reward_milestone_entities.get(&milestone_id)
-                    == Some(&d.milestone_entity_id)
-            });
+    fn reward_progress(&self, milestone_id: u64, reward_debt: &[RewardDebt]) -> u64 {
+        let links = &self.chain_links;
+        let debt = reward_debt.iter().find(|debt| {
+            self.sync.reward_milestone_entities.get(&milestone_id)
+                == Some(&debt.milestone_entity_id)
+        });
         if let Some(debt) = debt {
             if debt.outstanding > 0 {
                 return 0;
@@ -1921,37 +1914,46 @@ impl Service {
         if chain_id != self.current_chain_id {
             return None;
         }
-        let projection = project_session_reviews(&self.sync.records);
-        let debt = project_reward_debt(&self.sync.records)
-            .into_iter()
-            .find(|d| {
-                self.sync.reward_milestone_entities.get(&milestone_id)
-                    == Some(&d.milestone_entity_id)
-            });
+        let debt = self.reward_debt().into_iter().find(|d| {
+            self.sync.reward_milestone_entities.get(&milestone_id) == Some(&d.milestone_entity_id)
+        });
         let used = debt
             .as_ref()
             .map_or_else(Vec::new, |d| d.repayment_review_entity_ids.clone());
         let carried_review_entity_ids = debt
             .as_ref()
             .map_or_else(Vec::new, |d| d.excess_review_entity_ids.clone());
-        let supporting_review_entity_ids = projection
-            .current_chain
-            .links
+        let review_ids = self
+            .sync
+            .session_review_entries
             .iter()
-            .filter(|r| !used.contains(&r.review_entity_id))
-            .map(|r| r.review_entity_id.clone())
-            .collect::<Vec<_>>();
-        let frontier_review_entity_id = projection
-            .current_chain
-            .links
-            .last()?
-            .review_entity_id
-            .clone();
+            .map(|(entity, local)| (*local, entity))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let supporting_review_entity_ids = self
+            .chain_links
+            .iter()
+            .filter_map(|link| review_ids.get(&link.id).copied())
+            .filter(|entity| !used.contains(entity))
+            .cloned()
+            .collect();
+        let frontier_review_entity_id = (*review_ids.get(&self.chain_links.last()?.id)?).clone();
         let observed_review_entity_ids = self
             .sync
             .records
             .iter()
-            .filter(|r| r.payload.chain_judgment().is_some())
+            .filter(|r| {
+                r.payload.chain_judgment().is_some()
+                    || (matches!(r.payload, RecordPayload::DailyGoalBoundary { .. })
+                        && self
+                            .sync
+                            .session_review_entries
+                            .get(&r.entity_id)
+                            .is_some_and(|entry| {
+                                self.ended_chains
+                                    .iter()
+                                    .any(|chain| chain.chain_break.id == *entry)
+                            }))
+            })
             .map(|r| r.entity_id.clone())
             .collect();
         Some(ClaimEvidence {
@@ -2035,29 +2037,34 @@ impl Service {
             }
         }
         self.reward_milestones = milestones;
+        let reward_debt = self.reward_debt();
+        let unlock_keys = self
+            .sync
+            .records
+            .iter()
+            .filter_map(|record| {
+                let RecordPayload::RewardUnlocked {
+                    milestone_entity_id,
+                    previous_chain_break_review_entity_id,
+                    ..
+                } = &record.payload
+                else {
+                    return None;
+                };
+                Some((
+                    record.entity_id.clone(),
+                    (
+                        milestone_entity_id.clone(),
+                        previous_chain_break_review_entity_id.clone(),
+                    ),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         self.reward_unlocks = projection
             .unlocks
             .iter()
-            .map(|projected| {
-                let chain_id = projected
-                    .previous_chain_break_review_entity_id
-                    .as_ref()
-                    .and_then(|anchor| self.sync.session_review_entries.get(anchor))
-                    .and_then(|entry| {
-                        self.ended_chains
-                            .iter()
-                            .position(|chain| chain.chain_break.id == *entry)
-                            .map(|index| {
-                                self.ended_chains
-                                    .get(index + 1)
-                                    .map_or(self.current_chain_id, |chain| chain.id)
-                            })
-                    })
-                    .unwrap_or_else(|| {
-                        self.ended_chains
-                            .first()
-                            .map_or(self.current_chain_id, |chain| chain.id)
-                    });
+            .filter_map(|projected| {
+                let chain_id = self.reward_chain(projected)?;
                 let milestone_id = self
                     .sync
                     .reward_milestone_entities
@@ -2066,19 +2073,25 @@ impl Service {
                         (global == &projected.milestone_entity_id).then_some(*local)
                     })
                     .unwrap_or(0);
+                let reward_key = (
+                    projected.milestone_entity_id.clone(),
+                    projected.previous_chain_break_review_entity_id.clone(),
+                );
                 let id = self
                     .sync
                     .reward_unlock_entities
                     .iter()
-                    .find_map(|(id, entity)| (entity == &projected.entity_id).then_some(*id))
+                    .find_map(|(id, entity)| {
+                        (unlock_keys.get(entity) == Some(&reward_key)).then_some(*id)
+                    })
                     .unwrap_or_else(|| {
                         let id = self.next_reward_unlock_id;
                         self.next_reward_unlock_id = id.saturating_add(1);
-                        self.sync
-                            .reward_unlock_entities
-                            .insert(id, projected.entity_id.clone());
                         id
                     });
+                self.sync
+                    .reward_unlock_entities
+                    .insert(id, projected.entity_id.clone());
                 let state = if projected.claimed_at.is_some() {
                     "claimed"
                 } else if self
@@ -2086,13 +2099,13 @@ impl Service {
                     .iter()
                     .any(|milestone| milestone.id == milestone_id)
                     && chain_id == self.current_chain_id
-                    && self.reward_progress(milestone_id, Some(chain_id)) >= projected.threshold
+                    && self.reward_progress(milestone_id, &reward_debt) >= projected.threshold
                 {
                     "unlocked"
                 } else {
                     "unavailable"
                 };
-                RewardUnlockState {
+                Some(RewardUnlockState {
                     id,
                     milestone_id,
                     chain_id,
@@ -2101,10 +2114,87 @@ impl Service {
                     budget: projected.budget,
                     state: state.into(),
                     claimed_at: projected.claimed_at,
-                }
+                })
             })
             .collect();
-        self.unlock_eligible_rewards();
+        let claimed = self
+            .reward_unlocks
+            .iter()
+            .filter(|reward| reward.claimed_at.is_some())
+            .map(|reward| (reward.milestone_id, reward.chain_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        self.reward_unlocks.retain(|reward| {
+            reward.claimed_at.is_some()
+                || !claimed.contains(&(reward.milestone_id, reward.chain_id))
+        });
+        self.unlock_eligible_rewards(&reward_debt);
+    }
+
+    fn reward_chain(&self, reward: &ProjectedRewardUnlock) -> Option<u64> {
+        let anchor = reward.previous_chain_break_review_entity_id.as_ref();
+        if let Some(entry) = anchor.and_then(|entity| self.sync.session_review_entries.get(entity))
+            && let Some(index) = self
+                .ended_chains
+                .iter()
+                .position(|chain| chain.chain_break.id == *entry)
+        {
+            return Some(
+                self.ended_chains
+                    .get(index + 1)
+                    .map_or(self.current_chain_id, |chain| chain.id),
+            );
+        }
+        let boundary = anchor.and_then(|anchor| {
+            self.sync.records.iter().find(|record| {
+                &record.entity_id == anchor
+                    && matches!(record.payload, RecordPayload::DailyGoalBoundary { .. })
+            })
+        });
+        let Some(boundary) = boundary else {
+            return Some(
+                self.ended_chains
+                    .first()
+                    .map_or(self.current_chain_id, |chain| chain.id),
+            );
+        };
+
+        // Once the boundary is gone, requalify unclaimed rewards under the current chain's
+        // anchor. A claim stays attached to the archived or current chain containing its frontier.
+        reward.claimed_at?;
+        if let Some(frontier) = &reward.claim_frontier_entity_id {
+            let entry = self.sync.session_review_entries.get(frontier)?;
+            return self
+                .ended_chains
+                .iter()
+                .find(|chain| chain.links.iter().any(|link| link.id == *entry))
+                .map(|chain| chain.id)
+                .or_else(|| {
+                    self.chain_links
+                        .iter()
+                        .any(|link| link.id == *entry)
+                        .then_some(self.current_chain_id)
+                });
+        }
+
+        let order = ChainEntryOrder::new(&self.sync.records);
+        let boundary_key = order.key(boundary)?;
+        self.ended_chains
+            .iter()
+            .find(|chain| {
+                self.sync
+                    .session_review_entries
+                    .iter()
+                    .find(|(_, entry)| **entry == chain.chain_break.id)
+                    .and_then(|(entity, _)| {
+                        self.sync
+                            .records
+                            .iter()
+                            .filter(|record| &record.entity_id == entity)
+                            .find_map(|record| order.key(record))
+                    })
+                    .is_some_and(|key| key > boundary_key)
+            })
+            .map_or(Some(self.current_chain_id), |chain| Some(chain.id))
     }
 
     fn review_failure(
@@ -4088,7 +4178,7 @@ impl Handler for Service {
                         self.next_reward_milestone_id =
                             self.next_reward_milestone_id.saturating_add(1);
                         self.record_reward_milestone_version(id)?;
-                        self.unlock_eligible_rewards();
+                        self.unlock_eligible_rewards(&self.reward_debt());
                         Ok(())
                     })()
                 }
@@ -4121,7 +4211,7 @@ impl Handler for Service {
                     milestone.budget = budget;
                     match self.record_reward_milestone_version(id) {
                         Ok(()) => {
-                            self.unlock_eligible_rewards();
+                            self.unlock_eligible_rewards(&self.reward_debt());
                             Ok(())
                         }
                         Err(error) => Err(error),
@@ -4236,7 +4326,7 @@ impl Handler for Service {
                     value: serde_json::json!({
                         "milestones": self.reward_milestones,
                         "unlocks": self.reward_unlocks,
-                        "debt": project_reward_debt(&self.sync.records),
+                        "debt": self.reward_debt(),
                     }),
                 };
             }
