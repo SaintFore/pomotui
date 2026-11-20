@@ -9,24 +9,25 @@ use pomotui_platform::{
     elapsed_during_recovery, read_sync_file, replace_sync_file,
 };
 use pomotui_protocol::{
-    ActionChainSummary, ChainBreakSource, ChainLinkSummary, Command, DurableHealth,
-    DurableHealthState, EndedChainSummary, Handler, PendingReviewSummary, ProtocolError,
-    RecentSessionSummary, ReminderDelivery, Request, Response, RewardMilestoneSummary,
-    RewardUnlockSummary, SessionKind, Snapshot, SyncStatus, TaskFocusSummary, TaskSummary,
-    TodaySummary,
+    ActionChainSummary, ChainBreakSource, ChainLinkSummary, Command, DailyChainGoalMiss,
+    DurableHealth, DurableHealthState, EndedChainSummary, Handler, PendingReviewSummary,
+    ProtocolError, RecentSessionSummary, ReminderDelivery, Request, Response,
+    RewardMilestoneSummary, RewardUnlockSummary, SessionKind, Snapshot, SyncStatus,
+    TaskFocusSummary, TaskSummary, TodaySummary,
 };
 use pomotui_sync::{
-    ActivityProjection, ClaimEvidence, Document as SyncDocument, EntityId,
+    ActivityProjection, ChainEntryOrder, ClaimEvidence, Document as SyncDocument, EntityId,
     FORMAT_VERSION as SYNC_FORMAT_VERSION, MutationInstant, ProjectedChainBreakSource,
-    Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind, RewardMilestoneProjection,
-    RewardProjection, SessionKind as SyncSessionKind, SessionOutcome as SyncSessionOutcome,
-    SessionReviewJudgment, SessionReviewProjection, SyncPlan, TaskProjection,
-    TaskStatus as SyncTaskStatus, plan_sync, project_reward_debt, project_session_reviews,
+    ProjectedRewardUnlock, Record as SyncRecord, RecordId, RecordPayload, ReviewedTaskKind,
+    RewardDebt, RewardMilestoneProjection, RewardProjection, SessionKind as SyncSessionKind,
+    SessionOutcome as SyncSessionOutcome, SessionReviewJudgment, SessionReviewProjection, SyncPlan,
+    TaskProjection, TaskStatus as SyncTaskStatus, plan_sync,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::path::Path;
 
+mod daily_chain_goal;
 mod sync_worker;
 pub use sync_worker::{SyncFileAdapter, SyncServiceHandler, SyncWorker, SyncWorkerTrigger};
 
@@ -165,7 +166,11 @@ impl ReminderEffects for DesktopReminder {
     }
 }
 
+type ServiceClock = std::sync::Arc<dyn Clock<Error = std::io::Error> + Send + Sync>;
+
 pub struct Service {
+    clock: ServiceClock,
+    device_time_zone: pomotui_sync::Tz,
     timer: Timer,
     tasks: TaskStore,
     history: History,
@@ -253,6 +258,15 @@ type ReservationMutationBackup = (
     u64,
     Option<ReservationState>,
     u64,
+);
+
+type ChainMutationBackup = (
+    u64,
+    u64,
+    Vec<ChainLinkState>,
+    u64,
+    Vec<EndedChainState>,
+    Vec<RewardUnlockState>,
 );
 
 fn validate_reservation_minutes(minutes: u64) -> Result<u64, String> {
@@ -345,11 +359,17 @@ struct SyncState {
     beginning: pomotui_sync::Beginning,
     path: Option<std::path::PathBuf>,
     records: Vec<SyncRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daily_goal_observed_through: Option<i64>,
+    #[serde(skip)]
+    daily_goal_next_cutoff: Option<i64>,
     task_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default)]
     session_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default, alias = "review_entries")]
     session_review_entries: std::collections::BTreeMap<EntityId, u64>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    archive_chain_ids: std::collections::BTreeMap<EntityId, u64>,
     #[serde(default)]
     reward_milestone_entities: std::collections::BTreeMap<u64, EntityId>,
     #[serde(default)]
@@ -409,6 +429,8 @@ struct ChainBreakState {
     id: u64,
     #[serde(default)]
     source: ChainBreakSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daily_chain_goal: Option<DailyChainGoalMiss>,
     #[serde(default)]
     reservation_entity_id: Option<EntityId>,
     session_id: Option<u64>,
@@ -466,8 +488,24 @@ impl Service {
     /// Only panics if compile-time default durations become invalid.
     #[must_use]
     pub fn new() -> Self {
-        let clock = PlatformClock::default();
+        Self::new_with_clock(PlatformClock::default())
+    }
+
+    /// Creates an in-memory Timer Service with the supplied clock.
+    ///
+    /// # Panics
+    ///
+    /// Only panics if compile-time default durations become invalid.
+    #[must_use]
+    pub fn new_with_clock(
+        clock: impl Clock<Error = std::io::Error> + Send + Sync + 'static,
+    ) -> Self {
+        Self::new_using_clock(std::sync::Arc::new(clock))
+    }
+
+    fn new_using_clock(clock: ServiceClock) -> Self {
         Self {
+            device_time_zone: daily_chain_goal::device_time_zone(),
             timer: Timer::new(
                 SessionDurations::new(25 * 60, 5 * 60, 15 * 60)
                     .expect("nonzero built-in durations"),
@@ -490,6 +528,7 @@ impl Service {
             next_event_id: 1,
             now: clock.monotonic_seconds().unwrap_or(0),
             wall: clock.wall_seconds().unwrap_or(0),
+            clock,
             current_chain_id: 1,
             current_chain_length: 0,
             pending_review: None,
@@ -515,6 +554,18 @@ impl Service {
     /// Returns a diagnostic database or state-validation error.
     pub fn open(path: &Path) -> Result<Self, String> {
         Self::open_with_runtime(path, None, None, (true, false))
+    }
+
+    /// Opens durable state with the supplied clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic database or state-validation error.
+    pub fn open_with_clock(
+        path: &Path,
+        clock: impl Clock<Error = std::io::Error> + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        Self::open_using_clock(path, std::sync::Arc::new(clock), None, None, (true, false))
     }
 
     /// Opens durable state with reminder preferences in place before recovering deadlines.
@@ -546,6 +597,22 @@ impl Service {
         reminder: Option<Box<dyn ReminderEffects>>,
         (reminders_enabled, sound_enabled): (bool, bool),
     ) -> Result<Self, String> {
+        Self::open_using_clock(
+            path,
+            std::sync::Arc::new(PlatformClock::default()),
+            observation,
+            reminder,
+            (reminders_enabled, sound_enabled),
+        )
+    }
+
+    fn open_using_clock(
+        path: &Path,
+        clock: ServiceClock,
+        observation: Option<RecoveryObservation>,
+        reminder: Option<Box<dyn ReminderEffects>>,
+        (reminders_enabled, sound_enabled): (bool, bool),
+    ) -> Result<Self, String> {
         let repository = SqliteRepository::open(path).map_err(|error| error.to_string())?;
         let payload = repository
             .current_session_payload()
@@ -560,7 +627,7 @@ impl Service {
             .as_deref()
             .is_some_and(|payload| PersistedService::format_version(payload) == Ok(0));
         let schema_backup = if legacy {
-            let timestamp = PlatformClock::default().wall_seconds().unwrap_or(0);
+            let timestamp = clock.wall_seconds().unwrap_or(0);
             Some(
                 repository
                     .create_migration_backup("schema-migration", timestamp)
@@ -570,9 +637,9 @@ impl Service {
             None
         };
         let mut service = if let Some(payload) = payload.as_deref() {
-            PersistedService::decode_with_observation(payload, observation.clone())?
+            PersistedService::decode_with_observation(payload, observation.clone(), clock)?
         } else {
-            Self::new()
+            Self::new_using_clock(clock)
         };
         let created_void = service.ensure_void_task()?;
         let mut cancelled_reward = false;
@@ -673,7 +740,7 @@ impl Service {
         key: Option<&str>,
         remote: bool,
     ) -> Result<(), String> {
-        let mut replacement = Self::new();
+        let mut replacement = Self::new_using_clock(self.clock.clone());
         let state = self.timer.state();
         replacement.timer =
             Timer::new(state.durations, state.rounds_per_cycle).map_err(|e| e.to_string())?;
@@ -697,8 +764,7 @@ impl Service {
         replacement.apply_task_projections(plan.task_projections())?;
         replacement.apply_activity_projections(plan.activity_projections());
         replacement.ensure_void_task()?;
-        replacement.apply_session_review_projection(plan.session_review_projection())?;
-        replacement.apply_reward_projection(plan.reward_projection());
+        replacement.apply_chain_and_reward_projections(&plan)?;
         if let Some(key) = key {
             replacement.applied_keys.insert(key.into());
         }
@@ -795,6 +861,8 @@ impl Service {
         let old_ended_chains = self.ended_chains.clone();
         let old_reward_unlocks = self.reward_unlocks.clone();
         let old_reward_milestones = self.reward_milestones.clone();
+        let old_next_reward_milestone_id = self.next_reward_milestone_id;
+        let old_next_reward_unlock_id = self.next_reward_unlock_id;
         let old_current_chain_id = self.current_chain_id;
         let old_current_chain_length = self.current_chain_length;
         let old_next_chain_entry_id = self.next_chain_entry_id;
@@ -804,8 +872,7 @@ impl Service {
             .apply_task_projections(plan.task_projections())
             .and_then(|()| {
                 self.apply_activity_projections(plan.activity_projections());
-                self.apply_session_review_projection(plan.session_review_projection())?;
-                self.apply_reward_projection(plan.reward_projection());
+                self.apply_chain_and_reward_projections(plan)?;
                 self.set_clock_warning(plan.retained_records());
                 self.persist(None)
             })
@@ -818,6 +885,8 @@ impl Service {
             self.ended_chains = old_ended_chains;
             self.reward_unlocks = old_reward_unlocks;
             self.reward_milestones = old_reward_milestones;
+            self.next_reward_milestone_id = old_next_reward_milestone_id;
+            self.next_reward_unlock_id = old_next_reward_unlock_id;
             self.current_chain_id = old_current_chain_id;
             self.current_chain_length = old_current_chain_length;
             self.next_chain_entry_id = old_next_chain_entry_id;
@@ -1094,7 +1163,7 @@ impl Service {
         self.sync
             .session_review_entries
             .insert(review_entity_id.clone(), entry_id);
-        self.sync.records.push(SyncRecord::in_beginning(
+        let mut record = SyncRecord::in_beginning(
             self.sync.beginning.clone(),
             RecordId::random(),
             review_entity_id,
@@ -1106,12 +1175,15 @@ impl Service {
                 task_title: reservation.task_title.clone(),
                 reflection: reflection.into(),
             },
-        ));
+        );
+        record.review_mutation_order = true;
+        self.sync.records.push(record);
         self.sync.records.sort();
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.end_current_chain(ChainBreakState {
             id: entry_id,
             source: ChainBreakSource::ReservationReview,
+            daily_chain_goal: None,
             reservation_entity_id: Some(reservation_entity_id),
             session_id: None,
             task_id: reservation.task_id,
@@ -1132,14 +1204,7 @@ impl Service {
         key: Option<&str>,
     ) -> Response {
         let reservation_backup = self.reservation_backup();
-        let chain_backup = (
-            self.current_chain_id,
-            self.current_chain_length,
-            self.chain_links.clone(),
-            self.next_chain_entry_id,
-            self.ended_chains.clone(),
-            self.reward_unlocks.clone(),
-        );
+        let chain_backup = self.chain_backup();
         let result = self
             .fail_reservation(id, reflection, confirmed)
             .and_then(|()| self.persist(key));
@@ -1149,17 +1214,32 @@ impl Service {
             },
             Err(error) => {
                 self.restore_reservation_mutation(reservation_backup);
-                (
-                    self.current_chain_id,
-                    self.current_chain_length,
-                    self.chain_links,
-                    self.next_chain_entry_id,
-                    self.ended_chains,
-                    self.reward_unlocks,
-                ) = chain_backup;
+                self.restore_chain_mutation(chain_backup);
                 self.durable_rejected(error)
             }
         }
+    }
+
+    fn chain_backup(&self) -> ChainMutationBackup {
+        (
+            self.current_chain_id,
+            self.current_chain_length,
+            self.chain_links.clone(),
+            self.next_chain_entry_id,
+            self.ended_chains.clone(),
+            self.reward_unlocks.clone(),
+        )
+    }
+
+    fn restore_chain_mutation(&mut self, backup: ChainMutationBackup) {
+        (
+            self.current_chain_id,
+            self.current_chain_length,
+            self.chain_links,
+            self.next_chain_entry_id,
+            self.ended_chains,
+            self.reward_unlocks,
+        ) = backup;
     }
 
     fn reservation_backup(&self) -> ReservationMutationBackup {
@@ -1209,6 +1289,7 @@ impl Service {
 
     #[allow(clippy::too_many_lines)]
     fn snapshot(&self) -> Snapshot {
+        let reward_debt = self.reward_debt();
         let (state, kind, next_kind) = match self.timer.current_session() {
             CurrentSession::Pending(session) => {
                 ("pending", session.kind(), Some(map_kind(session.kind())))
@@ -1227,6 +1308,7 @@ impl Service {
         let starts = local_day_boundaries(self.wall);
         let summary = self.history.summarize(starts);
         Snapshot {
+            daily_chain_goal: self.daily_chain_goal_snapshot(),
             reservation_minutes: self.reservation_minutes,
             reservation: self.reservation.as_ref().map(|reservation| {
                 pomotui_protocol::ReservationSummary {
@@ -1315,6 +1397,7 @@ impl Service {
                     task_id: review.task_id,
                     task_title: review.task_title.clone(),
                     is_void: review.task_id == self.void_task_id,
+                    dismiss_only: !self.review_qualifies_for_chain(review),
                 }),
             recent_chain_links: self
                 .chain_links
@@ -1348,6 +1431,7 @@ impl Service {
                         .collect(),
                     break_id: chain.chain_break.id,
                     break_source: chain.chain_break.source,
+                    break_daily_chain_goal: chain.chain_break.daily_chain_goal.clone(),
                     break_task_title: chain.chain_break.task_title.clone(),
                     break_actual_seconds: chain.chain_break.actual_seconds,
                     break_reflection: chain.chain_break.reflection.clone(),
@@ -1369,7 +1453,9 @@ impl Service {
             next_reward: self
                 .reward_milestones
                 .iter()
-                .filter(|milestone| milestone.threshold > self.reward_progress(milestone.id, None))
+                .filter(|milestone| {
+                    milestone.threshold > self.reward_progress(milestone.id, &reward_debt)
+                })
                 .min_by_key(|milestone| milestone.threshold)
                 .map(|milestone| RewardMilestoneSummary {
                     id: milestone.id,
@@ -1391,7 +1477,7 @@ impl Service {
                 milestones.sort_by_key(|milestone| (milestone.threshold, milestone.id));
                 milestones
             },
-            reward_debt: project_reward_debt(&self.sync.records)
+            reward_debt: reward_debt
                 .into_iter()
                 .map(|d| pomotui_protocol::RewardDebtSummary {
                     milestone_identity: d.milestone_entity_id.as_str().to_owned(),
@@ -1447,15 +1533,17 @@ impl Service {
         if self.durable_health == DurableHealthState::Degraded {
             return;
         }
-        let clock = PlatformClock::default();
-        let now = clock.monotonic_seconds().unwrap_or(self.now);
-        let wall = clock.wall_seconds().unwrap_or(self.wall);
+        let now = self.clock.monotonic_seconds().unwrap_or(self.now);
+        let wall = self.clock.wall_seconds().unwrap_or(self.wall);
         self.apply_observation(now, wall);
     }
 
     fn apply_observation(&mut self, now: u64, wall: i64) {
         self.now = now;
         self.wall = wall;
+        if self.settle_daily_goal_if_due().is_err() {
+            return;
+        }
         if let Some(reservation) = &mut self.reservation
             && reservation.timing.advance(self.now)
         {
@@ -1478,6 +1566,20 @@ impl Service {
             }
         }
         let planned = self.timer.planned_seconds();
+        let completed_at = match self.timer.state().session {
+            SessionState::Running {
+                accumulated_seconds,
+                started_at,
+                ..
+            } => {
+                let overshoot = accumulated_seconds
+                    .saturating_add(self.now.saturating_sub(started_at))
+                    .saturating_sub(planned);
+                self.wall
+                    .saturating_sub(i64::try_from(overshoot).unwrap_or(i64::MAX))
+            }
+            _ => self.wall,
+        };
         if let Ok(transition) = self.timer.advance(self.now) {
             let changed = !transition.events().is_empty();
             let completed = transition.events().iter().any(|event| {
@@ -1490,7 +1592,7 @@ impl Service {
                 )
             });
             let reminder_key = format!("session-event-{}", self.next_event_id);
-            self.record(&transition, planned);
+            self.record_at(&transition, planned, completed_at);
             if completed {
                 let effects = self.enabled_reminder_effects();
                 if self
@@ -1511,11 +1613,15 @@ impl Service {
     }
 
     fn record(&mut self, transition: &Transition, planned_seconds: u64) {
+        self.record_at(transition, planned_seconds, self.wall);
+    }
+
+    fn record_at(&mut self, transition: &Transition, planned_seconds: u64, ended_at: i64) {
         for event in transition.events() {
             let record = SessionRecord::from_event(
                 *event,
                 self.next_event_id,
-                self.wall,
+                ended_at,
                 planned_seconds,
                 &self.tasks,
             );
@@ -1534,9 +1640,69 @@ impl Service {
                     task_title: record.task_title.clone(),
                 });
             }
+            let stopped_focus =
+                record.kind == DomainKind::Focus && record.outcome == SessionOutcome::Stopped;
+            let chain_break = stopped_focus.then(|| ChainBreakState {
+                id: self.next_chain_entry_id,
+                source: ChainBreakSource::FocusStopped,
+                daily_chain_goal: None,
+                reservation_entity_id: None,
+                session_id: Some(record.id),
+                task_id: record.task_id.map(TaskId::get),
+                task_title: record.task_title.clone(),
+                actual_seconds: Some(record.actual_seconds),
+                reflection: String::new(),
+                chain_entry_title: None,
+            });
             self.history.push(record);
             self.record_ended_session(self.next_event_id);
+            if let Some(chain_break) = chain_break {
+                let review_entity_id = EntityId::random();
+                self.sync
+                    .session_review_entries
+                    .insert(review_entity_id.clone(), chain_break.id);
+                self.sync.records.push(SyncRecord::in_beginning(
+                    self.sync.beginning.clone(),
+                    RecordId::random(),
+                    review_entity_id,
+                    self.next_sync_mutation_time(),
+                    RecordPayload::FocusStopped {
+                        session_entity_id: self.sync.session_entities[&self.next_event_id].clone(),
+                        void_task: chain_break.task_id.is_some()
+                            && chain_break.task_id == self.void_task_id,
+                    },
+                ));
+                self.sync.records.sort();
+                self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
+                self.end_current_chain(chain_break);
+            }
             self.next_event_id = self.next_event_id.saturating_add(1);
+        }
+    }
+
+    fn commit_timer_stop(&mut self, next_task: Option<TaskId>, key: Option<&str>) -> Response {
+        let timer_backup = self.reservation_backup();
+        let chain_backup = self.chain_backup();
+        let planned = self.timer.planned_seconds();
+        let transition = self.timer.stop(self.now);
+        let result = self.apply_transition(transition, planned).and_then(|()| {
+            if let Some(task_id) = next_task {
+                self.timer
+                    .select_pending_task(task_id)
+                    .map_err(|error| error.to_string())?;
+                self.apply_deferred_task_deletions()?;
+            }
+            self.persist(key)
+        });
+        match result {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(error) => {
+                self.restore_reservation_mutation(timer_backup);
+                self.restore_chain_mutation(chain_backup);
+                self.durable_rejected(error)
+            }
         }
     }
 
@@ -1550,6 +1716,35 @@ impl Service {
         Ok(())
     }
 
+    fn review_qualifies_for_chain(&self, review: &PendingReviewState) -> bool {
+        self.history.records().iter().any(|record| {
+            record.id == review.session_id
+                && record.kind == DomainKind::Focus
+                && record.outcome == SessionOutcome::Completed
+                && record.planned_seconds > 0
+                && record.actual_seconds >= record.planned_seconds
+        })
+    }
+
+    fn dismiss_legacy_review(&mut self, key: Option<&str>) -> Response {
+        let Some(review) = self.pending_review.as_ref() else {
+            return Self::rejected("No Pending Review is available");
+        };
+        if self.review_qualifies_for_chain(review) {
+            return Self::rejected("A Completed Round requires a Session Review");
+        }
+        let review = self.pending_review.take();
+        match self.persist(key) {
+            Ok(()) => Response::Snapshot {
+                snapshot: self.snapshot(),
+            },
+            Err(error) => {
+                self.pending_review = review;
+                self.durable_rejected(error)
+            }
+        }
+    }
+
     fn review_success(
         &mut self,
         task_id: Option<u64>,
@@ -1557,6 +1752,15 @@ impl Service {
         chain_entry_title: Option<String>,
         reflection: Option<String>,
     ) -> Result<(), String> {
+        let Some(review) = self.pending_review.as_ref() else {
+            return Err("No Pending Review is available".into());
+        };
+        if !self.review_qualifies_for_chain(review) {
+            return Err(
+                "Only Completed Rounds can earn Chain Links. Dismiss the stopped Focus Session's Pending Review."
+                    .into(),
+            );
+        }
         let chain_entry_title = chain_entry_title
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
@@ -1566,9 +1770,7 @@ impl Service {
         if !use_void && chain_entry_title.is_some() {
             return Err("Only Void entries can have a Chain Entry Title".into());
         }
-        let Some(mut review) = self.pending_review.take() else {
-            return Err("No Pending Review is available".into());
-        };
+        let mut review = self.pending_review.take().expect("review checked above");
         if review.task_id.is_none() {
             let assigned_id = if use_void {
                 if let Some(id) = self.void_task_id {
@@ -1623,17 +1825,19 @@ impl Service {
         })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.current_chain_length = self.current_chain_length.saturating_add(1);
-        self.unlock_eligible_rewards();
+        if !self.reconcile_daily_goal()? {
+            self.unlock_eligible_rewards(&self.reward_debt());
+        }
         Ok(())
     }
 
-    fn unlock_eligible_rewards(&mut self) {
+    fn unlock_eligible_rewards(&mut self, reward_debt: &[RewardDebt]) {
         let eligible = self.reward_milestones.clone();
         for milestone in &eligible {
             let exists = self.reward_unlocks.iter().any(|unlock| {
                 unlock.chain_id == self.current_chain_id && unlock.milestone_id == milestone.id
             });
-            if milestone.threshold <= self.reward_progress(milestone.id, None) && !exists {
+            if milestone.threshold <= self.reward_progress(milestone.id, reward_debt) && !exists {
                 self.reward_unlocks.push(RewardUnlockState {
                     id: self.next_reward_unlock_id,
                     milestone_id: milestone.id,
@@ -1675,22 +1879,12 @@ impl Service {
         }
     }
 
-    fn reward_progress(&self, milestone_id: u64, chain_id: Option<u64>) -> u64 {
-        let chain_id = chain_id.unwrap_or(self.current_chain_id);
-        let links = if chain_id == self.current_chain_id {
-            &self.chain_links
-        } else {
-            self.ended_chains
-                .iter()
-                .find(|c| c.id == chain_id)
-                .map_or(&self.chain_links, |c| &c.links)
-        };
-        let debt = project_reward_debt(&self.sync.records)
-            .into_iter()
-            .find(|d| {
-                self.sync.reward_milestone_entities.get(&milestone_id)
-                    == Some(&d.milestone_entity_id)
-            });
+    fn reward_progress(&self, milestone_id: u64, reward_debt: &[RewardDebt]) -> u64 {
+        let links = &self.chain_links;
+        let debt = reward_debt.iter().find(|debt| {
+            self.sync.reward_milestone_entities.get(&milestone_id)
+                == Some(&debt.milestone_entity_id)
+        });
         if let Some(debt) = debt {
             if debt.outstanding > 0 {
                 return 0;
@@ -1723,37 +1917,46 @@ impl Service {
         if chain_id != self.current_chain_id {
             return None;
         }
-        let projection = project_session_reviews(&self.sync.records);
-        let debt = project_reward_debt(&self.sync.records)
-            .into_iter()
-            .find(|d| {
-                self.sync.reward_milestone_entities.get(&milestone_id)
-                    == Some(&d.milestone_entity_id)
-            });
+        let debt = self.reward_debt().into_iter().find(|d| {
+            self.sync.reward_milestone_entities.get(&milestone_id) == Some(&d.milestone_entity_id)
+        });
         let used = debt
             .as_ref()
             .map_or_else(Vec::new, |d| d.repayment_review_entity_ids.clone());
         let carried_review_entity_ids = debt
             .as_ref()
             .map_or_else(Vec::new, |d| d.excess_review_entity_ids.clone());
-        let supporting_review_entity_ids = projection
-            .current_chain
-            .links
+        let review_ids = self
+            .sync
+            .session_review_entries
             .iter()
-            .filter(|r| !used.contains(&r.review_entity_id))
-            .map(|r| r.review_entity_id.clone())
-            .collect::<Vec<_>>();
-        let frontier_review_entity_id = projection
-            .current_chain
-            .links
-            .last()?
-            .review_entity_id
-            .clone();
+            .map(|(entity, local)| (*local, entity))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let supporting_review_entity_ids = self
+            .chain_links
+            .iter()
+            .filter_map(|link| review_ids.get(&link.id).copied())
+            .filter(|entity| !used.contains(entity))
+            .cloned()
+            .collect();
+        let frontier_review_entity_id = (*review_ids.get(&self.chain_links.last()?.id)?).clone();
         let observed_review_entity_ids = self
             .sync
             .records
             .iter()
-            .filter(|r| r.payload.chain_judgment().is_some())
+            .filter(|r| {
+                r.payload.chain_judgment().is_some()
+                    || (matches!(r.payload, RecordPayload::DailyGoalBoundary { .. })
+                        && self
+                            .sync
+                            .session_review_entries
+                            .get(&r.entity_id)
+                            .is_some_and(|entry| {
+                                self.ended_chains
+                                    .iter()
+                                    .any(|chain| chain.chain_break.id == *entry)
+                            }))
+            })
             .map(|r| r.entity_id.clone())
             .collect();
         Some(ClaimEvidence {
@@ -1808,26 +2011,30 @@ impl Service {
     fn apply_reward_projection(&mut self, projection: &RewardProjection) {
         let mut milestones = Vec::new();
         for projected in &projection.milestones {
+            let entity_id = match projected {
+                RewardMilestoneProjection::Version { entity_id, .. }
+                | RewardMilestoneProjection::Deleted { entity_id } => entity_id,
+            };
+            let id = self
+                .sync
+                .reward_milestone_entities
+                .iter()
+                .find_map(|(local, global)| (global == entity_id).then_some(*local))
+                .unwrap_or_else(|| {
+                    let id = self.next_reward_milestone_id;
+                    self.next_reward_milestone_id = id.saturating_add(1);
+                    self.sync
+                        .reward_milestone_entities
+                        .insert(id, entity_id.clone());
+                    id
+                });
             if let RewardMilestoneProjection::Version {
-                entity_id,
                 name,
                 threshold,
                 budget,
+                ..
             } = projected
             {
-                let id = self
-                    .sync
-                    .reward_milestone_entities
-                    .iter()
-                    .find_map(|(local, global)| (global == entity_id).then_some(*local))
-                    .unwrap_or_else(|| {
-                        let id = self.next_reward_milestone_id;
-                        self.next_reward_milestone_id = id.saturating_add(1);
-                        self.sync
-                            .reward_milestone_entities
-                            .insert(id, entity_id.clone());
-                        id
-                    });
                 milestones.push(RewardMilestoneState {
                     id,
                     name: name.clone(),
@@ -1837,77 +2044,181 @@ impl Service {
             }
         }
         self.reward_milestones = milestones;
-        let previous_unlocks = self.reward_unlocks.clone();
-        self.reward_unlocks = projection
+        let reward_debt = self.reward_debt();
+        let unlock_keys = self
+            .sync
+            .records
+            .iter()
+            .filter_map(|record| {
+                let RecordPayload::RewardUnlocked {
+                    milestone_entity_id,
+                    previous_chain_break_review_entity_id,
+                    ..
+                } = &record.payload
+                else {
+                    return None;
+                };
+                Some((
+                    record.entity_id.clone(),
+                    (
+                        milestone_entity_id.clone(),
+                        previous_chain_break_review_entity_id.clone(),
+                    ),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut unlocks = projection
             .unlocks
             .iter()
-            .map(|projected| {
-                let chain_id = projected
-                    .previous_chain_break_review_entity_id
-                    .as_ref()
-                    .and_then(|anchor| self.sync.session_review_entries.get(anchor))
-                    .and_then(|entry| {
-                        self.ended_chains
-                            .iter()
-                            .position(|chain| chain.chain_break.id == *entry)
-                            .map(|index| {
-                                self.ended_chains
-                                    .get(index + 1)
-                                    .map_or(self.current_chain_id, |chain| chain.id)
-                            })
-                    })
-                    .unwrap_or_else(|| {
-                        self.ended_chains
-                            .first()
-                            .map_or(self.current_chain_id, |chain| chain.id)
-                    });
-                let milestone_id = self
-                    .sync
+            .filter_map(|projected| {
+                let (chain_id, repaired_anchor) = self.reward_chain(projected)?;
+                Some((projected, chain_id, repaired_anchor))
+            })
+            .collect::<Vec<_>>();
+        // Prefer an award that was already attached to the surviving chain.
+        unlocks.sort_by_key(|(_, _, repaired_anchor)| *repaired_anchor);
+        let mut unclaimed = std::collections::BTreeSet::new();
+        let mut reward_unlocks = Vec::new();
+        for (projected, chain_id, _) in unlocks {
+            let Some(milestone_id) =
+                self.sync
                     .reward_milestone_entities
                     .iter()
                     .find_map(|(local, global)| {
                         (global == &projected.milestone_entity_id).then_some(*local)
                     })
-                    .unwrap_or(0);
-                let id = previous_unlocks
-                    .iter()
-                    .find(|unlock| {
-                        unlock.milestone_id == milestone_id && unlock.chain_id == chain_id
-                    })
-                    .map_or_else(
-                        || {
-                            let id = self.next_reward_unlock_id;
-                            self.next_reward_unlock_id = id.saturating_add(1);
-                            id
-                        },
-                        |unlock| unlock.id,
-                    );
-                let state = if projected.claimed_at.is_some() {
-                    "claimed"
-                } else if self
-                    .reward_milestones
-                    .iter()
-                    .any(|milestone| milestone.id == milestone_id)
-                    && chain_id == self.current_chain_id
-                    && self.reward_progress(milestone_id, Some(chain_id)) >= projected.threshold
-                {
-                    "unlocked"
-                } else {
-                    "unavailable"
-                };
-                RewardUnlockState {
-                    id,
-                    milestone_id,
-                    chain_id,
-                    name: projected.name.clone(),
-                    threshold: projected.threshold,
-                    budget: projected.budget,
-                    state: state.into(),
-                    claimed_at: projected.claimed_at,
-                }
+            else {
+                continue;
+            };
+            if projected.claimed_at.is_none() && !unclaimed.insert((milestone_id, chain_id)) {
+                continue;
+            }
+            let reward_key = (
+                projected.milestone_entity_id.clone(),
+                projected.previous_chain_break_review_entity_id.clone(),
+            );
+            let id = self
+                .sync
+                .reward_unlock_entities
+                .iter()
+                .find_map(|(id, entity)| {
+                    (unlock_keys.get(entity) == Some(&reward_key)).then_some(*id)
+                })
+                .unwrap_or_else(|| {
+                    let id = self.next_reward_unlock_id;
+                    self.next_reward_unlock_id = id.saturating_add(1);
+                    id
+                });
+            self.sync
+                .reward_unlock_entities
+                .insert(id, projected.entity_id.clone());
+            let state = if projected.claimed_at.is_some() {
+                "claimed"
+            } else if self
+                .reward_milestones
+                .iter()
+                .any(|milestone| milestone.id == milestone_id)
+                && chain_id == self.current_chain_id
+                && self.reward_progress(milestone_id, &reward_debt) >= projected.threshold
+            {
+                "unlocked"
+            } else {
+                "unavailable"
+            };
+            reward_unlocks.push(RewardUnlockState {
+                id,
+                milestone_id,
+                chain_id,
+                name: projected.name.clone(),
+                threshold: projected.threshold,
+                budget: projected.budget,
+                state: state.into(),
+                claimed_at: projected.claimed_at,
+            });
+        }
+        self.reward_unlocks = reward_unlocks;
+        let claimed = self
+            .reward_unlocks
+            .iter()
+            .filter(|reward| reward.claimed_at.is_some())
+            .map(|reward| (reward.milestone_id, reward.chain_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        self.reward_unlocks.retain(|reward| {
+            reward.claimed_at.is_some()
+                || !claimed.contains(&(reward.milestone_id, reward.chain_id))
+        });
+        self.unlock_eligible_rewards(&reward_debt);
+    }
+
+    fn reward_chain(&self, reward: &ProjectedRewardUnlock) -> Option<(u64, bool)> {
+        let anchor = reward.previous_chain_break_review_entity_id.as_ref();
+        if let Some(entry) = anchor.and_then(|entity| self.sync.session_review_entries.get(entity))
+            && let Some(index) = self
+                .ended_chains
+                .iter()
+                .position(|chain| chain.chain_break.id == *entry)
+        {
+            return Some((
+                self.ended_chains
+                    .get(index + 1)
+                    .map_or(self.current_chain_id, |chain| chain.id),
+                false,
+            ));
+        }
+        let boundary = anchor.and_then(|anchor| {
+            self.sync.records.iter().find(|record| {
+                &record.entity_id == anchor
+                    && matches!(record.payload, RecordPayload::DailyGoalBoundary { .. })
             })
-            .collect();
-        self.unlock_eligible_rewards();
+        });
+        let Some(boundary) = boundary else {
+            return Some((
+                self.ended_chains
+                    .first()
+                    .map_or(self.current_chain_id, |chain| chain.id),
+                false,
+            ));
+        };
+
+        // A claim stays on the chain containing its frontier after the repair.
+        if let Some(frontier) = &reward.claim_frontier_entity_id {
+            let entry = self.sync.session_review_entries.get(frontier)?;
+            return self
+                .ended_chains
+                .iter()
+                .find(|chain| chain.links.iter().any(|link| link.id == *entry))
+                .map(|chain| chain.id)
+                .or_else(|| {
+                    self.chain_links
+                        .iter()
+                        .any(|link| link.id == *entry)
+                        .then_some(self.current_chain_id)
+                })
+                .map(|chain_id| (chain_id, true));
+        }
+
+        let order = ChainEntryOrder::new(&self.sync.records);
+        let boundary_key = order.key(boundary)?;
+        let archive = self.ended_chains.iter().find(|chain| {
+            self.sync
+                .session_review_entries
+                .iter()
+                .find(|(_, entry)| **entry == chain.chain_break.id)
+                .and_then(|(entity, _)| {
+                    self.sync
+                        .records
+                        .iter()
+                        .filter(|record| &record.entity_id == entity)
+                        .find_map(|record| order.key(record))
+                })
+                .is_some_and(|key| key > boundary_key)
+        });
+        // Keep awards on a subsequent archive. On the current chain an old, unclaimed
+        // award requalifies under the surviving anchor.
+        archive
+            .map(|chain| chain.id)
+            .or_else(|| reward.claimed_at.map(|_| self.current_chain_id))
+            .map(|chain_id| (chain_id, true))
     }
 
     fn review_failure(
@@ -1972,6 +2283,7 @@ impl Service {
         let review_actual_seconds = review.actual_seconds;
         let chain_break = ChainBreakState {
             source: ChainBreakSource::SessionReview,
+            daily_chain_goal: None,
             reservation_entity_id: None,
             id: self.next_chain_entry_id,
             session_id: Some(review_session_id),
@@ -1993,10 +2305,21 @@ impl Service {
         })?;
         self.next_chain_entry_id = self.next_chain_entry_id.saturating_add(1);
         self.end_current_chain(chain_break);
+        self.reconcile_daily_goal()?;
         Ok(())
     }
 
     fn end_current_chain(&mut self, chain_break: ChainBreakState) {
+        if let Some((entity, _)) = self
+            .sync
+            .session_review_entries
+            .iter()
+            .find(|(_, entry)| **entry == chain_break.id)
+        {
+            self.sync
+                .archive_chain_ids
+                .insert(entity.clone(), self.current_chain_id);
+        }
         self.ended_chains.push(EndedChainState {
             id: self.current_chain_id,
             links: std::mem::take(&mut self.chain_links),
@@ -2078,7 +2401,8 @@ impl Service {
                         .or_else(|| {
                             (chain.chain_break.id == entry_id).then(|| {
                                 (
-                                    Some(chain.chain_break.reflection.clone()),
+                                    (!chain.chain_break.reflection.is_empty())
+                                        .then(|| chain.chain_break.reflection.clone()),
                                     chain.chain_break.chain_entry_title.clone(),
                                 )
                             })
@@ -2285,6 +2609,19 @@ impl Service {
         let is_void = record
             .task_id
             .is_some_and(|id| self.void_task_id == Some(id.get()));
+        if let (Some(task_id), Some(title)) = (record.task_id, record.task_title.as_deref())
+            && !is_void
+            && !self.sync.task_entities.contains_key(&task_id.get())
+        {
+            self.record_task_creation(task_id.get(), title);
+            if self
+                .tasks
+                .get(task_id)
+                .is_ok_and(|task| task.status() == TaskStatus::Completed)
+            {
+                let _ = self.record_task_version(task_id.get());
+            }
+        }
         let task_entity_id = record
             .task_id
             .filter(|_| !is_void)
@@ -2311,13 +2648,14 @@ impl Service {
         &mut self,
         review: SubmittedSessionReviewSync,
     ) -> Result<(), String> {
-        self.record_submitted_session_review_with_entity(review, EntityId::random())
+        self.record_submitted_session_review_with_entity(review, EntityId::random(), true)
     }
 
     fn record_submitted_session_review_with_entity(
         &mut self,
         review: SubmittedSessionReviewSync,
         review_entity_id: EntityId,
+        review_mutation_order: bool,
     ) -> Result<(), String> {
         let session_entity_id = self
             .sync
@@ -2340,7 +2678,7 @@ impl Service {
         self.sync
             .session_review_entries
             .insert(review_entity_id.clone(), review.entry_id);
-        self.sync.records.push(SyncRecord::in_beginning(
+        let mut record = SyncRecord::in_beginning(
             self.sync.beginning.clone(),
             RecordId::random(),
             review_entity_id,
@@ -2359,7 +2697,9 @@ impl Service {
                 reflection: review.reflection,
                 chain_entry_title: review.chain_entry_title,
             },
-        ));
+        );
+        record.review_mutation_order = review_mutation_order;
+        self.sync.records.push(record);
         self.sync.records.sort();
         Ok(())
     }
@@ -2469,7 +2809,7 @@ impl Service {
         missing_reviews.sort_by_key(|review| review.entry_id);
         let ordered_review_entities = migration_ordered_entities(missing_reviews.len())?;
         for (review, entity) in missing_reviews.into_iter().zip(ordered_review_entities) {
-            self.record_submitted_session_review_with_entity(review, entity)?;
+            self.record_submitted_session_review_with_entity(review, entity, false)?;
         }
         let missing_milestones = self
             .reward_milestones
@@ -2663,8 +3003,7 @@ impl Service {
         self.sync.records = plan.retained_records().to_vec();
         self.apply_task_projections(plan.task_projections())?;
         self.apply_activity_projections(plan.activity_projections());
-        self.apply_session_review_projection(plan.session_review_projection())?;
-        self.apply_reward_projection(plan.reward_projection());
+        self.apply_chain_and_reward_projections(&plan)?;
         self.apply_deferred_task_deletions()?;
         self.set_clock_warning(plan.retained_records());
         self.sync.legacy_export_completed = true;
@@ -2841,6 +3180,14 @@ impl Service {
         self.history = History::restore(records);
     }
 
+    fn apply_chain_and_reward_projections(&mut self, plan: &SyncPlan) -> Result<(), String> {
+        if !self.reconcile_daily_goal()? {
+            self.apply_session_review_projection(plan.session_review_projection())?;
+            self.apply_reward_projection(plan.reward_projection());
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_session_review_projection(
         &mut self,
@@ -2911,18 +3258,19 @@ impl Service {
                 chain_entry_title: review.chain_entry_title.clone(),
             })
         }
-        let existing_chain_ids = self
-            .ended_chains
-            .iter()
-            .filter_map(|chain| {
+        for chain in &self.ended_chains {
+            if let Some((entity, _)) = self
+                .sync
+                .session_review_entries
+                .iter()
+                .find(|(_, entry)| **entry == chain.chain_break.id)
+            {
                 self.sync
-                    .session_review_entries
-                    .iter()
-                    .find_map(|(entity, local)| {
-                        (*local == chain.chain_break.id).then(|| (entity.clone(), chain.id))
-                    })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+                    .archive_chain_ids
+                    .entry(entity.clone())
+                    .or_insert(chain.id);
+            }
+        }
         let deleted_break_entries = self
             .sync
             .records
@@ -2941,8 +3289,14 @@ impl Service {
             .retain(|reward| !deleted_chain_ids.contains(&reward.chain_id));
         let mut next_entry_id = self.next_chain_entry_id;
         let mut ended_chains = Vec::new();
-        let mut used_chain_ids = std::collections::BTreeSet::new();
-        let mut next_chain_id = 1_u64;
+        let mut next_chain_id = self
+            .sync
+            .archive_chain_ids
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         for chain in &projection.ended_chains {
             let links = chain
                 .links
@@ -2953,30 +3307,51 @@ impl Service {
                 .chain_break
                 .as_ref()
                 .ok_or_else(|| "ended projected chain has no Chain Break".to_owned())?;
-            let (source, session_id, reservation_entity_id) = match &break_review.source {
-                ProjectedChainBreakSource::SessionReview { session_entity_id } => (
-                    ChainBreakSource::SessionReview,
-                    Some(
-                        self.sync
-                            .session_entities
-                            .iter()
-                            .find_map(|(local, global)| {
-                                (global == session_entity_id).then_some(*local)
-                            })
-                            .ok_or_else(|| {
-                                "projected Chain Break source Session is not local".to_owned()
-                            })?,
+            let (source, session_id, reservation_entity_id, daily_chain_goal) =
+                match &break_review.source {
+                    ProjectedChainBreakSource::SessionReview { session_entity_id }
+                    | ProjectedChainBreakSource::FocusStopped { session_entity_id } => (
+                        if matches!(
+                            &break_review.source,
+                            ProjectedChainBreakSource::FocusStopped { .. }
+                        ) {
+                            ChainBreakSource::FocusStopped
+                        } else {
+                            ChainBreakSource::SessionReview
+                        },
+                        Some(
+                            self.sync
+                                .session_entities
+                                .iter()
+                                .find_map(|(local, global)| {
+                                    (global == session_entity_id).then_some(*local)
+                                })
+                                .ok_or_else(|| {
+                                    "projected Chain Break source Session is not local".to_owned()
+                                })?,
+                        ),
+                        None,
+                        None,
                     ),
-                    None,
-                ),
-                ProjectedChainBreakSource::ReservationReview {
-                    reservation_entity_id,
-                } => (
-                    ChainBreakSource::ReservationReview,
-                    None,
-                    Some(reservation_entity_id.clone()),
-                ),
-            };
+                    ProjectedChainBreakSource::ReservationReview {
+                        reservation_entity_id,
+                    } => (
+                        ChainBreakSource::ReservationReview,
+                        None,
+                        Some(reservation_entity_id.clone()),
+                        None,
+                    ),
+                    ProjectedChainBreakSource::DailyChainGoal(reason) => (
+                        ChainBreakSource::DailyChainGoal,
+                        None,
+                        None,
+                        Some(DailyChainGoalMiss {
+                            date: reason.date.to_string(),
+                            achieved: reason.achieved,
+                            quota: reason.quota,
+                        }),
+                    ),
+                };
             let task_id = if break_review.task_kind == Some(ReviewedTaskKind::SystemVoid) {
                 Some(
                     self.void_task_id
@@ -3008,16 +3383,12 @@ impl Service {
                     .attribute(session_id, TaskId::new(task_id), title)
                     .map_err(str::to_owned)?;
             }
-            let chain_id = existing_chain_ids
-                .get(&break_review.review_entity_id)
-                .copied()
-                .filter(|id| used_chain_ids.insert(*id))
-                .unwrap_or_else(|| {
-                    while used_chain_ids.contains(&next_chain_id) {
-                        next_chain_id = next_chain_id.saturating_add(1);
-                    }
+            let chain_id = *self
+                .sync
+                .archive_chain_ids
+                .entry(break_review.review_entity_id.clone())
+                .or_insert_with(|| {
                     let id = next_chain_id;
-                    used_chain_ids.insert(id);
                     next_chain_id = next_chain_id.saturating_add(1);
                     id
                 });
@@ -3026,6 +3397,7 @@ impl Service {
                 links,
                 chain_break: ChainBreakState {
                     source,
+                    daily_chain_goal,
                     reservation_entity_id,
                     id: entry_id(
                         &mut next_entry_id,
@@ -3049,11 +3421,7 @@ impl Service {
             .collect::<Result<Vec<_>, _>>()?;
         self.ended_chains = ended_chains;
         self.chain_links = chain_links;
-        self.current_chain_id = used_chain_ids
-            .last()
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
+        self.current_chain_id = next_chain_id;
         self.current_chain_length = self.chain_links.len() as u64;
         self.next_chain_entry_id = next_entry_id;
         Ok(())
@@ -3320,6 +3688,7 @@ impl Default for Service {
 impl Handler for Service {
     #[allow(clippy::too_many_lines)]
     fn handle(&mut self, request: Request) -> Response {
+        self.observe_time();
         if self.durable_health == DurableHealthState::Degraded && request.command.mutates() {
             return Response::Error {
                 error: ProtocolError::DurableWriteUnavailable {
@@ -3330,7 +3699,6 @@ impl Handler for Service {
                 },
             };
         }
-        self.observe_time();
         let mutation_key = request.idempotency_key.clone();
         if let Some(key) = &mutation_key
             && self.applied_keys.contains(key)
@@ -3352,7 +3720,22 @@ impl Handler for Service {
                     ..
                 } | Command::StartTitle { .. }
             ));
-        let rollback = reservation_mutation.then(|| self.reservation_backup());
+        let review_mutation = matches!(
+            &request.command,
+            Command::ReviewSuccess { .. }
+                | Command::ReviewSuccessAssign { .. }
+                | Command::ReviewFailure { .. }
+        );
+        let rollback = (reservation_mutation || review_mutation).then(|| self.reservation_backup());
+        let review_rollback = review_mutation.then(|| {
+            (
+                self.pending_review.clone(),
+                self.chain_backup(),
+                self.reward_milestones.clone(),
+                self.next_reward_milestone_id,
+                self.next_reward_unlock_id,
+            )
+        });
         let result = match request.command {
             Command::Reserve {
                 minutes,
@@ -3371,6 +3754,9 @@ impl Handler for Service {
                     confirmed,
                     mutation_key.as_deref(),
                 );
+            }
+            Command::ConfigureDailyChainGoal { settings } => {
+                return self.commit_daily_chain_goal(settings, mutation_key.as_deref());
             }
             Command::ConfigureReservation { minutes } => {
                 return self.commit_reservation_configuration(minutes, mutation_key.as_deref());
@@ -3482,29 +3868,8 @@ impl Handler for Service {
                 let transition = self.timer.resume(self.now);
                 self.apply_transition(transition, planned)
             }
-            Command::Stop => {
-                let planned = self.timer.planned_seconds();
-                let transition = self.timer.stop(self.now);
-                self.apply_transition(transition, planned)
-            }
-            Command::StopReview => {
-                let planned = self.timer.planned_seconds();
-                let transition = self.timer.stop(self.now);
-                self.apply_transition(transition, planned).and_then(|()| {
-                    let Some(record) = self.history.records().last() else {
-                        return Err("Stopped Session was not recorded".into());
-                    };
-                    if record.kind != DomainKind::Focus {
-                        return Err("Only a stopped Focus Session can enter Session Review".into());
-                    }
-                    self.pending_review = Some(PendingReviewState {
-                        session_id: record.id,
-                        actual_seconds: record.actual_seconds,
-                        task_id: record.task_id.map(TaskId::get),
-                        task_title: record.task_title.clone(),
-                    });
-                    Ok(())
-                })
+            Command::Stop | Command::StopReview => {
+                return self.commit_timer_stop(None, mutation_key.as_deref());
             }
             Command::Skip => {
                 let planned = self.timer.planned_seconds();
@@ -3685,15 +4050,7 @@ impl Handler for Service {
                         .map_err(|error| error.to_string())
                         .and_then(|()| self.apply_deferred_task_deletions())
                 } else if stop_current {
-                    let planned = self.timer.planned_seconds();
-                    let transition = self.timer.stop(self.now);
-                    self.apply_transition(transition, planned)
-                        .and_then(|()| {
-                            self.timer
-                                .select_pending_task(id)
-                                .map_err(|error| error.to_string())
-                        })
-                        .and_then(|()| self.apply_deferred_task_deletions())
+                    return self.commit_timer_stop(Some(id), mutation_key.as_deref());
                 } else {
                     Err("Current Session must be stopped before switching Task".into())
                 }
@@ -3760,6 +4117,9 @@ impl Handler for Service {
                         "average_focus_seconds": summary.average_focus_seconds(),
                     }),
                 };
+            }
+            Command::ReviewDismiss => {
+                return self.dismiss_legacy_review(mutation_key.as_deref());
             }
             Command::ReviewSuccess { reflection } => {
                 self.review_success(None, false, None, reflection)
@@ -3845,7 +4205,7 @@ impl Handler for Service {
                         self.next_reward_milestone_id =
                             self.next_reward_milestone_id.saturating_add(1);
                         self.record_reward_milestone_version(id)?;
-                        self.unlock_eligible_rewards();
+                        self.unlock_eligible_rewards(&self.reward_debt());
                         Ok(())
                     })()
                 }
@@ -3878,7 +4238,7 @@ impl Handler for Service {
                     milestone.budget = budget;
                     match self.record_reward_milestone_version(id) {
                         Ok(()) => {
-                            self.unlock_eligible_rewards();
+                            self.unlock_eligible_rewards(&self.reward_debt());
                             Ok(())
                         }
                         Err(error) => Err(error),
@@ -3993,30 +4353,35 @@ impl Handler for Service {
                     value: serde_json::json!({
                         "milestones": self.reward_milestones,
                         "unlocks": self.reward_unlocks,
-                        "debt": project_reward_debt(&self.sync.records),
+                        "debt": self.reward_debt(),
                     }),
                 };
             }
         };
-        match result {
+        let response = match result {
             Ok(()) => match self.persist(mutation_key.as_deref()) {
-                Ok(()) => Response::Snapshot {
-                    snapshot: self.snapshot(),
-                },
-                Err(error) => {
-                    if let Some(backup) = rollback {
-                        self.restore_reservation_mutation(backup);
-                    }
-                    self.durable_rejected(error)
+                Ok(()) => {
+                    return Response::Snapshot {
+                        snapshot: self.snapshot(),
+                    };
                 }
+                Err(error) => self.durable_rejected(error),
             },
-            Err(error) => {
-                if let Some(backup) = rollback {
-                    self.restore_reservation_mutation(backup);
-                }
-                Self::rejected(error)
-            }
+            Err(error) => Self::rejected(error),
+        };
+        if let Some(backup) = rollback {
+            self.restore_reservation_mutation(backup);
         }
+        if let Some((pending, chain, milestones, next_milestone_id, next_unlock_id)) =
+            review_rollback
+        {
+            self.pending_review = pending;
+            self.restore_chain_mutation(chain);
+            self.reward_milestones = milestones;
+            self.next_reward_milestone_id = next_milestone_id;
+            self.next_reward_unlock_id = next_unlock_id;
+        }
+        response
     }
 }
 
@@ -4252,7 +4617,6 @@ impl PersistedService {
                 task_id: task_id.map(TaskId::get),
             },
         };
-        let clock = PlatformClock::default();
         let persisted = Self {
             data_format_version: 6,
             timer: PersistedTimer {
@@ -4295,7 +4659,7 @@ impl PersistedService {
                 })
                 .collect(),
             next_event_id: service.next_event_id,
-            boot_id: clock.boot_id().unwrap_or_else(|_| "unknown".into()),
+            boot_id: service.clock.boot_id().unwrap_or_else(|_| "unknown".into()),
             observed_monotonic: service.now,
             observed_wall: service.wall,
             current_chain_id: service.current_chain_id,
@@ -4321,13 +4685,14 @@ impl PersistedService {
 
     #[cfg(test)]
     fn decode(payload: &str) -> Result<Service, String> {
-        Self::decode_with_observation(payload, None)
+        Self::decode_with_observation(payload, None, std::sync::Arc::new(PlatformClock::default()))
     }
 
     #[allow(clippy::too_many_lines)]
     fn decode_with_observation(
         payload: &str,
         observation: Option<RecoveryObservation>,
+        clock: ServiceClock,
     ) -> Result<Service, String> {
         let persisted: Self = serde_json::from_str(payload)
             .map_err(|error| format!("invalid durable state: {error}"))?;
@@ -4347,7 +4712,6 @@ impl PersistedService {
             persisted.timer.long_break_seconds,
         )
         .map_err(|error| error.to_string())?;
-        let clock = PlatformClock::default();
         let current_observation = observation.unwrap_or_else(|| RecoveryObservation {
             boot_id: clock
                 .boot_id()
@@ -4468,7 +4832,12 @@ impl PersistedService {
                 })
                 .collect::<Result<_, String>>()?,
         );
+        let mut sync = persisted.sync;
+        sync.daily_goal_next_cutoff = pomotui_sync::DailyGoalSchedule::new(&sync.records)
+            .next_cutoff(sync.daily_goal_observed_through.unwrap_or(i64::MIN / 1000));
         Ok(Service {
+            device_time_zone: daily_chain_goal::device_time_zone(),
+            clock,
             timer,
             tasks,
             history,
@@ -4500,7 +4869,7 @@ impl PersistedService {
             reward_unlocks: persisted.reward_unlocks,
             next_reward_milestone_id: persisted.next_reward_milestone_id,
             next_reward_unlock_id: persisted.next_reward_unlock_id,
-            sync: persisted.sync,
+            sync,
         })
     }
 }
@@ -5783,52 +6152,40 @@ mod tests {
         assert_eq!(snapshot.action_chain.length, 1);
     }
 
-    #[test]
-    fn early_stop_enters_review_only_when_explicitly_requested() {
-        let mut service = Service::new();
-        service.handle(request(
-            Some("start-reviewed"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
+    fn complete_focus_round(service: &mut Service, key: Option<&str>, task_id: Option<u64>) {
+        if service.snapshot().kind != SessionKind::Focus {
+            assert!(matches!(
+                service.handle(request(None, Command::Skip)),
+                Response::Snapshot { .. }
+            ));
+        }
+        assert!(matches!(
+            service.handle(request(
+                key,
+                Command::Start {
+                    kind: SessionKind::Focus,
+                    task_id
+                },
+            )),
+            Response::Snapshot { .. }
         ));
-        service.handle(request(Some("stop-reviewed"), Command::StopReview));
-        let review = service.snapshot().pending_review.expect("pending review");
-        assert_eq!(review.actual_seconds, 0);
-
-        service.pending_review = None;
-        service.handle(request(
-            Some("start-unreviewed"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
-        ));
-        service.handle(request(Some("stop-unreviewed"), Command::Stop));
-        assert!(service.snapshot().pending_review.is_none());
-        assert_eq!(
-            service
-                .history
-                .records()
-                .last()
-                .expect("history")
-                .actual_seconds,
-            0
-        );
+        let planned = service.timer.planned_seconds();
+        let previous_end = service
+            .history
+            .records()
+            .iter()
+            .map(|record| record.ended_at)
+            .max();
+        let wall = previous_end.map_or(service.wall, |last| last.max(service.wall)) + 1;
+        service.reminders_enabled = false;
+        service.apply_observation(service.now + planned, wall);
+        assert!(service.snapshot().pending_review.is_some());
     }
 
     #[test]
     fn unattributed_review_can_use_the_protected_void_task() {
         let mut service = Service::new();
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), None);
 
         let response = service.handle(request(
             Some("void-review"),
@@ -5878,14 +6235,7 @@ mod tests {
     #[test]
     fn pending_review_identifies_an_existing_void_attribution() {
         let mut service = Service::new();
-        service.handle(request(
-            Some("first-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: None,
-            },
-        ));
-        service.handle(request(Some("first-stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("first-start"), None);
         service.handle(request(
             Some("first-review"),
             Command::ReviewSuccessAssign {
@@ -5897,14 +6247,7 @@ mod tests {
         ));
         let void_id = service.void_task_id.expect("Void identity");
 
-        service.handle(request(
-            Some("second-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(void_id),
-            },
-        ));
-        service.handle(request(Some("second-stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("second-start"), Some(void_id));
 
         let review = service.snapshot().pending_review.expect("Pending Review");
         assert_eq!(review.task_id, Some(void_id));
@@ -5942,14 +6285,7 @@ mod tests {
                 title: "Hard slice".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
 
         assert!(matches!(
             service.handle(request(
@@ -6001,14 +6337,7 @@ mod tests {
                 title: "Stable identity".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
         let pending_id = service.pending_review.as_ref().expect("pending").session_id;
         assert!(matches!(
             service.handle(request(
@@ -6054,14 +6383,7 @@ mod tests {
                 title: "Stable task name".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
         service.handle(request(
             Some("review"),
             Command::ReviewSuccess {
@@ -6114,14 +6436,7 @@ mod tests {
                 title: "Earn reward".into(),
             },
         ));
-        service.handle(request(
-            Some("start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start"), Some(1));
         let response = service.handle(request(
             Some("review"),
             Command::ReviewSuccess { reflection: None },
@@ -6196,14 +6511,7 @@ mod tests {
                 title: "Build chain".into(),
             },
         ));
-        service.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-success"), Some(1));
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess { reflection: None },
@@ -6218,14 +6526,7 @@ mod tests {
         ));
         assert_eq!(service.snapshot().current_chain_rewards.len(), 2);
 
-        service.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-failure"), Some(1));
         service.handle(request(
             Some("failure"),
             Command::ReviewFailure {
@@ -6262,28 +6563,14 @@ mod tests {
                 title: "Build archive details".into(),
             },
         ));
-        service.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-success"), Some(1));
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess {
                 reflection: Some("Completed the data projection".into()),
             },
         ));
-        service.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-failure"), Some(1));
         service.handle(request(
             Some("failure"),
             Command::ReviewFailure {
@@ -6326,26 +6613,12 @@ mod tests {
                 title: "Retained work".into(),
             },
         ));
-        service.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-success"), Some(1));
         service.handle(request(
             Some("success"),
             Command::ReviewSuccess { reflection: None },
         ));
-        service.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        service.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut service, Some("start-failure"), Some(1));
         service.handle(request(
             Some("failure"),
             Command::ReviewFailure {
@@ -6357,7 +6630,7 @@ mod tests {
         ));
         let before = service.snapshot();
         let ended_id = before.recent_ended_chains[0].id;
-        assert_eq!(before.recent_history.len(), 2);
+        assert_eq!(before.recent_history.len(), 3);
         assert_eq!(before.recent_ended_chains[0].rewards.len(), 1);
 
         let response = service.handle(request(
@@ -6368,7 +6641,7 @@ mod tests {
             panic!("delete should return the authoritative snapshot");
         };
         assert!(snapshot.recent_ended_chains.is_empty());
-        assert_eq!(snapshot.recent_history.len(), 2);
+        assert_eq!(snapshot.recent_history, before.recent_history);
         assert_eq!(
             snapshot.tasks[0].focus_seconds,
             before.tasks[0].focus_seconds
@@ -6380,7 +6653,7 @@ mod tests {
             panic!("idempotent retry should replay the authoritative snapshot");
         };
         assert!(replay.recent_ended_chains.is_empty());
-        assert_eq!(replay.recent_history.len(), 2);
+        assert_eq!(replay.recent_history, before.recent_history);
 
         assert!(matches!(
             service.handle(request(
@@ -6405,14 +6678,7 @@ mod tests {
                     title: "Durable archive".into(),
                 },
             ));
-            service.handle(request(
-                Some("start"),
-                Command::Start {
-                    kind: SessionKind::Focus,
-                    task_id: Some(1),
-                },
-            ));
-            service.handle(request(Some("stop"), Command::StopReview));
+            complete_focus_round(&mut service, Some("start"), Some(1));
             service.handle(request(
                 Some("failure"),
                 Command::ReviewFailure {
@@ -6612,14 +6878,7 @@ mod tests {
                     title: "Restart Review".into(),
                 },
             ));
-            service.handle(request(
-                Some("start-reviewed-session"),
-                Command::Start {
-                    kind: SessionKind::Focus,
-                    task_id: Some(1),
-                },
-            ));
-            service.handle(request(Some("stop-for-review"), Command::StopReview));
+            complete_focus_round(&mut service, Some("start-reviewed-session"), Some(1));
             assert!(matches!(
                 service.handle(request(
                     Some("submit-session-review"),
@@ -6784,14 +7043,7 @@ mod tests {
                 title: "Shared chain".into(),
             },
         ));
-        first.handle(request(
-            Some("start-success"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        first.handle(request(Some("stop-success"), Command::StopReview));
+        complete_focus_round(&mut first, Some("start-success"), Some(1));
         first.handle(request(
             Some("review-success"),
             Command::ReviewSuccess {
@@ -6865,14 +7117,7 @@ mod tests {
             assert_eq!(entry.chain_entry_title.as_deref(), Some("corrected title"));
         }
 
-        first.handle(request(
-            Some("start-failure"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        first.handle(request(Some("stop-failure"), Command::StopReview));
+        complete_focus_round(&mut first, Some("start-failure"), Some(1));
         first.handle(request(
             Some("review-failure"),
             Command::ReviewFailure {
@@ -6892,14 +7137,7 @@ mod tests {
             .iter()
             .map(|record| record.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        second.handle(request(
-            Some("late-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        second.handle(request(Some("late-stop"), Command::StopReview));
+        complete_focus_round(&mut second, Some("late-start"), Some(1));
         let latest_known_end = second
             .sync
             .records
@@ -6952,8 +7190,8 @@ mod tests {
             first.snapshot().recent_chain_links,
             second.snapshot().recent_chain_links
         );
-        assert_eq!(first.snapshot().recent_history.len(), 3);
-        assert_eq!(second.snapshot().recent_history.len(), 3);
+        assert_eq!(first.snapshot().recent_history.len(), 4);
+        assert_eq!(second.snapshot().recent_history.len(), 4);
         assert_eq!(first.snapshot().current_chain_rewards.len(), 1);
         assert_eq!(second.snapshot().current_chain_rewards.len(), 1);
         assert_eq!(first.snapshot().current_chain_rewards[0].state, "unlocked");
@@ -7067,14 +7305,7 @@ mod tests {
             },
         ));
         for (service, prefix) in [(&mut first, "first"), (&mut second, "second")] {
-            service.handle(request(
-                Some(prefix),
-                Command::Start {
-                    kind: SessionKind::Focus,
-                    task_id: Some(1),
-                },
-            ));
-            service.handle(request(None, Command::StopReview));
+            complete_focus_round(service, Some(prefix), Some(1));
             service.handle(request(None, Command::ReviewSuccess { reflection: None }));
         }
         let unlock_id = first
@@ -7116,14 +7347,7 @@ mod tests {
             .iter()
             .map(|record| record.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        second.handle(request(
-            Some("late-start"),
-            Command::Start {
-                kind: SessionKind::Focus,
-                task_id: Some(1),
-            },
-        ));
-        second.handle(request(Some("late-stop"), Command::StopReview));
+        complete_focus_round(&mut second, Some("late-start"), Some(1));
         second.handle(request(
             Some("late-failure"),
             Command::ReviewFailure {

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 pomotui-protocol = { path = "../pomotui-protocol" }
 ratatui = "0.30"
 crossterm = "0.29"

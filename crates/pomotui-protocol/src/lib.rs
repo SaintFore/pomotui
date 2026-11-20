@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 64 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_WORKERS: usize = 8;
@@ -43,6 +43,9 @@ pub enum Command {
     },
     ConfigureReservation {
         minutes: u64,
+    },
+    ConfigureDailyChainGoal {
+        settings: Option<DailyChainGoalSettings>,
     },
     Start {
         kind: SessionKind,
@@ -82,6 +85,7 @@ pub enum Command {
     },
     History,
     Summary,
+    ReviewDismiss,
     ReviewSuccess {
         reflection: Option<String>,
     },
@@ -199,6 +203,8 @@ impl Request {
 pub struct Snapshot {
     #[serde(default)]
     pub reservation: Option<ReservationSummary>,
+    #[serde(default)]
+    pub daily_chain_goal: DailyChainGoalSnapshot,
     #[serde(default = "default_reservation_minutes")]
     pub reservation_minutes: u64,
     pub state: String,
@@ -225,6 +231,38 @@ pub struct Snapshot {
     #[serde(default)]
     pub reward_debt: Vec<RewardDebtSummary>,
     pub current_chain_rewards: Vec<RewardUnlockSummary>,
+}
+
+/// Civil dates use YYYY-MM-DD, and the time zone is an IANA name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalSettings {
+    pub quota: u64,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub time_zone: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalChange {
+    pub effective_date: String,
+    pub settings: Option<DailyChainGoalSettings>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalSnapshot {
+    pub device_time_zone: String,
+    pub device_local_date: String,
+    pub date: String,
+    pub achieved: u64,
+    pub active: Option<DailyChainGoalSettings>,
+    pub scheduled: Option<DailyChainGoalChange>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DailyChainGoalMiss {
+    pub date: String,
+    pub achieved: u64,
+    pub quota: u64,
 }
 
 /// Default time window for a new Focus Reservation.
@@ -264,6 +302,8 @@ pub struct PendingReviewSummary {
     pub task_title: Option<String>,
     #[serde(default)]
     pub is_void: bool,
+    #[serde(default)]
+    pub dismiss_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,13 +315,15 @@ pub struct ChainLinkSummary {
     pub chain_entry_title: Option<String>,
 }
 
-/// The user judgment that ended an Action Chain; never an automatic timer event.
+/// The event that ended an Action Chain.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChainBreakSource {
     #[default]
     SessionReview,
     ReservationReview,
+    FocusStopped,
+    DailyChainGoal,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -293,6 +335,8 @@ pub struct EndedChainSummary {
     pub break_id: u64,
     #[serde(default)]
     pub break_source: ChainBreakSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_daily_chain_goal: Option<DailyChainGoalMiss>,
     pub break_task_title: Option<String>,
     pub break_actual_seconds: Option<u64>,
     pub break_reflection: String,
@@ -616,6 +660,22 @@ mod tests {
             Err(ProtocolError::IncompatibleVersion { .. })
         ));
         assert!(serde_json::from_str::<Request>("{broken").is_err());
+    }
+
+    #[test]
+    fn v6_frontends_get_a_version_error_before_receiving_new_chain_break_kinds() {
+        let request = Request {
+            version: 6,
+            idempotency_key: None,
+            command: Command::Status,
+        };
+        assert_eq!(
+            request.validate(),
+            Err(ProtocolError::IncompatibleVersion {
+                received: 6,
+                supported: 7
+            })
+        );
     }
 
     #[test]
