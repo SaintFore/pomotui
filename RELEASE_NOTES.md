@@ -1,4 +1,4 @@
-# Pomotui v0.4.2
+# Pomotui v0.4.3
 
 - Hide empty Reward Debt entries from the Rewards and Action Chain screens.
   Outstanding debt and recorded repayments remain visible.

@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "pomotui-protocol",
  "serde_json",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-domain"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "unicode-normalization",
  "unicode-width",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-platform"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "libc",
  "pomotui-domain",
@@ -1789,7 +1789,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-protocol"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "pomotui-domain",
  "serde",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-service"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "iana-time-zone",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-sync"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-tray"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "muda",
  "pomotui-protocol",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "pomotui-tui"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "crossterm",
