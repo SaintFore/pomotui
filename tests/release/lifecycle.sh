@@ -39,6 +39,8 @@ for state in stopped failed start-limit disabled conflict dropin; do
         conflict|dropin)
             as_user systemctl --user stop pomotui.service
             install -d -o "$user" -g "$user" "/home/$user/.config/systemd/user" "/home/$user/.local/bin"
+            preserved_cli="/home/$user/.local/bin/pomotui-predecessor-cli"
+            install -m755 /usr/bin/pomotui "$preserved_cli"
             cp /usr/bin/pomotui-service "/home/$user/.local/bin/pomotui-service"
             if [[ "$state" == conflict ]]; then
                 conflict_path="/home/$user/.config/systemd/user/pomotui.service"
@@ -52,7 +54,7 @@ for state in stopped failed start-limit disabled conflict dropin; do
             as_user systemctl --user daemon-reload
             as_user systemctl --user start pomotui.service
             conflict_pid=$(as_user systemctl --user show pomotui.service -p MainPID --value)
-            as_user pomotui status --json > "$lifecycle_dir/$state-source-status.json" ;;
+            as_user "$preserved_cli" status --json > "$lifecycle_dir/$state-source-status.json" ;;
 
     esac
     as_user systemctl --user show pomotui.service > "$lifecycle_dir/$state-before-unit.txt"
@@ -66,7 +68,8 @@ for state in stopped failed start-limit disabled conflict dropin; do
             sha256sum --check "$lifecycle_dir/$state-preserved.sha256"
             [[ "$(as_user systemctl --user show pomotui.service -p MainPID --value)" == "$conflict_pid" ]]
             [[ "$(readlink "/proc/$conflict_pid/exe")" == "/home/$user/.local/bin/pomotui-service" ]]
-            as_user pomotui status --json > "$lifecycle_dir/$state-preserved-status.json"
+            # A preserved source service may still speak the old package's protocol.
+            as_user "$preserved_cli" status --json > "$lifecycle_dir/$state-preserved-status.json"
             grep -F "$conflict_path" "$lifecycle_dir/$state-upgrade.log"
             grep -F 'conflict' "$lifecycle_dir/$state-upgrade.log" ;;
         *)

@@ -1,4 +1,4 @@
-# Pomotui v0.4.0
+# Pomotui v0.4.1
 
 ## Daily Chain Goal
 
@@ -22,3 +22,8 @@
 - Upgrade the Timer Service and frontends together to protocol v7. The new
   Timer Service reads older sync documents and writes exchange format v9.
   Upgrade all Devices that share an exchange file before they resume syncing.
+
+## AUR installation
+
+- Both AUR packages build the release binaries locally. The full Rust test
+  suite and the Arch install and upgrade checks run in release CI.

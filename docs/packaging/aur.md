@@ -14,6 +14,11 @@ the same required gate. Its `r<count>.g<commit12>` metadata is a tested snapshot
 users still fetch latest upstream source when building `pomotui-git`. Rebuild with
 `paru -S pomotui-git`, or check VCS updates with `paru -Syu --devel`.
 
+Both AUR recipes compile the release binaries on the installer's machine. The
+hosted publication gate runs the workspace test suite and tests the built
+packages with pacman and systemd. This keeps normal AUR installs from compiling
+a second Cargo profile and running the workspace integration suite.
+
 The previous manual AUR `publish=true` entry point and tag-triggered release
 publisher are removed. Do not create a tag first or hand-edit generated version,
 archive checksum or `.SRCINFO` values. The candidate generates them from the
