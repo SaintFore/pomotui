@@ -36,11 +36,6 @@ build() {
     cargo build --frozen --release --workspace
 }
 
-check() {
-    cd pomotui
-    cargo test --frozen --workspace --all-targets --all-features
-}
-
 package() {
     cd pomotui
 

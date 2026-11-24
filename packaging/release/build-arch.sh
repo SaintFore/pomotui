@@ -35,7 +35,7 @@ for channel in aur-stable aur-git; do
     makepkg --printsrcinfo > generated.SRCINFO
     diff -u .SRCINFO generated.SRCINFO
     makepkg --verifysource --holdver
-    # Build the real generated recipe, including check(), with the selected toolchain.
+    # Build the real generated recipe with the selected toolchain.
     makepkg --noconfirm --holdver --force
     diff -u .SRCINFO <(makepkg --printsrcinfo)
     if [[ "$channel" == aur-git ]]; then

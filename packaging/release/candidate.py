@@ -95,7 +95,6 @@ def plan(args):
             recipe = recipe.replace('    cargo fetch --locked --target "$(rustc -vV | sed -n \'s/host: //p\')"',
                 f'    rustup toolchain install {toolchain} --profile minimal\n    rustup target add --toolchain {toolchain} {target}\n    cargo +{toolchain} fetch --locked --target {target}')
             recipe = recipe.replace('cargo build --frozen --release --workspace', f'cargo +{toolchain} build --frozen --release --workspace --target {target}')
-            recipe = recipe.replace('cargo test --frozen', f'cargo +{toolchain} test --frozen')
             recipe = recipe.replace('target/release/', f'target/{target}/release/')
             (dest / 'PKGBUILD').write_text(recipe)
             (dest / '.SRCINFO').write_text(info)

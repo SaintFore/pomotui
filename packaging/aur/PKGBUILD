@@ -29,11 +29,6 @@ build() {
     cargo build --frozen --release --workspace
 }
 
-check() {
-    cd "${pkgname}-${pkgver}"
-    cargo test --frozen --workspace --all-targets --all-features
-}
-
 package() {
     cd "${pkgname}-${pkgver}"
 

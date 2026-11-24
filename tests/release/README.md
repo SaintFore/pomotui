@@ -219,6 +219,8 @@ source-executable drop-in scenarios. Crashes and start-limit exhaustion use the
 real manager. The conflict scenarios keep an old source-install executable
 responding, proving that a status response alone cannot establish acceptance;
 its exact override is diagnosed and its content and process are preserved.
+The probe uses the predecessor CLI so that it can check a preserved service
+across protocol-version changes.
 All scenario state belongs to the disposable acceptance user.
 
 ### Hosted lifecycle evidence
