@@ -53,7 +53,7 @@ def request(command='status', **fields):
 def record(name, value):
     (out / f'{name}.json').write_text(json.dumps(value, indent=2) + '\n')
 
-def fresh(name):
+def fresh(name, focus_minutes=13):
     print(f'SCENARIO {name}', flush=True)
     manager('disable', '--now', 'pomotui.socket', check=False)
     manager('stop', 'pomotui.service', check=False)
@@ -61,7 +61,7 @@ def fresh(name):
     shutil.rmtree(data, ignore_errors=True)
     shutil.rmtree(config.parent, ignore_errors=True)
     config.parent.mkdir(parents=True)
-    config.write_text('focus_minutes = 13\nshort_break_minutes = 3\nlong_break_minutes = 9\nrounds_per_cycle = 3\nreservation_minutes = 7\nreminder_enabled = false\nvolume = 23\nlanguage = "en"\n')
+    config.write_text(f'focus_minutes = {focus_minutes}\nshort_break_minutes = 3\nlong_break_minutes = 9\nrounds_per_cycle = 3\nreservation_minutes = 7\nreminder_enabled = false\nvolume = 23\nlanguage = "en"\n')
     run('chown', '-R', f'{user}:{user}', str(home))
     manager('daemon-reload')
     manager('reset-failed', 'pomotui.service', check=False)
@@ -142,31 +142,49 @@ assert after['current_task_id'] == task and after['planned_seconds'] == 780
 time.sleep(2)
 assert request()['remaining_seconds'] == after['remaining_seconds']
 
-fresh('pending-review-and-durable-state')
+fresh('pending-review-and-durable-state', focus_minutes=1)
+legacy_review = wire_version < 7
+
+def create_pending_review(task):
+    start(task)
+    if legacy_review:
+        time.sleep(1)
+        request('stop_review')
+        return
+    deadline = time.monotonic() + 75
+    while not request()['pending_review']:
+        assert time.monotonic() < deadline, 'Focus Session did not reach its deadline'
+        time.sleep(0.25)
+
 task = create_task()
 request('reward_create', name='Acceptance reward', threshold=1, budget=42)
-start(task)
-time.sleep(1)
-request('stop_review')
+create_pending_review(task)
 request('review_success', reflection='Preserved successful work')
 unlock = request()['current_chain_rewards'][0]['id']
 request('reward_claim', unlock_id=unlock)
-start(task)
-time.sleep(1)
-request('stop_review')
+if not legacy_review:
+    request('skip')  # Skip the break after the first Completed Round.
+create_pending_review(task)
 before, after, _ = upgrade('pending-review-and-durable-state')
 for field in ['tasks', 'recent_history']:
     assert after[field] == before[field], field
-assert after['pending_review']['dismiss_only'] is True
+assert after['pending_review']['dismiss_only'] is legacy_review
 assert after['action_chain']['length'] == 1
 assert after['current_chain_rewards'][0]['state'] == 'claimed'
 assert after['recent_chain_links'][0]['reflection'] == 'Preserved successful work'
-assert len(after['recent_history']) == 2
-dismissed = request('review_dismiss')
-assert dismissed['pending_review'] is None
-assert dismissed['action_chain'] == after['action_chain']
-assert dismissed['current_chain_rewards'] == after['current_chain_rewards']
-record('legacy-review-dismissed', dismissed)
+assert sum(entry['kind'] == 'focus' for entry in after['recent_history']) == 2
+if legacy_review:
+    dismissed = request('review_dismiss')
+    assert dismissed['pending_review'] is None
+    assert dismissed['action_chain'] == after['action_chain']
+    assert dismissed['current_chain_rewards'] == after['current_chain_rewards']
+    record('legacy-review-dismissed', dismissed)
+else:
+    reviewed = request('review_success', reflection='Completed before upgrade')
+    assert reviewed['pending_review'] is None
+    assert reviewed['action_chain']['length'] == 2
+    assert reviewed['current_chain_rewards'] == after['current_chain_rewards']
+    record('completed-review-after-upgrade', reviewed)
 
 fresh('reservation')
 task = create_task()
