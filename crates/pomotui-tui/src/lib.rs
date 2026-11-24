@@ -2117,6 +2117,9 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         )));
     }
     for debt in &snapshot.reward_debt {
+        if debt.outstanding == 0 && debt.repaid == 0 {
+            continue;
+        }
         lines.push(Line::from(format!(
             "{}: {}  {}: {}",
             text(language, "Reward debt", "奖励欠额"),
@@ -2524,6 +2527,9 @@ fn append_earned_rewards(lines: &mut Vec<Line<'_>>, snapshot: &Snapshot, languag
 
 fn append_reward_debt(lines: &mut Vec<Line<'_>>, snapshot: &Snapshot, language: Language) {
     for debt in &snapshot.reward_debt {
+        if debt.outstanding == 0 && debt.repaid == 0 {
+            continue;
+        }
         lines.push(Line::from(format!(
             "{} {} · {} {} · {}",
             text(language, "Reward debt", "奖励欠额"),
@@ -4200,6 +4206,7 @@ fn chinese_help_lines(colors: Colors) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  : 命令面板   s 设置   ? 帮助   Esc 关闭浮层"),
+        Line::from("  s 再按 d  设置每日保链"),
         Line::from(""),
         Line::from("历史与列表"),
         Line::from("  gg/G 首项/末项（任务与历史） · u/d 上/下移五项"),
@@ -4259,6 +4266,7 @@ fn english_help_lines(colors: Colors) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  :  executable command palette            s  settings"),
+        Line::from("  s then d  Configure the Daily Chain Goal"),
         Line::from("  ? help · Esc closes any overlay"),
         Line::from(""),
         Line::from("HISTORY & LISTS"),
@@ -6709,6 +6717,57 @@ mod tests {
     }
 
     #[test]
+    fn reward_debt_status_omits_empty_milestone_accounts() {
+        use pomotui_protocol::RewardDebtSummary;
+
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.reward_debt = [
+            ("first", 0, 0),
+            ("second", 0, 0),
+            ("third", 0, 2),
+            ("fourth", 3, 0),
+        ]
+        .into_iter()
+        .map(
+            |(milestone_identity, outstanding, repaid)| RewardDebtSummary {
+                milestone_identity: milestone_identity.into(),
+                outstanding,
+                repaid,
+                excess_credit: 0,
+            },
+        )
+        .collect();
+
+        for view in [View::Rewards, View::Chain] {
+            let mut app = App::new(Some(state.clone()), Theme::VermilionPaperDark);
+            app.view = view;
+            app.language = Language::SimplifiedChinese;
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut app))
+                .expect("draw");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .replace(' ', "");
+
+            assert_eq!(rendered.matches("奖励欠额").count(), 2, "{view:?}");
+            assert!(
+                rendered.contains("奖励欠额0·已偿还2")
+                    || rendered.contains("奖励欠额:0已偿还成功:2")
+            );
+            assert!(
+                rendered.contains("奖励欠额3·已偿还0")
+                    || rendered.contains("奖励欠额:3已偿还成功:0")
+            );
+        }
+    }
+
+    #[test]
     fn rewards_page_renders_the_ladder_and_earned_rewards_without_internal_ids() {
         let mut state = snapshot("pending", SessionKind::Focus);
         state.reward_milestones = vec![pomotui_protocol::RewardMilestoneSummary {
@@ -7248,6 +7307,7 @@ mod tests {
 
         assert!(text.contains("NAVIGATION"));
         assert!(text.contains("SESSIONS"));
+        assert!(text.contains("s then d  Configure the Daily Chain Goal"));
         assert!(text.contains("TASKS"));
     }
 
@@ -7306,6 +7366,8 @@ mod tests {
         assert!(help.contains("导"));
         assert!(help.contains("时"));
         assert!(help.contains("任"));
+        let help = help.split_whitespace().collect::<String>();
+        assert!(help.contains("s再按d设置每日保链"), "{help}");
     }
 
     #[test]
