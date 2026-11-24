@@ -1,3 +1,5 @@
+mod support;
+
 use pomotui_protocol::{
     Command, Handler, PROTOCOL_VERSION, Request, Response, SessionKind, Snapshot,
 };
@@ -296,7 +298,12 @@ fn durable_reservation_recovers_identity_and_failed_commit_keeps_pending_state()
 
 #[test]
 fn running_paused_or_pending_session_review_prevents_reservation() {
-    let mut service = Service::new();
+    let clock = support::ManualClock::new(1_700_000_000);
+    let mut service = Service::new_with_clock(clock.clone());
+    service.configure_reminder(false, None, 100);
+    service
+        .configure_durations(pomotui_domain::SessionDurations::new(1, 1, 1).unwrap())
+        .unwrap();
     snapshot(send(
         &mut service,
         "start",
@@ -305,12 +312,20 @@ fn running_paused_or_pending_session_review_prevents_reservation() {
             task_id: None,
         },
     ));
-    for (index, transition) in [None, Some(Command::Pause), Some(Command::StopReview)]
+    for (index, transition) in [None, Some(Command::Pause), Some(Command::Resume)]
         .into_iter()
         .enumerate()
     {
         if let Some(command) = transition {
             snapshot(send(&mut service, &format!("transition-{index}"), command));
+        }
+        if index == 2 {
+            clock.advance(1);
+            assert!(
+                snapshot(send(&mut service, "complete", Command::Status))
+                    .pending_review
+                    .is_some()
+            );
         }
         assert!(matches!(
             send(

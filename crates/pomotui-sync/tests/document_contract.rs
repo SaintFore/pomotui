@@ -668,7 +668,7 @@ fn frozen_format_seven_non_genesis_upgrade_preserves_identity_and_checksum() {
         &pomotui_sync::Beginning::parse(2, "00000000-0000-4000-8000-000000000001").unwrap()
     );
     let output: serde_json::Value = serde_json::from_str(&upgraded.to_json().unwrap()).unwrap();
-    assert_eq!(output["version"], 8);
+    assert_eq!(output["version"], pomotui_sync::FORMAT_VERSION);
     assert_eq!(output["records"], input["records"]);
     assert_eq!(output["integrity"], input["integrity"]);
 }

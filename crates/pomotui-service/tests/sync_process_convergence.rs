@@ -1,5 +1,9 @@
+#[path = "support/process.rs"]
+mod process;
+
 use pomotui_protocol::{
-    Client, Command, PROTOCOL_VERSION, Request, Response, SessionKind, Snapshot,
+    Client, Command, DailyChainGoalSettings, PROTOCOL_VERSION, Request, Response, SessionKind,
+    Snapshot,
 };
 use pomotui_sync::Document;
 use std::path::{Path, PathBuf};
@@ -12,11 +16,16 @@ static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 struct TimerService {
     root: PathBuf,
     socket: PathBuf,
+    time_zone: Option<&'static str>,
     child: Option<Child>,
 }
 
 impl TimerService {
     fn start(root: PathBuf, rounds_per_cycle: u8) -> Self {
+        Self::start_in_zone(root, rounds_per_cycle, None)
+    }
+
+    fn start_in_zone(root: PathBuf, rounds_per_cycle: u8, time_zone: Option<&'static str>) -> Self {
         std::fs::create_dir_all(root.join("runtime")).expect("runtime directory");
         std::fs::create_dir_all(root.join("data")).expect("data directory");
         std::fs::create_dir_all(root.join("config/pomotui")).expect("config directory");
@@ -29,7 +38,11 @@ impl TimerService {
         .expect("service configuration");
         let socket = root.join("runtime/pomotui.sock");
         let log = std::fs::File::create(root.join("service.log")).expect("service log");
-        let child = ProcessCommand::new(env!("CARGO_BIN_EXE_pomotui-service"))
+        let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_pomotui-service"));
+        if let Some(time_zone) = time_zone {
+            command.env("TZ", time_zone);
+        }
+        let child = command
             .env("POMOTUI_SOCKET", &socket)
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_CONFIG_HOME", root.join("config"))
@@ -40,6 +53,7 @@ impl TimerService {
         let mut service = Self {
             root,
             socket,
+            time_zone,
             child: Some(child),
         };
         service.wait_until_ready();
@@ -119,7 +133,8 @@ impl TimerService {
 
     fn restart(&mut self, rounds_per_cycle: u8) {
         self.stop();
-        let mut replacement = Self::start(self.root.clone(), rounds_per_cycle);
+        let mut replacement =
+            Self::start_in_zone(self.root.clone(), rounds_per_cycle, self.time_zone);
         self.socket.clone_from(&replacement.socket);
         self.child = replacement.child.take();
     }
@@ -163,7 +178,7 @@ fn create_task(service: &TimerService, title: &str) -> u64 {
     task_id(service, title)
 }
 
-fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
+fn completed_review(service: &TimerService, task: u64, reflection: &str) {
     assert!(matches!(
         service.request(Command::Start {
             kind: SessionKind::Focus,
@@ -171,11 +186,7 @@ fn stopped_review(service: &TimerService, task: u64, reflection: &str) {
         }),
         Response::Snapshot { .. }
     ));
-    std::thread::sleep(Duration::from_millis(1_100));
-    assert!(matches!(
-        service.request(Command::StopReview),
-        Response::Snapshot { .. }
-    ));
+    process::wait_for_focus_review(|| service.snapshot().pending_review.is_some());
     assert!(matches!(
         service.request(Command::ReviewSuccess {
             reflection: Some(reflection.into()),
@@ -205,7 +216,11 @@ fn sync_now(service: &TimerService) {
     });
 }
 
-fn rebuild(service: &TimerService) {
+fn rebuild_missing_exchange(service: &TimerService, path: &Path) {
+    assert!(
+        !path.exists(),
+        "rebuild requires a missing exchange in this test"
+    );
     assert!(matches!(
         service.request(Command::SyncRebuild),
         Response::Data { .. }
@@ -214,9 +229,9 @@ fn rebuild(service: &TimerService) {
         let status = service.data(Command::SyncStatus);
         !status["in_progress"].as_bool().unwrap_or(false)
             && status["last_error"].is_null()
-            && status["warning"]
-                .as_str()
-                .is_some_and(|warning| warning.contains("unseen remote"))
+            && status["last_success"].is_number()
+            && std::fs::read_to_string(path)
+                .is_ok_and(|source| Document::from_json(&source).is_ok())
     });
 }
 
@@ -293,6 +308,60 @@ fn assert_timer_commands_still_work(service: &TimerService) {
 }
 
 #[test]
+fn connected_timer_services_keep_one_goal_calendar_in_different_local_time_zones() {
+    let root = test_root();
+    let exchange = root.join("pomotui.sync");
+    let first = TimerService::start_in_zone(root.join("first"), 4, Some("Etc/GMT+12"));
+    let mut second =
+        TimerService::start_in_zone(root.join("second"), 4, Some("Pacific/Kiritimati"));
+    let first_before = first.snapshot().daily_chain_goal;
+    let second_before = second.snapshot().daily_chain_goal;
+    assert_ne!(
+        first_before.device_local_date,
+        second_before.device_local_date
+    );
+
+    let future = chrono::NaiveDate::parse_from_str(&second_before.device_local_date, "%Y-%m-%d")
+        .expect("local date")
+        .checked_add_days(chrono::Days::new(5))
+        .expect("future date")
+        .to_string();
+    let goal = DailyChainGoalSettings {
+        quota: 4,
+        start_date: Some(future.clone()),
+        end_date: None,
+        time_zone: second_before.device_time_zone,
+    };
+    let Response::Snapshot { snapshot } = first.request(Command::ConfigureDailyChainGoal {
+        settings: Some(goal.clone()),
+    }) else {
+        panic!("configure shared goal");
+    };
+    let configured = snapshot.daily_chain_goal;
+    assert_ne!(configured.date, configured.device_local_date);
+    let scheduled = configured.scheduled.expect("scheduled goal");
+    assert_eq!(scheduled.effective_date, future);
+    assert_eq!(scheduled.settings, Some(goal));
+
+    enable(&first, &exchange);
+    rebuild_missing_exchange(&first, &exchange);
+    enable(&second, &exchange);
+    sync_now(&second);
+    wait_until("shared goal", || {
+        second.snapshot().daily_chain_goal.scheduled.as_ref() == Some(&scheduled)
+    });
+
+    second.restart(4);
+    let after = second.snapshot().daily_chain_goal;
+    assert_eq!(after.scheduled, Some(scheduled));
+    assert_eq!(after.date, after.device_local_date);
+    assert_eq!(after.device_time_zone, "Pacific/Kiritimati");
+    drop(second);
+    drop(first);
+    std::fs::remove_dir_all(root).expect("remove test state");
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     let root = test_root();
@@ -308,7 +377,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         budget: Some(12),
     });
     let first_task = create_task(&first, "Written on first");
-    stopped_review(&first, first_task, "first reflection");
+    completed_review(&first, first_task, "first reflection");
     let first_link = first.data(Command::ActionChainCurrent)["links"][0]["id"]
         .as_u64()
         .expect("first chain link");
@@ -323,12 +392,12 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     first.request(Command::RewardClaim { unlock_id: unlock });
 
     let second_task = create_task(&second, "Written on second");
-    stopped_review(&second, second_task, "second reflection");
-    assert_eq!(first.snapshot().completed_rounds, 0);
-    assert_eq!(second.snapshot().completed_rounds, 0);
+    completed_review(&second, second_task, "second reflection");
+    assert_eq!(first.snapshot().completed_rounds, 1);
+    assert_eq!(second.snapshot().completed_rounds, 1);
 
     enable(&first, &sync_path);
-    rebuild(&first);
+    rebuild_missing_exchange(&first, &sync_path);
     let old_file = std::fs::read(&sync_path).expect("first Device document");
     enable(&second, &sync_path);
     sync_now(&second);
@@ -340,8 +409,8 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         normalized_shared_state(&second)
     );
     assert!(first.snapshot().today.focus_seconds >= 2);
-    assert_eq!(first.snapshot().completed_rounds, 0);
-    assert_eq!(second.snapshot().completed_rounds, 0);
+    assert_eq!(first.snapshot().completed_rounds, 1);
+    assert_eq!(second.snapshot().completed_rounds, 1);
     assert_eq!(first.snapshot().rounds_per_cycle, 4);
     assert_eq!(second.snapshot().rounds_per_cycle, 7);
 
@@ -357,16 +426,18 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
         first.request(Command::Pause),
         Response::Error { .. }
     ));
+    // Keep the pending-review Session offline until the stale-file replay begins.
+    second.request(Command::SyncDisable);
     let pending_task = create_task(&second, "Pending only on second");
+    assert!(matches!(
+        second.request(Command::Skip),
+        Response::Snapshot { .. }
+    ));
     second.request(Command::Start {
         kind: SessionKind::Focus,
         task_id: Some(pending_task),
     });
-    std::thread::sleep(Duration::from_millis(20));
-    second.request(Command::StopReview);
-    wait_until("second Pending Review", || {
-        second.snapshot().pending_review.is_some()
-    });
+    process::wait_for_focus_review(|| second.snapshot().pending_review.is_some());
     assert_eq!(first.snapshot().state, "paused");
     assert!(first.snapshot().pending_review.is_none());
     assert!(second.snapshot().pending_review.is_some());
@@ -374,6 +445,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     let before_replay = normalized_shared_state(&first);
     std::fs::write(&sync_path, &old_file).expect("overwrite with old document");
     sync_now(&first);
+    enable(&second, &sync_path);
     sync_now(&second);
     sync_now(&first);
     let after_old_file_recovery = normalized_shared_state(&first);
@@ -399,7 +471,7 @@ fn two_timer_services_converge_and_recover_without_sharing_live_state() {
     let retained_only_by_first = create_task(&first, "Restored by retained replica");
     assert!(retained_only_by_first > 0);
     std::fs::remove_file(&sync_path).expect("delete exchange file");
-    rebuild(&second);
+    rebuild_missing_exchange(&second, &sync_path);
     enable(&first, &sync_path);
     sync_now(&first);
     sync_now(&second);
@@ -452,13 +524,13 @@ fn separate_replica_directories_recover_conflict_records_and_replay() {
     let first_path = root.join("first/transport/custom.sync");
     let second_path = root.join("second/transport/custom.sync");
     let task = create_task(&first, "Offline first");
-    stopped_review(&first, task, "first review");
+    completed_review(&first, task, "first review");
     let task = create_task(&second, "Offline second");
-    stopped_review(&second, task, "second review");
+    completed_review(&second, task, "second review");
     enable(&first, &first_path);
-    rebuild(&first);
+    rebuild_missing_exchange(&first, &first_path);
     enable(&second, &second_path);
-    rebuild(&second);
+    rebuild_missing_exchange(&second, &second_path);
     let first_bytes = std::fs::read(&first_path).expect("first document");
     let second_bytes = std::fs::read(&second_path).expect("second document");
     let sibling = first_path.with_file_name("custom.sync-conflict-20261005-120000-ABCDEFG.sync");
