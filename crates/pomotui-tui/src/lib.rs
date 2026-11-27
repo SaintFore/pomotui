@@ -1126,7 +1126,9 @@ impl App {
     }
 
     fn jump_first(&mut self) {
-        if self.view == View::History {
+        if self.view == View::Chain {
+            self.chain_cursor = 0;
+        } else if self.view == View::History {
             self.history_cursor = 0;
         } else {
             self.selected_task = 0;
@@ -1134,7 +1136,11 @@ impl App {
     }
 
     fn jump_last(&mut self) {
-        if self.view == View::History {
+        if self.view == View::Chain {
+            self.chain_cursor = self.snapshot.as_ref().map_or(0, |snapshot| {
+                snapshot.recent_chain_links.len().saturating_sub(1)
+            });
+        } else if self.view == View::History {
             self.history_cursor = self.snapshot.as_ref().map_or(0, |snapshot| {
                 snapshot.recent_history.len().saturating_sub(1)
             });
@@ -1148,7 +1154,9 @@ impl App {
 
     fn page_move(&mut self, forward: bool) {
         for _ in 0..5 {
-            if self.view == View::History {
+            if self.view == View::Chain {
+                self.move_chain_cursor(forward);
+            } else if self.view == View::History {
                 self.scroll_history(forward);
             } else {
                 self.move_task(forward);
@@ -7546,6 +7554,32 @@ mod tests {
                 task_id: Some(2),
             }))
         );
+    }
+
+    #[test]
+    fn current_chain_page_and_jump_keys_move_the_chain_cursor() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.recent_chain_links = (1..=44)
+            .map(|id| pomotui_protocol::ChainLinkSummary {
+                id,
+                task_title: format!("Link {id}"),
+                actual_seconds: 3_000,
+                reflection: None,
+                chain_entry_title: None,
+            })
+            .collect();
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.view = View::Chain;
+        app.key('d');
+        assert_eq!(app.chain_cursor, 5);
+        app.key('u');
+        assert_eq!(app.chain_cursor, 0);
+        app.key('G');
+        assert_eq!(app.chain_cursor, 43);
+        app.key('g');
+        app.key('g');
+        assert_eq!(app.chain_cursor, 0);
+        assert_eq!(app.selected_task, 0);
     }
 
     #[test]
