@@ -28,6 +28,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 mod daily_chain_goal;
+mod focus_activity;
 mod sync_worker;
 pub use sync_worker::{SyncFileAdapter, SyncServiceHandler, SyncWorker, SyncWorkerTrigger};
 
@@ -4116,6 +4117,11 @@ impl Handler for Service {
                         "completed_rounds": summary.completed_rounds,
                         "average_focus_seconds": summary.average_focus_seconds(),
                     }),
+                };
+            }
+            Command::FocusActivity { range } => {
+                return Response::Data {
+                    value: self.focus_activity(range),
                 };
             }
             Command::ReviewDismiss => {

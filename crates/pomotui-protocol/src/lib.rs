@@ -20,6 +20,14 @@ pub enum SessionKind {
     LongBreak,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusActivityRange {
+    Today,
+    Yesterday,
+    LastSevenDays,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
@@ -85,6 +93,9 @@ pub enum Command {
     },
     History,
     Summary,
+    FocusActivity {
+        range: FocusActivityRange,
+    },
     ReviewDismiss,
     ReviewSuccess {
         reflection: Option<String>,
@@ -164,6 +175,7 @@ impl Command {
                 | Self::TaskList
                 | Self::History
                 | Self::Summary
+                | Self::FocusActivity { .. }
                 | Self::ActionChainCurrent
                 | Self::ActionChainArchive
                 | Self::Rewards
