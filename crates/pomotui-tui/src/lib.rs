@@ -2072,19 +2072,50 @@ fn dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
 
 fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
     let language = app.language;
-    let snapshot = app.snapshot.as_ref();
-    let Some(snapshot) = snapshot else {
+    let block = panel(text(language, "ACTION CHAIN", "行动链"), colors);
+    let Some(snapshot) = &app.snapshot else {
         frame.render_widget(
             Paragraph::new(text(
                 language,
                 "Waiting for Timer Service",
                 "正在等待计时服务",
             ))
-            .block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
+            .block(block),
             area,
         );
         return;
     };
+    let mut lines = chain_header_lines(snapshot, colors, language);
+    let scroll = if snapshot.recent_chain_links.is_empty() {
+        lines.push(Line::from(text(
+            language,
+            "Complete and review a Focus Session to add the first link.",
+            "完成并复盘一次专注时段以添加第一个节点。",
+        )));
+        0
+    } else {
+        let cursor = app.chain_cursor.min(snapshot.recent_chain_links.len() - 1);
+        let visible_height = usize::from(block.inner(area).height);
+        // Each link occupies one title line and one Reflection line.
+        let selected_row = lines.len() + cursor * 2;
+        let scroll = (selected_row + visible_height.min(2)).saturating_sub(visible_height);
+        lines.extend(chain_link_lines(snapshot, cursor, colors, language));
+        lines.push(Line::from(""));
+        lines.push(Line::from(text(
+            language,
+            "j/k select · E edit Reflection · T edit title",
+            "j/k 选择 · E 编辑复盘 · T 编辑标题",
+        )));
+        u16::try_from(scroll).unwrap_or(u16::MAX)
+    };
+    frame.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
+}
+
+fn chain_header_lines(
+    snapshot: &Snapshot,
+    colors: Colors,
+    language: Language,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!(
@@ -2145,30 +2176,7 @@ fn chain_view(frame: &mut Frame<'_>, area: Rect, app: &App, colors: Colors) {
         snapshot.reward_milestones.len(),
     )));
     lines.push(Line::from(""));
-    if snapshot.recent_chain_links.is_empty() {
-        lines.push(Line::from(text(
-            language,
-            "Complete and review a Focus Session to add the first link.",
-            "完成并复盘一次专注时段以添加第一个节点。",
-        )));
-    } else {
-        lines.extend(chain_link_lines(
-            snapshot,
-            app.chain_cursor,
-            colors,
-            language,
-        ));
-        lines.push(Line::from(""));
-        lines.push(Line::from(text(
-            language,
-            "j/k select · E edit Reflection · T edit title",
-            "j/k 选择 · E 编辑复盘 · T 编辑标题",
-        )));
-    }
-    frame.render_widget(
-        Paragraph::new(lines).block(panel(text(language, "ACTION CHAIN", "行动链"), colors)),
-        area,
-    );
+    lines
 }
 
 fn chain_link_lines(
@@ -7554,6 +7562,53 @@ mod tests {
                 task_id: Some(2),
             }))
         );
+    }
+
+    #[test]
+    fn current_chain_navigation_keeps_selected_link_and_reflection_visible() {
+        let mut state = snapshot("pending", SessionKind::Focus);
+        state.action_chain.length = 44;
+        state.recent_chain_links = (1..=44)
+            .map(|id| pomotui_protocol::ChainLinkSummary {
+                id,
+                task_title: format!("Link {id}"),
+                actual_seconds: 3_000,
+                reflection: Some(format!("Reflection {id}")),
+                chain_entry_title: None,
+            })
+            .collect();
+        let mut app = App::new(Some(state), Theme::VermilionPaperDark);
+        app.view = View::Chain;
+        for (width, height) in [(80, 24), (48, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            app.chain_cursor = 0;
+            for id in (1..=44).chain((1..44).rev()) {
+                while app.chain_cursor + 1 != id {
+                    app.key(if app.chain_cursor + 1 < id { 'j' } else { 'k' });
+                }
+                terminal
+                    .draw(|frame| render(frame, &mut app))
+                    .expect("draw chain");
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                assert!(
+                    rendered.contains(&format!(
+                        "› {} {id}.  Link {id}",
+                        if id == 44 { "└─" } else { "├─" }
+                    )),
+                    "selected link {id} must stay visible at {width}x{height}"
+                );
+                assert!(
+                    rendered.contains(&format!("Reflection {id}")),
+                    "selected reflection {id} must stay visible"
+                );
+            }
+        }
     }
 
     #[test]
