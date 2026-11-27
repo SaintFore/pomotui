@@ -194,6 +194,11 @@ terminals. Its primary controls are:
 
 ## Use the CLI
 
+Run `pomotui --help` to find commands, or `pomotui activity --help` for review
+queries. Ask your AI assistant to run `pomotui activity today --json` and draft
+a review from your Focus Sessions, time spent, and recorded Reflections. The
+same query supports `yesterday` and `last-7-days`.
+
 ```sh
 pomotui task create "Write release notes"
 pomotui task list

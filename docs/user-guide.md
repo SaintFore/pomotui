@@ -55,6 +55,32 @@ Use `pomotui start focus`, `pause`, `resume`, `stop`, or `skip`. Task commands
 are `task list/create/rename/complete/reopen/delete`; mutations by ID remain
 unambiguous. `history`, `summary`, and `status --json` are scriptable.
 
+### Gather records for a review
+
+Run `pomotui --help` or `pomotui activity --help` to find the query syntax.
+Both help commands work when the Timer Service is stopped.
+
+```sh
+pomotui activity today --json
+pomotui activity yesterday --json
+pomotui activity last-7-days --json
+```
+
+`activity` defaults to today. The seven-day range includes today and the
+previous six local calendar days. Each completed or stopped Focus Session
+belongs to the local date on which it ended. The JSON response contains inclusive
+`value.from_date` and `value.through_date` bounds and `value.sessions` in
+chronological order. Each entry includes its Task title snapshot, end time with
+UTC offset, planned and actual seconds, outcome, and any retained Session
+Review. A pending Session Review has `status: "pending"`. A null review means
+there is no retained Session Review for that session.
+
+For example, ask an AI assistant to run `pomotui activity today --json` and
+draft a daily review from your Task titles, time spent, and Reflections. Ask
+it to flag sessions where you need to supply details about your progress.
+
+### Configure Waybar
+
 Waybar custom-module example:
 
 ```json

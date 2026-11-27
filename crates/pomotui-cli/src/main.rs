@@ -1,4 +1,4 @@
-use pomotui_cli::{parse, render, request};
+use pomotui_cli::{help, parse, render, request};
 use pomotui_protocol::Client;
 
 fn main() {
@@ -12,6 +12,10 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if let Some(help) = help(&args) {
+        print!("{help}");
+        return Ok(());
+    }
     if args == ["reset", "--all-data", "--confirm"] {
         let outcome = pomotui_cli::reset_all_data(&database_path(), &socket_path())?;
         if let Some(backup) = outcome.backup {

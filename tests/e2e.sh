@@ -40,6 +40,12 @@ stop_service() {
   rm -f "$POMOTUI_SOCKET"
 }
 
+help=$(target/debug/pomotui --help)
+printf '%s\n' "$help" | grep -F 'pomotui activity today --json' >/dev/null
+activity_help=$(target/debug/pomotui activity --help)
+printf '%s\n' "$activity_help" |
+  grep -Fx 'Usage: pomotui activity [today|yesterday|last-7-days] [--json]' >/dev/null
+
 start_service
 target/debug/pomotui task create "Persistent Task"
 target/debug/pomotui start focus --task 1
@@ -71,6 +77,12 @@ history=$(target/debug/pomotui history --json)
 case "$history" in
   *'"outcome":"Stopped"'*'"task_title":"Persistent Task"'*) ;;
   *) printf '%s\n' "history did not preserve Task snapshot: $history"; exit 1 ;;
+esac
+
+activity=$(target/debug/pomotui activity last-7-days --json)
+case "$activity" in
+  *'"result":"data"'*'"outcome":"stopped"'*'"review":null'*'"task_title":"Persistent Task"'*) ;;
+  *) printf '%s\n' "activity did not include the stopped Focus Session: $activity"; exit 1 ;;
 esac
 
 stop_service

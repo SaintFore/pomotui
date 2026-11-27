@@ -2,7 +2,12 @@
 
 use std::fmt::Write as _;
 
-use pomotui_protocol::{Command, PROTOCOL_VERSION, ProtocolError, Request, Response, SessionKind};
+use pomotui_protocol::{
+    Command, FocusActivityRange, PROTOCOL_VERSION, ProtocolError, Request, Response, SessionKind,
+};
+
+mod help;
+pub use help::help;
 
 #[allow(clippy::too_many_lines)]
 pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
@@ -17,25 +22,48 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["fresh-start"] => return Err("Fresh Start requires --confirm".into()),
         ["status" | "waybar"] | ["reservation", "status"] => Command::Status,
         ["reserve", options @ ..] => parse_reservation(options)?,
-        ["reservation", "cancel", "success", id] | ["reservation", "success", id] => Command::ReservationSuccess { id: (*id).into() },
+        ["reservation", "cancel", "success", id] | ["reservation", "success", id] => {
+            Command::ReservationSuccess { id: (*id).into() }
+        }
         ["reservation", "failure", id, "--confirm"]
         | ["reservation", "cancel", "failure", id, "--confirm"] => Command::ReservationFailure {
-            id: (*id).into(), reflection: String::new(), confirmed: true,
+            id: (*id).into(),
+            reflection: String::new(),
+            confirmed: true,
         },
-        ["reservation", "failure", id]
-        | ["reservation", "cancel", "failure", id] => Command::ReservationFailure {
-            id: (*id).into(), reflection: String::new(), confirmed: false,
-        },
+        ["reservation", "failure", id] | ["reservation", "cancel", "failure", id] => {
+            Command::ReservationFailure {
+                id: (*id).into(),
+                reflection: String::new(),
+                confirmed: false,
+            }
+        }
         ["reservation", "failure", id, reflection, "--confirm"]
-        | ["reservation", "cancel", "failure", id, reflection, "--confirm"] => Command::ReservationFailure {
-            id: (*id).into(), reflection: (*reflection).into(), confirmed: true,
+        | [
+            "reservation",
+            "cancel",
+            "failure",
+            id,
+            reflection,
+            "--confirm",
+        ] => Command::ReservationFailure {
+            id: (*id).into(),
+            reflection: (*reflection).into(),
+            confirmed: true,
         },
         ["reservation", "failure", id, reflection]
         | ["reservation", "cancel", "failure", id, reflection] => Command::ReservationFailure {
-            id: (*id).into(), reflection: (*reflection).into(), confirmed: false,
+            id: (*id).into(),
+            reflection: (*reflection).into(),
+            confirmed: false,
         },
-        ["reservation", "minutes", minutes] => Command::ConfigureReservation { minutes: parse_minutes(minutes)? },
-        ["start", "focus"] => Command::Start { kind: SessionKind::Focus, task_id: None },
+        ["reservation", "minutes", minutes] => Command::ConfigureReservation {
+            minutes: parse_minutes(minutes)?,
+        },
+        ["start", "focus"] => Command::Start {
+            kind: SessionKind::Focus,
+            task_id: None,
+        },
         ["start", "focus", "--task", id] => Command::Start {
             kind: SessionKind::Focus,
             task_id: Some(parse_id(id)?),
@@ -43,21 +71,41 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["start", "focus", "--title", title] => Command::StartTitle {
             title: (*title).into(),
         },
-        ["start", "short-break"] => Command::Start { kind: SessionKind::ShortBreak, task_id: None },
-        ["start", "long-break"] => Command::Start { kind: SessionKind::LongBreak, task_id: None },
+        ["start", "short-break"] => Command::Start {
+            kind: SessionKind::ShortBreak,
+            task_id: None,
+        },
+        ["start", "long-break"] => Command::Start {
+            kind: SessionKind::LongBreak,
+            task_id: None,
+        },
         ["pause"] => Command::Pause,
         ["resume"] => Command::Resume,
         ["stop"] | ["stop", "--no-review"] => Command::Stop,
         ["stop", "--review"] => Command::StopReview,
         ["skip"] => Command::Skip,
         ["task", "list"] => Command::TaskList,
-        ["task", "create", title] => Command::TaskCreate { title: (*title).into() },
-        ["task", "rename", id, title] => Command::TaskRename { id: parse_id(id)?, title: (*title).into() },
+        ["task", "create", title] => Command::TaskCreate {
+            title: (*title).into(),
+        },
+        ["task", "rename", id, title] => Command::TaskRename {
+            id: parse_id(id)?,
+            title: (*title).into(),
+        },
         ["task", "complete", id] => Command::TaskComplete { id: parse_id(id)? },
         ["task", "reopen", id] => Command::TaskReopen { id: parse_id(id)? },
         ["task", "delete", id] => Command::TaskDelete { id: parse_id(id)? },
         ["history"] => Command::History,
         ["summary"] => Command::Summary,
+        ["activity"] | ["activity", "today"] => Command::FocusActivity {
+            range: FocusActivityRange::Today,
+        },
+        ["activity", "yesterday"] => Command::FocusActivity {
+            range: FocusActivityRange::Yesterday,
+        },
+        ["activity", "last-7-days"] => Command::FocusActivity {
+            range: FocusActivityRange::LastSevenDays,
+        },
         ["review", "dismiss"] => Command::ReviewDismiss,
         ["review", "success"] => Command::ReviewSuccess { reflection: None },
         ["review", "success", "--reflection", reflection] => Command::ReviewSuccess {
@@ -75,14 +123,19 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
             chain_entry_title: Some((*title).into()),
             reflection: None,
         },
-        ["review", "success", "--void", title, "--reflection", reflection] => {
-            Command::ReviewSuccessAssign {
-                task_id: None,
-                use_void: true,
-                chain_entry_title: Some((*title).into()),
-                reflection: Some((*reflection).into()),
-            }
-        }
+        [
+            "review",
+            "success",
+            "--void",
+            title,
+            "--reflection",
+            reflection,
+        ] => Command::ReviewSuccessAssign {
+            task_id: None,
+            use_void: true,
+            chain_entry_title: Some((*title).into()),
+            reflection: Some((*reflection).into()),
+        },
         ["chain"] => Command::ActionChainCurrent,
         ["chain", "archive"] => Command::ActionChainArchive,
         ["chain", "edit", id, "--reflection", reflection] => Command::ChainEntryEdit {
@@ -95,13 +148,19 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
             reflection: None,
             chain_entry_title: Some((*title).into()),
         },
-        ["chain", "edit", id, "--title", title, "--reflection", reflection] => {
-            Command::ChainEntryEdit {
-                id: parse_id(id)?,
-                reflection: Some((*reflection).into()),
-                chain_entry_title: Some((*title).into()),
-            }
-        }
+        [
+            "chain",
+            "edit",
+            id,
+            "--title",
+            title,
+            "--reflection",
+            reflection,
+        ] => Command::ChainEntryEdit {
+            id: parse_id(id)?,
+            reflection: Some((*reflection).into()),
+            chain_entry_title: Some((*title).into()),
+        },
         ["review", "failure", reflection] => Command::ReviewFailure {
             reflection: (*reflection).into(),
             task_id: None,
@@ -141,12 +200,14 @@ pub fn parse(args: &[String]) -> Result<(Command, bool, bool), String> {
         ["reward", "claim", id] => Command::RewardClaim {
             unlock_id: parse_id(id)?,
         },
-        ["sync", "enable", path] => Command::SyncEnable { path: (*path).into() },
+        ["sync", "enable", path] => Command::SyncEnable {
+            path: (*path).into(),
+        },
         ["sync", "disable"] => Command::SyncDisable,
         ["sync", "now"] => Command::SyncNow,
         ["sync", "rebuild"] => Command::SyncRebuild,
         ["sync", "status"] => Command::SyncStatus,
-        _ => return Err("usage: pomotui [--json] status|fresh-start --confirm|reserve [--minutes MINUTES] [--task ID|--no-task]|reservation <status|success ID|failure ID [REFLECTION] [--confirm]|cancel <success ID|failure ID [REFLECTION] [--confirm]>|minutes MINUTES>|start focus [--task ID|--title TITLE]|start <short-break|long-break>|pause|resume|stop (ends the Action Chain during Focus)|skip|review <success|failure|dismiss>|task ...|history|summary|sync <enable PATH|disable|now|rebuild|status>|waybar".into()),
+        _ => return Err(help::usage_error(&words)),
     };
     Ok((command, json, words == ["waybar"]))
 }

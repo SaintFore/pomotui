@@ -169,6 +169,10 @@ pomotui-tui
 
 ## 使用 CLI
 
+运行 `pomotui --help` 查看命令，或用 `pomotui activity --help` 查看复盘查询示例。
+可以让 AI 执行 `pomotui activity today --json`，根据你的专注会话、实际用时和已有复盘写出当天的复盘草稿。
+也支持用 `yesterday` 和 `last-7-days` 查询昨天和最近七天。
+
 ```sh
 pomotui task create "写发布说明"
 pomotui task list
